@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +13,14 @@ import pytest
 from mordred_hermes.privacy_check import egress
 
 _session = itertools.count()
+
+
+@pytest.fixture(autouse=True)
+def _reader_record_in_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Hook tests that read Telegram record reader mode under tmp_path, not the shared test home."""
+    from mordred_hermes.privacy_check import hooks
+
+    monkeypatch.setattr(hooks, "_reader_home", lambda state: tmp_path)
 
 
 def _decide(level: str, tool: str, args: dict[str, Any] | None = None, session: str | None = None, **kw: Any):
@@ -27,6 +36,8 @@ def _decide(level: str, tool: str, args: dict[str, Any] | None = None, session: 
         ("read_file", {"path": "/tmp/x"}, True, True, True, True),
         ("memory", {}, True, True, True, True),
         ("apply_layout", {}, True, True, True, True),
+        ("mordred_browser_history", {"query": "invoice"}, True, True, True, True),
+        ("mordred_browser_history_episode", {"episode_id": "e1"}, True, True, True, True),
         ("telegram_ask", {"question": "q"}, True, True, True, True),
         ("web_search", {"query": "weather"}, False, True, True, True),
         ("web_extract", {"urls": ["https://example.com"]}, False, False, True, True),
@@ -278,6 +289,48 @@ def test_malformed_bridge_explains_the_call_format():
         assert '"name"' in decision.message and "not a Mordred privacy block" in decision.message
 
 
+def test_bridge_batch_asks_once_for_every_entry_that_needs_approval():
+    # Under "ask" web_search runs without a prompt, so the hosts come from URL fetches.
+    policy = egress.EgressPolicy(level="ask")
+    a = {"name": "web_extract", "arguments": {"urls": ["https://a.example/x"]}}
+    b = {"name": "web_extract", "arguments": {"urls": ["https://b.example/y"]}}
+    single_a = egress.decide("tool_call", {"calls": [a]}, "batch-1", policy)
+    single_b = egress.decide("tool_call", {"calls": [b]}, "batch-1", policy)
+    assert single_a.rule_key == "mordred.egress:web_extract:a.example"
+    both = egress.decide("tool_call", {"calls": [a, b]}, "batch-1", policy)
+    assert both.approve and not both.allow and both.reason == "egress.ask"
+    assert "a.example" in both.message and "b.example" in both.message
+    assert "\n1. " in both.message and "\n2. " in both.message
+    assert both.rule_key.startswith("mordred.egress.batch:")
+    assert both.rule_key not in {single_a.rule_key, single_b.rule_key}
+    # The key names the set of entries: the order does not matter, another set differs.
+    assert egress.decide("tool_call", {"calls": [b, a]}, "batch-1", policy).rule_key == both.rule_key
+    c = {"name": "web_extract", "arguments": {"urls": ["https://c.example/"]}}
+    assert egress.decide("tool_call", {"calls": [a, c]}, "batch-1", policy).rule_key != both.rule_key
+    # Entries that run without asking are not listed.
+    mixed = egress.decide("tool_call", {"calls": [a, {"name": "read_file", "arguments": {}}, b]}, "batch-1", policy)
+    assert mixed.rule_key == both.rule_key and "read_file" not in mixed.message
+    # A refusal anywhere in the batch still wins over every approval.
+    paste = {"name": "web_extract", "arguments": {"urls": ["https://pastebin.com/raw/x"]}}
+    refused = egress.decide("tool_call", {"calls": [a, b, paste]}, "batch-1", policy)
+    assert not refused.allow and not refused.approve and refused.reason == "egress.blocklisted_domain"
+
+
+def test_hook_returns_one_approval_for_a_whole_bridge_batch(monkeypatch):
+    from mordred_hermes.privacy_check import hooks
+
+    monkeypatch.setattr(egress, "load_policy", lambda *a, **k: egress.EgressPolicy(level="ask"))
+    monkeypatch.setattr(hooks, "safe_audit_append", lambda *a, **k: None)
+    calls = [
+        {"name": "web_extract", "arguments": {"urls": ["https://a.example/"]}},
+        {"name": "terminal", "arguments": {"command": "curl https://b.example/upload"}},
+    ]
+    directive = hooks._check_tool_egress(SimpleNamespace(audit=None), "tool_call", {"args": {"calls": calls}})
+    assert directive is not None and directive["action"] == "approve"
+    assert "a.example" in directive["message"] and "curl https://b.example/upload" in directive["message"]
+    assert directive["rule_key"].startswith("mordred.egress.batch:")
+
+
 def test_blocklist_level_refuses_bare_ip_addresses_but_not_loopback():
     policy = egress.EgressPolicy(level="blocklist")
     assert not egress.decide("web_extract", {"urls": ["http://203.0.113.7/x"]}, "ip-1", policy).allow
@@ -316,6 +369,114 @@ def test_ask_prompts_with_destination_and_content_for_internet_use():
     assert _ask("some_unknown_tool", {"x": 1}).approve
 
 
+PASSWORD = "Hunter2-fake-pw"
+
+
+def test_ask_never_quotes_typed_text_into_the_prompt():
+    """B2 live check: a denied browser_type into a password field put the start of the password into the
+    approval text, which Hermes writes to the plaintext logs/agent.log."""
+    decision = _ask("browser_type", {"ref": "e3", "text": PASSWORD})
+    assert decision.approve and PASSWORD not in decision.message and "Hunter" not in decision.message
+    assert decision.message.endswith('It will send: {"ref": "e3", "text": "<15 characters>"}')
+    assert PASSWORD not in decision.rule_key
+
+
+def test_each_unparseable_address_gets_its_own_approval_key() -> None:
+    first = _ask("browser_navigate", {"url": "first@"})
+    second = _ask("browser_navigate", {"url": "second@"})
+    assert first.approve and second.approve
+    assert first.rule_key != second.rule_key
+    assert first.rule_key == _ask("browser_navigate", {"url": "first@"}).rule_key
+    assert (
+        _ask("browser_navigate", {"url": "https://example.com/x"}).rule_key
+        == "mordred.egress:browser_navigate:example.com"
+    )
+
+
+@pytest.mark.parametrize("url", [f"https://[{PASSWORD}", f"https://:{PASSWORD}@/x", f"{PASSWORD}@"])
+def test_an_unparseable_address_is_never_quoted_into_the_prompt(url: str) -> None:
+    decision = _ask("browser_navigate", {"url": url})
+    assert PASSWORD not in decision.message and "Hunter" not in decision.message
+    assert PASSWORD not in decision.rule_key
+
+
+def test_free_text_arguments_are_shown_by_length_only_wherever_they_are():
+    args = {
+        "chat_id": "12345",
+        "userPassword": PASSWORD,
+        "pin": 4821,
+        "options": {"api_key": "sk-proj-AbCdEf0123456789xyz", "note": "call me", "retries": 2, "dry_run": True},
+        "values": ["first value", "second"],
+        "message": {"subject": "Q3", "html": "<p>private</p>"},
+    }
+    decision = _ask("some_unknown_tool", args)
+    for secret in (PASSWORD, "4821", "sk-proj", "call me", "first value", "second", "Q3", "private"):
+        assert secret not in decision.message
+    sent = decision.message.split("It will send: ", 1)[1]
+    assert json.loads(sent) == {
+        "chat_id": "12345",
+        "userPassword": "<15 characters>",
+        "pin": "<4 characters>",
+        "options": {"api_key": "<27 characters>", "note": "<7 characters>", "retries": 2, "dry_run": True},
+        "values": ["<11 characters>", "<6 characters>"],
+        "message": {"subject": "<2 characters>", "html": "<14 characters>"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "free"),
+    [
+        ("text", True),
+        ("value", True),
+        ("password", True),
+        ("userPassword", True),
+        ("new-passwd", True),
+        ("client_secret", True),
+        ("API_KEY", True),
+        ("accessToken", True),
+        ("content", True),
+        ("message", True),
+        ("prompt", True),
+        ("ref", False),
+        ("url", False),
+        ("direction", False),
+        ("chat_id", False),
+        ("keyboard", False),
+    ],
+)
+def test_free_text_argument_names(name, free):
+    assert egress.free_text_argument(name) is free
+
+
+def test_prompt_urls_and_commands_are_scrubbed_of_credentials():
+    navigate = _ask("browser_navigate", {"url": f"https://shop.example.com/cb?token={PASSWORD}&page=2"})
+    assert "shop.example.com" in navigate.message and "page=2" in navigate.message
+    assert PASSWORD not in navigate.message and "token=redacted" in navigate.message
+    login = _ask("browser_navigate", {"url": f"https://alice:{PASSWORD}@shop.example.com/"})
+    assert PASSWORD not in login.message and "alice:redacted@shop.example.com" in login.message
+    curl = _ask("terminal", {"command": f"curl https://admin:{PASSWORD}@api.example.com/x -d 'password={PASSWORD}'"})
+    assert (
+        curl.approve and PASSWORD not in curl.message and "curl https://admin:redacted@api.example.com" in curl.message
+    )
+
+
+def test_denials_name_the_tool_and_rule_never_an_argument(monkeypatch):
+    from mordred_hermes.privacy_check import hooks
+
+    blocked = _ask("browser_navigate", {"url": f"https://pastebin.com/?password={PASSWORD}"})
+    assert not blocked.allow and not blocked.approve and PASSWORD not in blocked.message
+    locked = egress.decide("browser_type", {"ref": "e3", "text": PASSWORD}, "deny-s", egress.EgressPolicy("lockdown"))
+    assert not locked.allow and PASSWORD not in locked.message
+    entries: list[dict[str, Any]] = []
+    monkeypatch.setattr(egress, "load_policy", lambda *a, **k: egress.EgressPolicy(level="ask"))
+    monkeypatch.setattr(hooks, "safe_audit_append", lambda _audit, entry, **_k: entries.append(dict(entry)) or True)
+    directive = hooks._check_tool_egress(
+        SimpleNamespace(audit=object()), "browser_type", {"args": {"ref": "e3", "text": PASSWORD}}
+    )
+    assert directive is not None and directive["action"] == "approve" and PASSWORD not in json.dumps(directive)
+    assert PASSWORD not in json.dumps(entries)
+
+
 def test_ask_still_refuses_blocklisted_and_bare_ip_destinations():
     for tool, args in (
         ("web_extract", {"urls": ["https://pastebin.com/raw/x"]}),
@@ -345,3 +506,39 @@ def test_pre_tool_call_returns_an_approval_directive(monkeypatch):
     directive = hooks._check_tool_egress(state, "web_extract", {"args": {"urls": ["https://example.com"]}})
     assert directive["action"] == "approve" and "example.com" in directive["message"]
     assert directive["rule_key"].startswith("mordred.egress:web_extract")
+
+
+@pytest.mark.parametrize("tool", ["mordred_browser_history", "mordred_browser_history_episode"])
+@pytest.mark.parametrize("level", ["ask", "search", "lockdown", "blocklist"])
+def test_browser_history_tools_are_allowed_at_every_level_and_taint(tool: str, level: str) -> None:
+    session = f"history-{tool}-{level}"
+    egress.mark_tainted(f"{session}-already")
+    for target in (session, f"{session}-already"):  # a tainted session may still read the history
+        decision = egress.decide(tool, {"query": "invoice"}, target, egress.EgressPolicy(level=level))
+        assert decision.allow and not decision.approve
+        assert decision.taints
+    assert {"mordred_browser_history", "mordred_browser_history_episode"} <= egress.TAINT_SOURCES
+    assert not egress.LOCAL_TOOLS & egress.BROWSER_HISTORY_TOOLS
+
+
+def test_browser_history_tool_taints_through_the_bridge_and_then_locks_the_session(monkeypatch) -> None:
+    from mordred_hermes.privacy_check import hooks
+
+    policy = egress.EgressPolicy(level="search")
+    monkeypatch.setattr(egress, "load_policy", lambda *a, **k: policy)
+    monkeypatch.setattr(hooks, "safe_audit_append", lambda *a, **k: None)
+    state = SimpleNamespace(audit=None)
+    bridged = {"calls": [{"name": "mordred_browser_history_episode", "arguments": {"episode_id": "e1"}}]}
+    assert egress.decide("tool_call", bridged, "history-bridge", policy).taints
+
+    call = {"args": {"query": "invoice"}, "session_id": "history-hook"}
+    assert hooks._check_tool_egress(state, "mordred_browser_history", call) is None
+    assert egress.is_tainted("history-hook")
+    # The session is in reader mode like after a Telegram read: no plaintext persist tools, egress locked down.
+    for tool, args in (("memory", {}), ("write_file", {"path": "/tmp/x"}), ("web_search", {"query": "x"})):
+        assert not egress.decide(tool, args, "history-hook", policy).allow
+    # ...and `taint: false` does not lift reader mode: actions stay refused, web use asks.
+    untainted = egress.EgressPolicy(level="search", taint=False)
+    assert egress.decide("memory", {}, "history-hook", untainted).reason == "egress.reader_locked"
+    web = egress.decide("web_search", {"query": "x"}, "history-hook", untainted)
+    assert web.approve and web.reason == "egress.reader_web"

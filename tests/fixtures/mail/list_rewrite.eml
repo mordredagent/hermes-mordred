@@ -1,0 +1,14 @@
+Message-ID: <list1@example.com>
+Date: Thu, 08 Oct 2026 09:00:00 +0900
+From: =?utf-8?b?5L2Q44CF5pyoIOiRtSB2aWEg6ZaL55m6TUw=?= <dev-ml@lists.example.org>
+Reply-To: =?utf-8?b?5L2Q44CF5pyoIOiRtQ==?= <owner@example.com>
+X-Original-From: =?utf-8?b?5L2Q44CF5pyoIOiRtQ==?= <owner@example.com>
+List-Id: <dev-ml.lists.example.org>
+Precedence: list
+To: dev-ml@lists.example.org
+Subject: =?utf-8?b?W2Rldi1tbF0g44Oq44Oq44O844K55omL6aCG?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+リリース手順をまとめました。CANARY-LIST-1

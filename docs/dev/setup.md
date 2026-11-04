@@ -116,7 +116,7 @@ The extras defined by `[project.optional-dependencies]` in `pyproject.toml`. `uv
 
 | Extra | Contents | When needed |
 |---|---|---|
-| `dev` | `pytest` / `pytest-cov` / `ruff` (pinned) / `mypy` (pinned) | **Required for everyday commands (below)**. Linters are strictly pinned to match CI |
+| `dev` | `pytest` / `pytest-cov` / `ruff` (pinned) / `mypy` (pinned) / `import-linter` (pinned) | **Required for everyday commands (below)**. Linters are strictly pinned to match CI |
 | `keyvault` | cross-platform crypto stack (`cryptography` / `argon2-cffi` / `blake3`) | Type-checking / testing keyvault. Recommended on all platforms |
 | `macos` | `keyvault` + pyobjc bridge (`Security` / `SystemConfiguration` / `Quartz`) | Developing Secure Enclave features on macOS |
 | `extension` | `aiohttp` + `cryptography` + `requests[socks]` + `urllib3` | Browser extension WebSocket gateway and Tor-routed wallet RPC (`extension serve`) |
@@ -200,7 +200,7 @@ released package:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --reinstall "hermes-mordred[macos,extension,ethereum]==0.3.0a4"
+  --reinstall "hermes-mordred[macos,extension,ethereum]==0.3.0a5"
 
 uv pip check --python ~/.hermes/hermes-agent/venv/bin/python3
 ~/.hermes/hermes-agent/venv/bin/python3 -c \
@@ -245,6 +245,7 @@ Run everything via `uv run` (= uses the repo `.venv`). Invoking `.venv/bin/…` 
 | Format check | `uv run ruff format --check src tests scripts` | Blocking in CI |
 | Shell lint | `shellcheck scripts/*.sh native/*/build.sh` | Blocking in CI (one Linux cell). Not a Python dependency — install via `brew install shellcheck` / `apt install shellcheck` |
 | Type-check | `uv run mypy --strict src tools scripts/keyvault_offline_digest.py` | The main strict lane omits feature extras; the separate feature lane exercises them at runtime. The digest script ships in the wheel, so it is type-gated; the other `scripts/*.py` are dev-era PoCs and are not |
+| Import layering | `uv run lint-imports` | Blocking in CI (static pack, one Linux cell). Layer order and the baselined legacy inversions live in `[tool.importlinter]` in `pyproject.toml`; never extend `ignore_imports` for new code — fix the import direction instead, and delete an entry once its inversion is gone (unmatched entries fail the run) |
 | Mordred initial configuration | `.venv/bin/hermes-mordred configure` | Configures policy / LLM / harness. Does not include network privacy. CI/scripts drive it via flags with `--non-interactive --policy strict --harness codex ...` (unspecified flags keep the existing setting). **Destructive — `HERMES_HOME` isolation recommended** |
 | Network privacy configuration | `.venv/bin/hermes-mordred network init` | Sets up Tor / VPN / clearnet + Mullvad on demand. Re-runnable (seeds existing values as prompt defaults; an empty Mullvad input keeps the existing secret). CI/scripts drive it via `--non-interactive --path tor --mullvad-relay jp ...` (secrets are not passed via CLI flags). Delete a saved secret with `--clear-mullvad`. **Destructive — `HERMES_HOME` isolation recommended** |
 | Select / check network route | `.venv/bin/hermes-mordred network use <tor\|vpn\|clearnet>` / `network status` | Saves the next process route; restart Hermes to activate a changed route. `network status --json` shows the current process state |
@@ -458,3 +459,46 @@ and pwsh argument passing and exit codes with compiled fixture executables and
 temporary profiles, without network package installation. Native wheel installs,
 TPM probes and ordinary-user Windows 11 acceptance remain separate controller-run
 gates; macOS/Linux unit evidence does not establish those results.
+
+
+## Uninstall and retained database recovery
+
+Run `hermes-mordred uninstall --dry-run` from the root Hermes home first. The
+plan includes its profiles, retained data and known blockers. Dry-run neither
+authenticates keys nor guarantees restoration. A profile-specific invocation
+refuses because the package is shared.
+
+Ordinary uninstall restores and verifies live databases, memory and configuration
+before removing integration and finally the package. Keep the retained native
+keys, wrappers, source binding, backup registry and required helper. Registered
+SQLCipher backups and supported ZIP database members must be verifiable with
+those same keys; unknown or damaged state stops the operation.
+
+After reinstalling Mordred on the **same physical home and device**, recover a
+retained database to a new, nonexistent output in an existing private directory:
+
+```sh
+hermes-mordred databases backup export --source /absolute/path/backup.db --output /absolute/path/recovered.db
+hermes-mordred databases backup export --source /absolute/path/backup.zip --member state.db --output /absolute/path/recovered.db
+```
+
+These commands leave the source unchanged. Output is a verified plaintext DB;
+existing files are never overwritten. Keep it private. This is export, not an
+automatic replacement of a live Hermes database.
+
+`--purge-data` refuses before restoration if known encrypted backups would be
+stranded. Export or manage those backups separately; uninstall never silently
+converts or deletes them. Unregistered external/offline copies cannot be
+inventoried. Do not delete their keys unless you accept losing access to them.
+Removing a helper required by retained data also refuses. POSIX
+`--erase-encrypted` deletes only the exact reviewed targets and refuses if an
+uncovered dependency would remain. Windows purge still deletes only memory
+custody; Windows erase and recursive data deletion remain unsupported.
+
+Incomplete conversion/backup journals and incomplete keyvault ownership require
+separate recovery before destructive uninstall. In particular, a vault-only
+native key directory without main-key ownership metadata cannot satisfy the
+existing keyvault-reset contract: ordinary uninstall retains it, while purge
+refuses before restoration. This command does not infer ownership or rewrite
+that metadata. If later I/O or package removal fails, already completed restore
+steps remain; retain the recovery files, resolve the reported failure and rerun.

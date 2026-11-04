@@ -16,7 +16,11 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
 - ``sign_request`` → analyze + ``sign_prompt``; ``sign_approve`` → keyvault sign → ``sign_result``
 - ``telegram_status`` / ``telegram_sync`` / ``telegram_dialogs`` → read-only Telegram importer
 - ``telegram_ask`` → Venice private-model answer streamed as ``telegram_ask_meta`` +
-  ``telegram_ask_chunk*`` + ``telegram_ask_end`` (or ``telegram_ask_error``)
+  ``telegram_ask_chunk*`` + ``telegram_ask_end`` (or ``telegram_ask_error``); a request
+  carrying ``"evidence": true`` also gets one sealed ``telegram_ask_evidence`` frame
+  (validated source cards) right before ``telegram_ask_end``
+- ``activity_batch`` / ``activity_status`` → :mod:`mordred_hermes.extension.activity_api`;
+  the paired extension may submit ``activity_batch``; the page principal never reaches them.
 
 Server-initiated frames: ``ping`` (app-level keepalive, see
 ``_Connection.keepalive``) and ``error`` (malformed JSON / crashed handler).
@@ -38,7 +42,7 @@ from urllib.parse import quote, urlsplit
 
 from aiohttp import WSMsgType, web
 
-from . import page_headers, pairing
+from . import activity_api, page_headers, pairing
 from ._windows_storage import ExtensionStorageError
 from .crypto import (
     DecryptError,
@@ -85,7 +89,7 @@ _SLACK_APP_TOKEN_RE = re.compile(r"xapp-[A-Za-z0-9-]+")
 # ``test_page_allowlist_entries_are_all_used_by_the_shipped_page`` pins each
 # entry to a call site in the shipped bundle.
 _PAGE_ALLOWED = frozenset({"chat", "accounts_request", "history_get", "history_clear"})
-_EXTENSION_CAPABILITIES = ["discord_channel_resolve_v1", "telegram_import_v1"]
+_EXTENSION_CAPABILITIES = ["discord_channel_resolve_v1", "telegram_import_v1", activity_api.ACTIVITY_CAPABILITY]
 
 # A sign_request entry leaves _pending_sign only on approve/reject (or when the
 # socket dies), so an authed client that never approves would grow it without
@@ -247,6 +251,8 @@ class ExtensionAPIServer:
         discord_resolver: DiscordResolver | None = None,
         telegram_service: Any = None,
         keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
+        activity_receiver: Any = None,
+        activity_max_batch_bytes: int = activity_api.DEFAULT_MAX_BATCH_BYTES,
     ) -> None:
         if not _is_loopback_host(host):
             raise ValueError(f"extension API host must be loopback-only (got {host!r})")
@@ -258,6 +264,9 @@ class ExtensionAPIServer:
         # Built lazily so a server without the Telegram extra never imports it.
         self._telegram_service = telegram_service
         self.keepalive_interval = keepalive_interval
+        # ``None`` → every activity_batch answers ``activity_refused: store_unavailable``.
+        self.activity_receiver = activity_receiver
+        self.activity_max_batch_bytes = activity_max_batch_bytes
         self._runner: web.AppRunner | None = None
         # Per-process page principal. It is printed only as a URL fragment by
         # the foreground launcher; fragments never cross the HTTP boundary.
@@ -360,6 +369,8 @@ class ExtensionAPIServer:
             telegram_service=self.telegram_service,
             page_token=page_token,
             client_origin=origin,
+            activity_receiver=self.activity_receiver,
+            activity_max_batch_bytes=self.activity_max_batch_bytes,
         )
         await conn.send_challenge()
         keepalive = asyncio.create_task(conn.keepalive(self.keepalive_interval))
@@ -387,6 +398,8 @@ class _Connection:
         telegram_service: Any = None,
         page_token: str | None = None,
         client_origin: str | None = None,
+        activity_receiver: Any = None,
+        activity_max_batch_bytes: int = activity_api.DEFAULT_MAX_BATCH_BYTES,
     ) -> None:
         self.ws = ws
         self.chat_handler = chat_handler
@@ -394,6 +407,7 @@ class _Connection:
         self.telegram_service = telegram_service
         self.page_token = page_token  # set only for local-origin (page) sockets
         self.client_origin = client_origin
+        self._presence_connection = secrets.token_hex(16)
         self.authed = False
         # Extension sessions are bound to the exact pairing token generation
         # that completed authentication. Re-pairing or clearing state must
@@ -401,12 +415,18 @@ class _Connection:
         # Page sessions use the separate process-bound page principal.
         self._authentication_generation: bytes | None = None
         self._page_authenticated = False
+        self.activity_receiver = activity_receiver
+        self.activity_max_batch_bytes = activity_max_batch_bytes
+        self._frame_bytes = 0
         self._nonce = b""
         self._pending_sign: dict[str, dict[str, Any]] = {}
         self._telegram_asks: dict[str, asyncio.Task[None]] = {}
 
     def cancel_background_tasks(self) -> None:
         """Stop work that would otherwise outlive this socket (and keep billing)."""
+        from ..keyvault._presence import revoke
+
+        revoke(principal=("extension", self._presence_connection))
         for task in list(self._telegram_asks.values()):
             task.cancel()
         self._telegram_asks.clear()
@@ -467,13 +487,17 @@ class _Connection:
         return msg
 
     async def dispatch(self, raw: str) -> None:
+        self._frame_bytes = len(raw.encode("utf-8", "surrogatepass"))
         msg = await self._parse_frame(raw)
         if msg is None:
             return
         mtype = msg.get("type")
         # Two dispatch tables keep the auth gate explicit: pre-auth messages are
         # always allowed; everything else requires a completed auth handshake.
-        pre_auth = {"pair_init": self._on_pair_init, "auth": self._on_auth}
+        pre_auth = {
+            "pair_init": self._on_pair_init,
+            "auth": self._on_auth,
+        }
         authed = {
             "chat": self._on_chat,
             "encrypt": self._on_encrypt,
@@ -492,30 +516,37 @@ class _Connection:
             "telegram_dialogs": self._on_telegram_dialogs,
             "telegram_ask": self._on_telegram_ask,
             "telegram_ask_cancel": self._on_telegram_ask_cancel,
+            "activity_batch": self._on_activity_batch,
+            "activity_status": self._on_activity_status,
         }
         try:
             if mtype in pre_auth:
                 await pre_auth[mtype](msg)
-            elif not self.authed:
-                await self._send({"type": "auth_fail", "reason": "not_authenticated"})
-            elif mtype in authed and (failure := self._authentication_failure()) is not None:
-                self._invalidate_authentication()
-                await self._send({"type": "auth_fail", "reason": failure})
-            elif self.page_token is not None and mtype in authed and mtype not in _PAGE_ALLOWED:
-                # Page session (local-origin socket): only the read-only /
-                # conversational handlers in _PAGE_ALLOWED are permitted; every
-                # other authed handler (credential/key writes, the K_master
-                # crypto oracle, the wallet signer) is refused. Reply rather than
-                # ignore so the caller never hangs on its ``id``.
-                await self._send(
-                    {
-                        "id": msg.get("id"),
-                        "type": "error",
-                        "reason": "page_session_forbidden",
-                    }
-                )
+            elif (refusal := self._authed_refusal(mtype, mtype in authed)) is not None:
+                # Error refusals reply keyed by ``id`` so the caller never hangs.
+                await self._send({"id": msg.get("id"), **refusal} if refusal["type"] == "error" else refusal)
             elif mtype in authed:
-                await authed[mtype](msg)
+                if mtype in {"telegram_sync", "telegram_dialogs", "telegram_ask"}:
+                    from .._core._home import hermes_home
+                    from ..keyvault._presence import presence_scope
+                    from ..keyvault._presence_hosts import profile_guard
+
+                    home = hermes_home().resolve()
+                    generation = self._authentication_generation
+                    profile_current = profile_guard(home, self._authentication_is_current)
+
+                    def current() -> bool:
+                        return (
+                            not self.ws.closed
+                            and self.authed
+                            and self._authentication_generation == generation
+                            and profile_current()
+                        )
+
+                    with presence_scope(home, ("extension", self._presence_connection), "telegram", valid=current):
+                        await authed[mtype](msg)
+                else:
+                    await authed[mtype](msg)
         except ExtensionStorageError as exc:
             await self._send_storage_refusal(msg, exc)
         except Exception:
@@ -527,9 +558,29 @@ class _Connection:
                 err["id"] = msg["id"]
             await self._send(err)
 
+    def _authed_refusal(self, mtype: Any, known: bool) -> dict[str, Any] | None:
+        """The refusal frame for a post-auth message, ``None`` when it may run."""
+        if not self.authed:
+            return {"type": "auth_fail", "reason": "not_authenticated"}
+        if not known:
+            return None
+        if (failure := self._authentication_failure()) is not None:
+            self._invalidate_authentication()
+            return {"type": "auth_fail", "reason": failure}
+        if self.page_token is not None and mtype not in _PAGE_ALLOWED:
+            # Page session (local-origin socket): only the read-only /
+            # conversational handlers in _PAGE_ALLOWED are permitted; every
+            # other authed handler (credential/key writes, the K_master
+            # crypto oracle, the wallet signer, activity submission) is refused.
+            return {"type": "error", "reason": "page_session_forbidden"}
+        return None
+
     # -- pairing / auth -----------------------------------------------------
 
     def _invalidate_authentication(self) -> None:
+        from ..keyvault._presence import revoke
+
+        revoke(principal=("extension", self._presence_connection))
         self.authed = False
         self._authentication_generation = None
         self._page_authenticated = False
@@ -611,6 +662,12 @@ class _Connection:
         # principal on this same socket before returning the new credential.
         self._invalidate_authentication()
         await self._send({"id": mid, "type": "pair_complete", **result})
+
+    async def _on_activity_batch(self, msg: dict[str, Any]) -> None:
+        await activity_api.on_activity_batch(self, msg)
+
+    async def _on_activity_status(self, msg: dict[str, Any]) -> None:
+        await activity_api.on_activity_status(self, msg)
 
     async def _on_auth(self, msg: dict[str, Any]) -> None:
         token = msg.get("ext_token", "")
@@ -864,7 +921,7 @@ class _Connection:
             await _reply(False, error="bad_token_format")
             return
         try:
-            from .._home import hermes_home
+            from .._core._home import hermes_home
 
             env_path = hermes_home() / ".env"
             updated = await asyncio.get_event_loop().run_in_executor(
@@ -1110,7 +1167,9 @@ class _Connection:
         if len(self._telegram_asks) >= _MAX_TELEGRAM_ASKS_PER_SOCKET:
             await self._send({"id": mid, "type": "telegram_ask_error", "reason": "too_many_requests"})
             return
-        task = asyncio.create_task(self._run_telegram_ask(mid, request, ek))
+        # Opt-in: clients whose strict frame decoder predates the frame never receive it.
+        evidence = msg.get("evidence") is True
+        task = asyncio.create_task(self._run_telegram_ask(mid, request, ek, evidence=evidence))
         self._telegram_asks[mid] = task
         task.add_done_callback(lambda _t: self._telegram_asks.pop(mid, None))
 
@@ -1119,13 +1178,32 @@ class _Connection:
         mid = msg.get("id")
         task = self._telegram_asks.get(mid) if isinstance(mid, str) else None
         if task is not None:
+            from ..keyvault._presence import revoke
+
+            revoke(principal=("extension", self._presence_connection))
             task.cancel()
 
-    async def _run_telegram_ask(self, mid: str, request: Any, ek: bytes) -> None:
+    def _telegram_evidence_frame(self, mid: str, ek: bytes, report: Any) -> dict[str, Any]:
+        """Source cards (stored facts plus the stored 160-character excerpt), sealed like the answer."""
+        from .telegram.service import card_json
+
+        payload = {
+            "cards": [card_json(card) for card in report.cards],
+            "unverified_ids": list(report.unverified_ids),
+            "unsupported_quotes": len(report.unsupported_quotes),
+        }
+        sealed = self._telegram_seal(ek, json.dumps(payload, ensure_ascii=False))
+        return {"id": mid, "type": "telegram_ask_evidence", "content": sealed}
+
+    async def _run_telegram_ask(self, mid: str, request: Any, ek: bytes, *, evidence: bool = False) -> None:
         from .telegram.service import AskResult, error_code
 
         meta: list[AskResult] = []
-        gen = self._telegram_ready().ask(request, meta.append)
+        reports: list[Any] = []
+        if evidence:
+            gen = self._telegram_ready().ask(request, meta.append, on_evidence=reports.append)
+        else:
+            gen = self._telegram_ready().ask(request, meta.append)
         sent_meta = False
         try:
             async for chunk in gen:
@@ -1144,10 +1222,18 @@ class _Connection:
                 sealed = self._telegram_seal(ek, chunk)
                 if not await self._send({"id": mid, "type": "telegram_ask_chunk", "content": sealed}):
                     return
+            if reports and not await self._send(self._telegram_evidence_frame(mid, ek, reports[-1])):
+                return
             await self._send({"id": mid, "type": "telegram_ask_end"})
         except asyncio.CancelledError:
+            from ..keyvault._presence import revoke
+
+            revoke(principal=("extension", self._presence_connection))
             raise
         except Exception as exc:
+            from ..keyvault._presence import revoke
+
+            revoke(principal=("extension", self._presence_connection))
             await self._send(
                 {"id": mid, "type": "telegram_ask_error", "reason": error_code(exc, "telegram_ask_failed")}
             )
@@ -1310,29 +1396,22 @@ def _hermes_version() -> str:
     return "0.0.0"
 
 
-def _dotenv_assignment(raw_line: str) -> tuple[str, bool, str] | None:
-    """Return ``(name, exported, value)`` for one simple dotenv assignment."""
-    from .._dotenv_text import parse_assignment
-
-    return parse_assignment(raw_line)
-
-
 def _dotenv_has_nonempty_key(existing: str, keys: set[str]) -> bool:
     """Whether dotenv text contains one of *keys* with a non-empty value."""
-    from .._dotenv_text import has_nonempty_key
+    from .._core._dotenv_text import has_nonempty_key
 
     return has_nonempty_key(existing, keys)
 
 
 def _updated_env_text(existing: str, updates: dict[str, str]) -> str:
     """Return dotenv text with ``updates`` merged, preserving other lines."""
-    from .._dotenv_text import merge_assignments
+    from .._core._dotenv_text import merge_assignments
 
     return merge_assignments(existing, updates, mode="extension")
 
 
 def _validate_env_updates(updates: dict[str, str]) -> None:
-    from .._dotenv_text import contains_newline
+    from .._core._dotenv_text import contains_newline
 
     for key, val in updates.items():
         if contains_newline(key) or contains_newline(val):
@@ -1351,7 +1430,7 @@ def _upsert_env_vars(env_path: Path, updates: dict[str, str]) -> None:
     Slack and wizard updates cannot both read the same old file and lose one
     another's unrelated entries.
     """
-    from .._dotenv_io import update_dotenv_file
+    from .._core._dotenv_io import update_dotenv_file
 
     _validate_env_updates(updates)
     update_dotenv_file(env_path, lambda existing: _updated_env_text(existing, updates))
@@ -1363,7 +1442,7 @@ class _SlackAlreadyConfigured(Exception):
 
 def _update_slack_env(env_path: Path, updates: dict[str, str], overwrite: bool) -> bool:
     """Check-and-upsert Slack credentials in one locked dotenv transaction."""
-    from .._dotenv_io import update_dotenv_file
+    from .._core._dotenv_io import update_dotenv_file
 
     _validate_env_updates(updates)
 

@@ -1,9 +1,16 @@
-# Scope-aware CI: routine 3–5, documentation 2, final 7 jobs.
+# Scope-aware CI: routine 3–6, final 10 jobs; documentation-only events are filtered.
 # Policy and positive acceptance are defined in docs/dev/CI.md.
 # Keep PR event types stable: label-only runs can cancel actual testing.
 name: CI
 'on':
   pull_request:
+    # Keep version pins, executable examples and runtime Markdown in CI scope.
+    paths-ignore:
+      - 'docs/**/*.md'
+      - 'README.md'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'notes.md'
     types:
       - opened
       - synchronize
@@ -11,6 +18,13 @@ name: CI
       - ready_for_review
       - converted_to_draft
   push:
+    # Keep version pins, executable examples and runtime Markdown in CI scope.
+    paths-ignore:
+      - 'docs/**/*.md'
+      - 'README.md'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'notes.md'
     branches:
       - main
       - dev
@@ -74,7 +88,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -86,13 +100,17 @@ jobs:
         id: install
         run: |-
           python -m venv .venv
-          .venv/bin/python -m pip install -e ".[dev,keyvault,extension]"
+          .venv/bin/python -m pip install -e ".[dev,keyvault,extension]" uv
       - name: ruff check and format
         id: ruff
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'static') && matrix.python-version == needs.ci-policy.outputs.support_python
         run: |-
-          .venv/bin/python -m ruff check src tests scripts tools
-          .venv/bin/python -m ruff format --check src tests scripts tools
+          .venv/bin/python -m ruff check src tests scripts tools hatch_build.py
+          .venv/bin/python -m ruff format --check src tests scripts tools hatch_build.py
+      - name: import-linter (layering contracts)
+        id: import_linter
+        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'static') && matrix.python-version == needs.ci-policy.outputs.support_python
+        run: .venv/bin/lint-imports --no-cache
       - name: shellcheck
         id: shellcheck
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'static') && matrix.python-version == needs.ci-policy.outputs.support_python
@@ -103,7 +121,9 @@ jobs:
         run: .venv/bin/hermes-mordred policy dry-run skills/mordred-status
       - name: mypy --strict with reduced extras
         id: mypy
-        run: .venv/bin/python -m mypy --strict src tools scripts/keyvault_offline_digest.py
+        run: .venv/bin/python -m mypy --strict src tools scripts/keyvault_offline_digest.py hatch_build.py
+      - name: Install database driver after lean-extra type checking
+        run: .venv/bin/python -m pip install -e ".[dev,keyvault,extension,dbcrypt]"
       - name: Default suite or draft critical feedback
         id: pytest
         env:
@@ -182,30 +202,6 @@ jobs:
             tests/extension/test_telegram_import.py
         id: feature_tests
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'features') && matrix.python-version == needs.ci-policy.outputs.support_python
-      - name: Install declared Hermes floor in a clean environment
-        id: floor_install
-        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'floor') && matrix.python-version == needs.ci-policy.outputs.support_python
-        run: |-
-          python -m venv "$RUNNER_TEMP/mordred-ci-floor"
-          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install "hermes-agent==0.13.0"
-          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install -e ".[dev,keyvault,extension]"
-      - name: Guard — resolver must not have upgraded hermes-agent off the floor
-        run: |
-          set -euo pipefail
-          INSTALLED_VERSION="$("$RUNNER_TEMP/mordred-ci-floor/bin/python" -c 'import importlib.metadata as m; print(m.version("hermes-agent"))')"
-          if [ "$INSTALLED_VERSION" != "0.13.0" ]; then
-            echo "::error::hermes-agent floor test is void: resolver left hermes-agent at $INSTALLED_VERSION instead of the pinned 0.13.0, so pyproject.toml's declared floor was not actually exercised."
-            exit 1
-          fi
-        id: floor_guard
-        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'floor') && matrix.python-version == needs.ci-policy.outputs.support_python
-      - name: pytest against the hermes-agent floor
-        env:
-          HERMES_HOME: /tmp/hermes-mordred-ci-home
-        run: >-
-          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pytest -q --deselect tests/test_provider_identity.py::test_replica_matches_hermes_source --deselect tests/test_provider_transport_flagger.py::TestRegistrySync::test_known_provider_slugs_are_real_hermes_ids
-        id: floor_tests
-        if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'floor') && matrix.python-version == needs.ci-policy.outputs.support_python
       - name: Build canonical and compatibility artifacts
         id: package_build
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'package') && matrix.python-version == needs.ci-policy.outputs.support_python
@@ -229,7 +225,7 @@ jobs:
 
           python -m venv "$SMOKE_VENV"
           "$SMOKE_VENV/bin/python" -m pip install --upgrade pip
-          "$SMOKE_VENV/bin/python" -m pip install "${wheel_path}[keyvault,extension]"
+          "$SMOKE_VENV/bin/python" -m pip install "${wheel_path}[keyvault,extension,dbcrypt]"
           cd "$RUNNER_TEMP"
 
           HERMES_HOME="$SMOKE_HOME" "$SMOKE_VENV/bin/python" - <<'PY'
@@ -434,7 +430,7 @@ jobs:
         run: |
           cargo build --locked --manifest-path native/tpmkey-helper/Cargo.toml
           python -m venv "$RUNNER_TEMP/mordred-ci-swtpm"
-          "$RUNNER_TEMP/mordred-ci-swtpm/bin/python" -m pip install -e ".[dev,keyvault,extension,telegram]"
+          "$RUNNER_TEMP/mordred-ci-swtpm/bin/python" -m pip install -e ".[dev,keyvault,extension,dbcrypt,telegram]"
           "$RUNNER_TEMP/mordred-ci-swtpm/bin/python" -m pytest -v -o addopts="" tests/integration/test_linux_telegram_tpm.py
         id: swtpm_python
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'swtpm') && matrix.python-version == needs.ci-policy.outputs.support_python
@@ -453,6 +449,61 @@ jobs:
           name: ci-worker-evidence-linux-${{ matrix.python-version }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: worker.json
           if-no-files-found: error
+  linux-floor:
+    needs:
+      - ci-policy
+    if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'floor')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      HERMES_HOME: /tmp/mordred-ci-floor-home
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ needs.ci-policy.outputs.support_python }}
+          cache: pip
+      - name: Download immutable run policy
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Install declared Hermes floor in a clean environment
+        id: floor_install
+        run: |-
+          python -m venv "$RUNNER_TEMP/mordred-ci-floor"
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install "hermes-agent==0.13.0"
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pip install -e ".[dev,keyvault,extension,dbcrypt]" uv
+      - name: Guard — resolver must not have upgraded hermes-agent off the floor
+        run: |
+          set -euo pipefail
+          INSTALLED_VERSION="$("$RUNNER_TEMP/mordred-ci-floor/bin/python" -c 'import importlib.metadata as m; print(m.version("hermes-agent"))')"
+          if [ "$INSTALLED_VERSION" != "0.13.0" ]; then
+            echo "::error::hermes-agent floor test is void: resolver left hermes-agent at $INSTALLED_VERSION instead of the pinned 0.13.0, so pyproject.toml's declared floor was not actually exercised."
+            exit 1
+          fi
+        id: floor_guard
+      - name: pytest against the hermes-agent floor
+        env:
+          HERMES_HOME: /tmp/hermes-mordred-ci-home
+        run: >-
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pytest -q --deselect tests/test_provider_identity.py::test_replica_matches_hermes_source --deselect tests/test_provider_transport_flagger.py::TestRegistrySync::test_known_provider_slugs_are_real_hermes_ids
+        id: floor_tests
+      - name: Record worker checks
+        id: evidence
+        if: always()
+        env:
+          CI_STEPS_JSON: ${{ toJSON(steps) }}
+          CI_PYTHON: ${{ needs.ci-policy.outputs.support_python }}
+        run: python tools/ci_evidence.py worker --policy ci-policy.json --os linux --python "$CI_PYTHON" --role floor --output worker.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: ci-worker-evidence-linux-floor-${{ needs.ci-policy.outputs.support_python }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: worker.json
+          if-no-files-found: error
   macos:
     name: macos
     needs:
@@ -461,13 +512,13 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     env:
-      HERMES_HOME: /tmp/mordred-ci-macos-home
+      HERMES_HOME: /private/tmp/mordred-ci-macos-home
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: ${{ needs.ci-policy.outputs.platform_python }}
           cache: pip
@@ -479,11 +530,11 @@ jobs:
         id: install
         run: |-
           python -m venv .venv
-          .venv/bin/python -m pip install -e ".[dev,keyvault,extension,macos]"
+          .venv/bin/python -m pip install -e ".[dev,keyvault,extension,macos]" uv
       - name: mypy --strict with reduced extras
         id: mypy
         if: needs.ci-policy.outputs.mode != 'critical'
-        run: .venv/bin/python -m mypy --strict src tools scripts/keyvault_offline_digest.py
+        run: .venv/bin/python -m mypy --strict src tools scripts/keyvault_offline_digest.py hatch_build.py
       - name: SKILL.md drift guard (mordred-status)
         id: status
         run: .venv/bin/hermes-mordred policy dry-run skills/mordred-status
@@ -577,7 +628,7 @@ jobs:
         shard: ${{ fromJSON(needs.ci-policy.outputs.windows_shards) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: ${{ needs.ci-policy.outputs.platform_python }}
           cache: pip
@@ -585,12 +636,18 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: ci-policy-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Prepare verified SQLCipher API headers before Windows builds
+        run: |-
+          $headers = Join-Path $env:RUNNER_TEMP "mordred-dbcrypt-headers"
+          python tools/dbcrypt_build_headers.py --output-directory $headers
+          if ($LASTEXITCODE -ne 0) { throw "SQLCipher header preparation failed" }
+          "MORDRED_SQLITE_INCLUDE_DIR=$headers" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Install scoped dependencies in an isolated venv
         id: install
         run: |-
           python -m venv .venv
           if ($LASTEXITCODE -ne 0) { throw "venv creation failed" }
-          .\.venv\Scripts\python.exe -m pip install -e ".[dev,keyvault,extension]" uv
+          .\.venv\Scripts\python.exe -m pip install -e ".[dev,keyvault,extension,dbcrypt]" "sqlcipher3-wheels==0.5.7" uv
           if ($LASTEXITCODE -ne 0) { throw "dependency install failed" }
       - name: Prepare checked Windows feedback home
         run: |
@@ -703,7 +760,16 @@ jobs:
               tests/extension/test_desktop_api.py `
               tests/extension/test_desktop_platform.py `
               tests/extension/test_extension_serve_shutdown.py `
-              tests/test_desktop_capture.py
+              tests/test_desktop_capture.py `
+              tests/test_dbcrypt_contracts.py `
+              tests/test_dbcrypt_inventory.py `
+              tests/test_dbcrypt_windows_paths.py `
+              tests/test_dbcrypt_windows_native_paths.py `
+              tests/test_dbcrypt_windows_locking.py `
+              tests/test_dbcrypt_capability.py `
+              tests/test_dbcrypt_packaging.py `
+              tests/test_keyvault_mail_key.py `
+              tests/test_windows_custody_schema_v2.py
           } else {
             .\.venv\Scripts\python.exe tools/run_ci_native_tests.py --policy ci-policy.json --junitxml native-windows.xml
           }
@@ -791,8 +857,8 @@ jobs:
           assert extension_sign._load_wallet_cfg() == selection
           extension_sign.set_wallet(selection | {'envelope_id': 'replacement'})
           assert extension_sign._load_wallet_cfg()['envelope_id'] == 'replacement'
-          from mordred_hermes._audit_io import audit_session, decode_audit_bytes
-          from mordred_hermes._log_rotation import rotate_audit
+          from mordred_hermes._core._audit_io import audit_session, decode_audit_bytes
+          from mordred_hermes._core._log_rotation import rotate_audit
           with audit_session(Path.cwd() / 'audit' / 'custom.log', create=True) as session:
               session.create('custom.log', b'{}\n')
               result = rotate_audit(session, '2026-10-08')
@@ -826,6 +892,7 @@ jobs:
     needs:
       - ci-policy
       - linux
+      - linux-floor
       - macos
       - windows-private-fs
     if: always()
@@ -845,7 +912,7 @@ jobs:
         with:
           pattern: ci-worker-evidence-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: worker-evidence
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         if: needs.ci-policy.outputs.mode == 'docs'
         with:
           python-version: '3.12'

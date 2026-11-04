@@ -154,9 +154,9 @@ that does not trust same-UID callers merely because they can reach it.
 
 ### v2-OS2: Remaining keyvault platforms and authorization tiers
 
-Current custody is Secure Enclave/Keychain on macOS and TPM 2.0 on Linux.
-Candidates are Windows DPAPI/CNG TPM, external PKCS#11/FIDO2 hardware, and a
-stronger Linux PIN/PCR presence policy.
+Windows CNG/TPM custody shipped (PRs #189–#194; [`SPEC.md`](./SPEC.md) §Windows
+product completion contract). Remaining candidates are external PKCS#11/FIDO2
+hardware and a stronger Linux PIN/PCR presence policy.
 
 - **Priority**: M.
 - **Constraint**: no new backend may weaken the existing platform floors or
@@ -182,8 +182,10 @@ verification boundary.
 
 ### v2-F3: GUI controls
 
-Offer status, policy, network, and audit controls through a thin client over
-stable internal APIs. Do not duplicate security decisions in the UI.
+Partially complete: the Hermes Desktop page ([`SPEC.md`](./SPEC.md) §Desktop mail
+and ceremony pages) ships status, database, vault, mail, ceremony and direct-tool
+controls over the Desktop API without duplicating security decisions in the UI.
+Policy, network and audit controls remain deferred.
 
 - **Priority**: L.
 
@@ -326,6 +328,24 @@ Until those conditions are met, user documentation continues to use
 `hermes-mordred ...` as the dependable command form.
 
 - **Priority**: H after the Hermes version floor can move to 0.19.0.
+
+## Deferred activity, mail and Desktop features
+
+These candidates were moved from TODO's unscheduled list during the 2026-11-02
+reconciliation. They are not approved implementation work. Before selecting one,
+define its owner boundary, privacy contract and acceptance criteria in SPEC/PLAN.
+
+- Desktop mail file picker and import jobs for Takeout mbox and `.eml` files;
+  the terminal import remains available.
+- A user-chosen recovery passphrase on the Desktop page, alongside the current
+  generated eight-word passphrase ceremony.
+- Gmail API collection through the existing normalization path.
+- OAuth 2.0 for IMAP (`XOAUTH2`) and/or Gmail API: client registration, consent
+  and sealed refresh-token lifecycle are prerequisites.
+- Label-language default (`en` or `ja`), after provenance evaluation.
+
+Linux/Windows `mordred.db` acceptance is current work, not a deferred feature;
+see [TODO](TODO.md#hermes-database-encryption).
 
 ## Forever out of scope
 

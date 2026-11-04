@@ -90,6 +90,7 @@ def test_entry_point_components_load_in_the_documented_order() -> None:
         "privacy_check",
         "dbcrypt",
         "e2e",
+        "activity",
         "wizard",
     ]
     assert set(plugin.COMPONENT_REQUIRED_HOOKS) == {component for component, _module in plugin.COMPONENTS}

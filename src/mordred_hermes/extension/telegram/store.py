@@ -14,6 +14,12 @@ Every file is ``MTG1 || nonce(12) || AES-256-GCM(ciphertext)``. The AAD binds
 each blob to its logical name, so swapping two segment files, or renaming one
 onto the index, fails authentication instead of silently mixing chats.
 
+``index.enc`` version 1 is the archive index. Version 2 (written only when
+``ArchiveIndex.retired_to`` is set) means the account's history now lives in
+``mordred.db`` (``retired_to: "mordred.db"``): a Mordred that only knows
+version 1 refuses the file (``store_undecryptable``) instead of syncing new
+messages into ``.enc`` and silently diverging from the import store.
+
 Two subkeys are derived from the vault-held ``store_key`` with HKDF-SHA256:
 one encrypts, the other names files — ``HMAC(name_key, "dialog:<id>:<n>")`` —
 so the directory listing does not reveal which chats exist. File count and
@@ -37,10 +43,12 @@ import os
 import secrets
 import stat
 import sys
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
+from weakref import WeakKeyDictionary
 
 from ..._private_fs import PrivateFSError
 
@@ -52,7 +60,10 @@ _NONCE_LEN = 12
 _AAD_PREFIX = b"mordred-telegram-store-v1|"
 _HKDF_SALT = b"mordred-telegram-store-v1"
 _INDEX_NAME = "index"
-_INDEX_VERSION = 1
+_INDEX_VERSION = 1  # the archive (``.enc``) index write version
+_RETIRED_INDEX_VERSION = 2  # the index of an account whose history moved to ``mordred.db``
+#: The only ``retired_to`` target a version-2 index may name.
+RETIRED_TO_IMPORT_STORE = "mordred.db"
 SEGMENT_SIZE = 2000
 _T = TypeVar("_T")
 
@@ -95,6 +106,45 @@ def _checked(call: Callable[[], _T], *, lock: bool = False) -> _T:
         raise _store_error(exc, lock=lock) from exc
 
 
+def _read_private_archive(root: Path, rel: str) -> bytes | None:
+    """A bounded POSIX archive snapshot through checked, pinned directory handles.
+
+    Unlike a transaction, read-only directory admission creates no lock or
+    metadata files. Disappearance/replacement after the first leaf observation
+    is unsafe, while an initially absent archive or segment is ordinary absence.
+    """
+    from ..._private_fs import open_private_directory
+    from ._windows_archive import MAX_FILE_BYTES, _split, missing
+
+    path, name = _split(root, rel)
+    with contextlib.ExitStack() as stack:
+        try:
+            parent = stack.enter_context(open_private_directory(root))
+            parent.directory_identity()
+            directory = parent if path == root else stack.enter_context(open_private_directory(path))
+            directory.directory_identity()
+            before = directory.stat(name)
+        except PrivateFSError as exc:
+            if exc.reason == "missing" and exc.operation == "directory_identity":
+                raise PrivateFSError("unsafe", "telegram_read_changed") from exc
+            if missing(exc):
+                return None
+            raise
+        if before.size > MAX_FILE_BYTES:
+            raise PrivateFSError("unsafe", "telegram_read_limit")
+        try:
+            data = directory.read_bytes(name, max_bytes=MAX_FILE_BYTES)
+            if len(data) != before.size or directory.stat(name) != before:
+                raise PrivateFSError("unsafe", "telegram_read_changed")
+            directory.directory_identity()
+            parent.directory_identity()
+        except PrivateFSError as exc:
+            if missing(exc):
+                raise PrivateFSError("unsafe", "telegram_read_changed") from exc
+            raise
+        return data
+
+
 @dataclass
 class StoredMessage:
     id: int
@@ -123,12 +173,46 @@ class ArchiveIndex:
     account_id: int = 0
     last_sync: int = 0
     dialogs: dict[int, DialogInfo] = field(default_factory=dict)
+    #: ``"mordred.db"`` once the history moved to the import store (index version 2), else ``None``.
+    retired_to: str | None = None
 
 
 def telegram_dir() -> Path:
-    from ..._home import hermes_home
+    from ..._core._home import hermes_home
 
     return hermes_home() / "mordred" / "telegram"
+
+
+def forget_telegram_storage(*, home: Path, remove_records: bool) -> int:
+    """Delete only the retirement-bound account's imported rows; return messages deleted.
+
+    No record request performs no I/O. Missing/invalid bindings refuse when
+    Telegram history exists. Credentials and the shared database generation
+    belong to separate authorities and are never removed here.
+    """
+    if not remove_records:
+        return 0
+    from ...imports.records import Source
+    from ...imports.store import TELEGRAM_RETIRED_ACCOUNT, ImportRefused, open_import_store
+
+    imported = open_import_store(home)
+    account = imported.get_meta(TELEGRAM_RETIRED_ACCOUNT)
+    with imported.connection() as conn:
+        accounts = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT DISTINCT source_account FROM import_conversations WHERE source = 'telegram'"
+            )
+        }
+    valid = account is not None and account.isascii() and account.isdecimal() and int(account) > 0
+    if not valid:
+        if accounts or account is not None:
+            raise ImportRefused("conflict")
+        return 0
+    assert account is not None
+    if accounts and account not in accounts:
+        raise ImportRefused("conflict")
+    return imported.delete_source(Source.TELEGRAM, account, expected_retired_account=account)
 
 
 _GITIGNORE = b"# Mordred Telegram archive: encrypted, never version-controlled.\n*\n"
@@ -236,14 +320,8 @@ class ArchiveStore:
 
             checked = _checked(lambda: _windows_archive.read_archive_file(self._root, rel))
             return None if checked is None else self._decode(name, checked)
-        path = self._root / rel
-        if path.is_symlink():
-            raise StoreError("store_path_unsafe")
-        try:
-            blob = path.read_bytes()
-        except FileNotFoundError:
-            return None
-        return self._decode(name, blob)
+        blob = _checked(lambda: _read_private_archive(self._root, rel))
+        return None if blob is None else self._decode(name, blob)
 
     # -- naming -------------------------------------------------------------
 
@@ -254,10 +332,19 @@ class ArchiveStore:
     # -- index ----------------------------------------------------------------
 
     def load_index(self) -> ArchiveIndex:
+        """The index (version 1, or version 2 naming ``mordred.db``); anything else is undecryptable."""
         payload = self._read(f"{_INDEX_NAME}.enc", _INDEX_NAME)
         if payload is None:
             return ArchiveIndex()
-        if not isinstance(payload, dict) or payload.get("version") != _INDEX_VERSION:
+        if not isinstance(payload, dict):
+            raise StoreError("store_undecryptable")
+        version = payload.get("version")
+        retired_to: str | None = None
+        if version == _RETIRED_INDEX_VERSION:
+            retired_to = payload.get("retired_to")
+            if retired_to != RETIRED_TO_IMPORT_STORE:
+                raise StoreError("store_undecryptable")
+        elif version != _INDEX_VERSION:
             raise StoreError("store_undecryptable")
         dialogs: dict[int, DialogInfo] = {}
         for raw in payload.get("dialogs", []):
@@ -271,20 +358,25 @@ class ArchiveStore:
             account_id=int(payload.get("account_id", 0)),
             last_sync=int(payload.get("last_sync", 0)),
             dialogs=dialogs,
+            retired_to=retired_to,
         )
 
     def save_index(self, index: ArchiveIndex) -> None:
-        self._write(
-            f"{_INDEX_NAME}.enc",
-            _INDEX_NAME,
+        """Write version 1, or version 2 with ``retired_to`` once the history moved to ``mordred.db``."""
+        payload: dict[str, Any] = {"version": _INDEX_VERSION}
+        if index.retired_to is not None:
+            if index.retired_to != RETIRED_TO_IMPORT_STORE:
+                raise StoreError("store_index_invalid")
+            payload = {"version": _RETIRED_INDEX_VERSION, "retired_to": index.retired_to}
+        payload.update(
             {
-                "version": _INDEX_VERSION,
                 "account_label": index.account_label,
                 "account_id": index.account_id,
                 "last_sync": index.last_sync,
                 "dialogs": [asdict(d) for d in index.dialogs.values()],
-            },
+            }
         )
+        self._write(f"{_INDEX_NAME}.enc", _INDEX_NAME, payload)
 
     # -- dialogs --------------------------------------------------------------
 
@@ -378,8 +470,7 @@ class ArchiveStore:
             with _windows_sync_lock(self._root):
                 yield
             return
-        _ensure_private_dir(self._root)
-        with _nonblocking_flock(self._root / ".lock"):
+        with _posix_archive_lock(self._root):
             yield
 
     def wipe(self) -> None:
@@ -407,6 +498,153 @@ def _windows_sync_lock(root: Path) -> Iterator[None]:
             raise
     else:
         _checked(lambda: held.__exit__(None, None, None))
+
+
+@dataclass
+class _ArchiveLockRecord:
+    root: Path
+    root_identity: tuple[int, int, int, int]
+    fd: int
+    lock_identity: tuple[int, int, int]
+    process: tuple[int, int]
+    candidates: tuple[tuple[Path, tuple[int, int, int, int]], ...] | None = None
+
+
+class PosixArchiveLock:
+    """A live checked FD, issued only by the real nonblocking archive lock."""
+
+    __slots__ = ("__weakref__",)
+
+    def __new__(cls) -> PosixArchiveLock:
+        raise StoreError("store_path_unsafe")
+
+
+_archive_locks: WeakKeyDictionary[PosixArchiveLock, _ArchiveLockRecord] = WeakKeyDictionary()
+
+
+def _archive_identity(path: Path, *, directory: bool = False) -> tuple[int, int, int, int]:
+    observed = path.lstat()
+    expected = stat.S_ISDIR if directory else stat.S_ISREG
+    if (
+        not expected(observed.st_mode)
+        or observed.st_uid != os.getuid()
+        or stat.S_IMODE(observed.st_mode) != (0o700 if directory else 0o600)
+        or (not directory and observed.st_nlink != 1)
+    ):
+        raise StoreError("store_path_unsafe")
+    return observed.st_dev, observed.st_ino, observed.st_mode, observed.st_uid
+
+
+def _checked_archive_lock(lock: PosixArchiveLock) -> _ArchiveLockRecord:
+    from ...keyvault import _storage
+
+    record = _archive_locks.get(lock) if type(lock) is PosixArchiveLock else None
+    if record is None or record.process != (os.getpid(), threading.get_ident()):
+        raise StoreError("store_path_unsafe")
+    try:
+        if _archive_identity(record.root, directory=True) != record.root_identity:
+            raise StoreError("store_path_unsafe")
+        path = record.root / ".lock"
+        _archive_identity(path)
+        current, opened = path.lstat(), os.fstat(record.fd)
+        _storage._validate_lock_stat(current, path, label="Telegram archive lock", from_lstat=True)
+        _storage._validate_lock_stat(opened, path, label="Telegram archive lock", from_lstat=False)
+        if any(_storage._lock_inode_identity(item) != record.lock_identity for item in (current, opened)):
+            raise StoreError("store_path_unsafe")
+    except OSError as exc:
+        raise StoreError("store_path_unsafe") from exc
+    return record
+
+
+@contextlib.contextmanager
+def _posix_archive_lock(root: Path, *, allow_pending: bool = False) -> Iterator[PosixArchiveLock]:
+    import fcntl
+
+    from ...keyvault import _storage
+    from ...keyvault._telegram_custody import assert_no_pending_forget
+
+    if _windows():
+        raise StoreError("store_path_unsafe")
+    if root.exists() or root.is_symlink():
+        _archive_identity(root, directory=True)
+    else:
+        _ensure_private_dir(root)
+    path = root / ".lock"
+    try:
+        _storage.ensure_lock_file(path)
+        fd = _storage._open_validated_lock(path, label="Telegram archive lock")
+    except OSError as exc:
+        raise StoreError("store_path_unsafe") from exc
+    pid = os.getpid()
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                raise StoreError("sync_in_progress") from exc
+            raise StoreError("store_path_unsafe") from exc
+        lock = object.__new__(PosixArchiveLock)
+        _archive_locks[lock] = _ArchiveLockRecord(
+            root,
+            _archive_identity(root, directory=True),
+            fd,
+            _storage._lock_inode_identity(os.fstat(fd)),
+            (pid, threading.get_ident()),
+        )
+        try:
+            _checked_archive_lock(lock)
+            if not allow_pending and root.name == "telegram" and root.parent.name == "mordred":
+                assert_no_pending_forget(root.parent.parent)
+            yield lock
+        finally:
+            _archive_locks.pop(lock, None)
+            if pid == os.getpid():
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _prepare_archive_wipe(lock: PosixArchiveLock) -> None:
+    record = _checked_archive_lock(lock)
+    candidates = []
+    dialogs = record.root / "dialogs"
+    for directory in (record.root, dialogs):
+        if not directory.exists() and not directory.is_symlink():
+            continue
+        _archive_identity(directory, directory=True)
+        for path in directory.iterdir():
+            if path.suffix in {".enc", ".tmp"}:
+                candidates.append((path, _archive_identity(path)))
+    record.candidates = tuple(candidates)
+
+
+def _wipe_archive_locked(lock: PosixArchiveLock) -> None:
+    """Borrow the actual held archive lock; never reopen or reacquire it."""
+    record = _checked_archive_lock(lock)
+    if record.candidates is None:
+        _prepare_archive_wipe(lock)
+    assert record.candidates is not None
+    for path, identity in record.candidates:
+        _checked_archive_lock(lock)
+        try:
+            observed = _archive_identity(path)
+        except FileNotFoundError:
+            continue  # an acknowledged cleanup retry may already have removed it
+        if observed != identity:
+            raise StoreError("store_path_unsafe")
+        path.unlink()
+    dialogs = record.root / "dialogs"
+    if dialogs.exists():
+        _archive_identity(dialogs, directory=True)
+        if not any(dialogs.iterdir()):
+            dialogs.rmdir()
+        else:
+            from ...keyvault._telegram_custody import _sync_directory
+
+            _sync_directory(dialogs)
+    from ...keyvault._telegram_custody import _sync_directory
+
+    _sync_directory(record.root)
 
 
 @contextlib.contextmanager
@@ -482,18 +720,10 @@ def wipe_archive(root: Path | None = None, *, forget: bool = False, backend: Nat
         return
     if forget:
         raise StoreError("forget_unsupported")
-    if base.is_symlink() or not base.is_dir():
+    if not base.exists() and not base.is_symlink():
         return
-    with _nonblocking_flock(base / ".lock"):
-        dialogs = base / "dialogs"
-        for directory in (dialogs, base):
-            if not directory.is_dir() or directory.is_symlink():
-                continue
-            for child in directory.iterdir():
-                if child.is_file() and not child.is_symlink() and (child.suffix in {".enc", ".tmp"}):
-                    child.unlink()
-        if dialogs.is_dir() and not dialogs.is_symlink() and not any(dialogs.iterdir()):
-            dialogs.rmdir()
+    with _posix_archive_lock(base) as lock:
+        _wipe_archive_locked(lock)
 
 
 def _windows_wipe(base: Path, *, forget: bool, backend: NativeBackend | None) -> None:

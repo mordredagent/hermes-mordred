@@ -54,7 +54,7 @@ def test_plugin_imports(module_path: str, tmp_path: Path, monkeypatch: pytest.Mo
     # no manifest.*.mvmf artifacts on disk, so register() takes its documented
     # no-op path (see _runtime_env.py / _identity.py). This is a no-op for the
     # other 4 plugins: their default paths are derived from
-    # mordred_hermes._home.HERMES_BASE, a module-level constant frozen at first
+    # mordred_hermes._core._home.HERMES_BASE, a module-level constant frozen at first
     # import, so this env var can no longer influence them (see _home.py).
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     module = importlib.import_module(module_path)
@@ -80,7 +80,9 @@ def test_entry_points_resolve() -> None:
     assert isinstance(loaded, ModuleType), f"entry point must load to a module (got {type(loaded).__name__})"
     assert callable(getattr(loaded, "register", None)), "entry point module must expose callable register()"
     components = [module for _component, module in loaded.COMPONENTS]
-    assert sorted(components) == sorted([*PLUGINS, "mordred_hermes.dbcrypt", "mordred_hermes.extension.gateway_plugin"])
+    assert sorted(components) == sorted(
+        [*PLUGINS, "mordred_hermes.dbcrypt", "mordred_hermes.extension.gateway_plugin", "mordred_hermes.activity"]
+    )
 
 
 def test_hermes_plugin_manager_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -15,8 +15,8 @@ from typing import Any
 import pytest
 
 import mordred_hermes.network as network
-from mordred_hermes import _config_io as cio
-from mordred_hermes._config_io import POLICY_TRANSACTION_MARKER, CanonicalPaths, canonical_session
+from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core._config_io import POLICY_TRANSACTION_MARKER, CanonicalPaths, canonical_session
 from mordred_hermes.network import _windows_policy, api, hooks
 from mordred_hermes.network import settings as settings_mod
 from mordred_hermes.network._exceptions import MordredNetworkError, MordredPathBringupFailed
@@ -99,13 +99,15 @@ def wired(profile: CanonicalPaths, monkeypatch: pytest.MonkeyPatch) -> SimpleNam
         return runtime
 
     # Hermes' execute_code passthrough registry is host state, not policy.
-    monkeypatch.setattr(network, "_register_proxy_env_passthrough", lambda **kw: passthrough.append(kw["config"]))
+    monkeypatch.setattr(
+        network._registration, "_register_proxy_env_passthrough", lambda **kw: passthrough.append(kw["config"])
+    )
 
-    monkeypatch.setattr(network, "DEFAULT_POLICY_JSON_PATH", policy_path(profile))
-    monkeypatch.setattr(network, "DEFAULT_CONFIG_PATH", config_path(profile))
-    monkeypatch.setattr(network, "DEFAULT_AUTH_JSON_PATH", profile.home / "auth.json")
-    monkeypatch.setattr(network, "_build_audit_writer", lambda path: audit)
-    monkeypatch.setattr(network, "Runtime", build)
+    monkeypatch.setattr(network._registration, "DEFAULT_POLICY_JSON_PATH", policy_path(profile))
+    monkeypatch.setattr(network._registration, "DEFAULT_CONFIG_PATH", config_path(profile))
+    monkeypatch.setattr(network._registration, "DEFAULT_AUTH_JSON_PATH", profile.home / "auth.json")
+    monkeypatch.setattr(network._registration, "_build_audit_writer", lambda path: audit)
+    monkeypatch.setattr(network._registration, "Runtime", build)
     return SimpleNamespace(
         audit=audit, runtime=runtime, constructed=constructed, passthrough=passthrough, ctx=_FakeCtx()
     )
@@ -126,7 +128,7 @@ def run(entrypoint: str, paths: CanonicalPaths, *, audit: Audit | None = None, p
             policy_json_path=policy, config_path=config, auth_json_path=paths.home / "auth.json", audit=audit
         )
     if entrypoint == "runtime_config":
-        return network._load_runtime_config(policy_json_path=policy, config_path=config)
+        return network._registration._load_runtime_config(policy_json_path=policy, config_path=config)
     raise AssertionError(entrypoint)
 
 
@@ -446,8 +448,8 @@ def test_posix_tolerant_readers_are_unreachable_on_windows(
         (hooks, "_read_disable_ipv6"),
         (hooks, "_read_config_model_provider"),
         (hooks, "load_policy_mapping"),
-        (network, "_load_policy_json"),
-        (network, "_load_network_section"),
+        (network._registration, "_load_policy_json"),
+        (network._registration, "_load_network_section"),
         (settings_mod, "read_policy_mode"),
         (settings_mod, "read_default_path"),
         (settings_mod, "load_plugin_section"),

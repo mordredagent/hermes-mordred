@@ -178,7 +178,7 @@ def test_pure_does_not_mutate_environ() -> None:
 
 
 class TestSocks5hLibraryAllowlist:
-    """Static allowlist + ``evaluate_library_compatibility`` helper.
+    """Static allowlist.
 
     Maps each HTTP client library known to ship in the Mordred / Hermes
     surface to the minimum version that grew ``socks5h://`` URL-scheme
@@ -208,57 +208,6 @@ class TestSocks5hLibraryAllowlist:
         entry = SOCKS5H_LIBRARY_REQUIREMENTS["aiohttp"]
         assert entry.min_version, "aiohttp must carry a non-empty min_version"
         assert entry.notes  # caveat documented
-
-    def test_evaluate_library_compatibility_no_libs_no_warnings(self) -> None:
-        from mordred_hermes.network import proxy_env
-
-        result = proxy_env.evaluate_library_compatibility(active_path="tor", declared_libs=())
-        assert result == []
-
-    def test_evaluate_library_compatibility_clearnet_emits_no_warnings(self) -> None:
-        """SOCKS5h only matters under Tor; clearnet bypasses the check."""
-        from mordred_hermes.network import proxy_env
-
-        result = proxy_env.evaluate_library_compatibility(
-            active_path="clearnet",
-            declared_libs=("aiohttp",),
-        )
-        assert result == []
-
-    def test_evaluate_library_compatibility_tor_unknown_lib_warns(self) -> None:
-        """A declared library not in the allowlist is a warning ('we don't know')."""
-        from mordred_hermes.network import proxy_env
-
-        result = proxy_env.evaluate_library_compatibility(
-            active_path="tor",
-            declared_libs=("my-internal-http-lib",),
-        )
-        assert len(result) == 1
-        assert "my-internal-http-lib" in result[0]
-        assert "unknown" in result[0].lower()
-
-    def test_evaluate_library_compatibility_tor_known_lib_no_warning(self) -> None:
-        """httpx is on the allowlist with a recent min_version; no warning."""
-        from mordred_hermes.network import proxy_env
-
-        result = proxy_env.evaluate_library_compatibility(
-            active_path="tor",
-            declared_libs=("httpx",),
-        )
-        assert result == []
-
-    def test_evaluate_library_compatibility_tor_multiple_libs(self) -> None:
-        """Mixed declared libs return per-library warnings."""
-        from mordred_hermes.network import proxy_env
-
-        result = proxy_env.evaluate_library_compatibility(
-            active_path="tor",
-            declared_libs=("httpx", "my-internal-http-lib", "another-unknown"),
-        )
-        # httpx → no warning; the two unknowns → one warning each
-        assert len(result) == 2
-        assert any("my-internal-http-lib" in r for r in result)
-        assert any("another-unknown" in r for r in result)
 
 
 # --------------------------------------------------------------------------- #

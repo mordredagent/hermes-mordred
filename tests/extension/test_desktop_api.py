@@ -14,7 +14,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from mordred_hermes._private_fs import open_private_directory  # noqa: E402
-from mordred_hermes.desktop import api, install  # noqa: E402
+from mordred_hermes.desktop import _maintenance_routes, _seams, api, install  # noqa: E402
 from mordred_hermes.extension.telegram import secrets  # noqa: E402
 from tests._private_files import write_private  # noqa: E402
 
@@ -281,31 +281,41 @@ def test_question_model_update_uses_one_transaction_without_preliminary_load(env
         assert saved.venice_api_key == "new-venice-key" and saved.venice_model == "new-model"
 
 
-def test_memory_enable_returns_a_generated_passphrase_once(env, monkeypatch):
-    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="darwin"))
+def test_memory_enable_on_macos_is_memory_only(env, monkeypatch):
+    """The vault and its passphrase come from /vault/prepare + commit (test_desktop_vault.py)."""
     calls: list[str] = []
-    state = {"on": False}
-
-    def fake_enable(name: str):
-        def enable(**kwargs: Any) -> int:
-            calls.append(name)
-            if name == "env":
-                kwargs["prompt_io"].ask_password("Choose a vault recovery passphrase")
-            state["on"] = name == "memory"
-            return 0
-
-        return enable
-
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(_seams, "vault_root", lambda: env.tmp / "mordred" / "vault")
     monkeypatch.setattr(
-        "mordred_hermes.extension.telegram.memory_guard.memory_encryption_active", lambda home=None: state["on"]
+        "mordred_hermes.extension.telegram.memory_guard.memory_encryption_active", lambda home=None: False
     )
-    monkeypatch.setattr("mordred_hermes.wizard.env_decrypt_cli.enable", fake_enable("env"))
-    monkeypatch.setattr("mordred_hermes.wizard.memory_cli.enable", fake_enable("memory"))
-    first = _post(env, "/memory/enable")
-    assert calls == ["env", "memory"] and first["ok"] and first["restart_required"]
-    words = first["recovery_passphrase"].split()
-    assert len(words) == 8 and len(set(words)) >= 6
-    assert _post(env, "/memory/enable") == {"ok": True, "already": True}
+    monkeypatch.setattr("mordred_hermes.wizard.env_decrypt_cli.enable", lambda **kw: calls.append("env") or 0)
+    monkeypatch.setattr("mordred_hermes.wizard.memory_cli.enable", lambda **kw: calls.append("memory") or 0)
+    result = _post(env, "/memory/enable", {"unattended": True})
+    assert result == {"ok": False, "error": "vault_required"} and calls == []
+    assert "recovery_passphrase" not in json.dumps(result)
+
+
+def test_secrets_never_reach_logs_events_or_other_answers(env, monkeypatch, caplog, capsys):
+    """api_hash, the login code, the 2FA password and the Venice key: only ever in the request that carried them."""
+    import logging
+
+    events: list[Any] = []
+    monkeypatch.setattr(api, "_emit", lambda event, payload: events.append((event, payload)))
+    caplog.set_level(logging.DEBUG)
+    answers = []
+    started = _post(env, "/telegram/login/start", {"phone": "+1000000", "api_id": "12345", "api_hash": SECRET_HASH})
+    answers.append(started)
+    answers.append(_post(env, f"/telegram/login/{started['flow_id']}/code", {"code": "000"}))
+    answers.append(_post(env, f"/telegram/login/{started['flow_id']}/code", {"code": SECRET_CODE}))
+    answers.append(_post(env, f"/telegram/login/{started['flow_id']}/password", {"password": "wrong"}))
+    answers.append(_post(env, f"/telegram/login/{started['flow_id']}/password", {"password": SECRET_PASSWORD}))
+    answers.append(_post(env, "/llm/venice", {"api_key": SECRET_VENICE}))
+    answers.append(_post(env, "/llm/venice", {"api_key": SECRET_VENICE, "model": 5}))
+    answers.append(env.http.get("/api/plugins/mordred/status?client_version=4").json())
+    everything = json.dumps([answers, events]) + caplog.text + "".join(capsys.readouterr())
+    for secret in (SECRET_HASH, SECRET_CODE, SECRET_PASSWORD, SECRET_VENICE):
+        assert secret not in everything
 
 
 def test_passphrases_are_random():
@@ -481,7 +491,7 @@ def test_uninstall_plan_and_run_as_a_job(env, monkeypatch):
 
 
 def test_uninstall_answers_give_the_phrase_and_passphrase_only():
-    answers = api._UninstallAnswers("recovery words", "delete my data")
+    answers = _maintenance_routes._UninstallAnswers("recovery words", "delete my data")
     assert answers.ask_text("Type it") == "delete my data"
     assert answers.ask_password("Vault recovery passphrase") == "recovery words"
     assert answers.ask_bool("Uninstall?", False) is True
@@ -521,7 +531,7 @@ def update_core(monkeypatch):
     """A fake installed Mordred and a recording ``_self_update`` seam."""
     from pathlib import Path
 
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     state = SimpleNamespace(
         installed=core.Installed("0.2.0a1", "pypi", None, False, ("macos",), False, "/env/bin/python3", True),
@@ -592,7 +602,7 @@ def test_update_check_reports_restart_required_from_versions_on_disk(env, update
 
 
 def test_update_check_reports_nothing_known_and_refusals(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     update_core.cached = None
     update_core.refusal = core.UpdateRefused("windows", "no in-place updates on Windows")
@@ -603,7 +613,7 @@ def test_update_check_reports_nothing_known_and_refusals(env, update_core):
 
 
 def test_update_check_refresh_failure_keeps_the_cached_answer(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     update_core.fresh = core.UpdateCheckFailed("offline")
     res = env.http.get("/api/plugins/mordred/update/check?refresh=1").json()
@@ -618,7 +628,7 @@ def test_update_check_refresh_failure_keeps_the_cached_answer(env, update_core):
 
 
 def test_update_check_route_survives_a_broken_core(env, update_core, monkeypatch):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     def boom(home=None, **kw):
         raise RuntimeError("metadata exploded")
@@ -628,7 +638,7 @@ def test_update_check_route_survives_a_broken_core(env, update_core, monkeypatch
 
 
 def test_update_check_with_unreadable_metadata_is_unsupported_not_fatal(env, update_core, monkeypatch):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     def boom(home=None):
         raise RuntimeError("no dist-info")
@@ -642,7 +652,7 @@ def test_update_check_with_unreadable_metadata_is_unsupported_not_fatal(env, upd
 def test_update_apply_runs_as_a_job_and_reports(env, update_core, monkeypatch):
     import threading
 
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     gate = threading.Event()
     real_apply = core.apply
@@ -667,7 +677,7 @@ def test_update_apply_runs_as_a_job_and_reports(env, update_core, monkeypatch):
 
 
 def test_update_apply_refuses_before_starting_a_job(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     assert _post(env, "/update/apply", {"version": "latest"}) == {"ok": False, "error": "update_bad_version"}
     assert _post(env, "/update/apply", {"version": "0.2.0a1"}) == {"ok": False, "error": "update_not_newer"}
@@ -686,11 +696,11 @@ def test_update_and_uninstall_exclude_each_other(env, update_core, monkeypatch):
 
     def slow_apply(target, **kw):
         gate.wait(5)
-        from mordred_hermes import _self_update as core
+        from mordred_hermes._core import _self_update as core
 
         return core.UpdateReport("0.2.0a1", target, ())
 
-    monkeypatch.setattr("mordred_hermes._self_update.apply", slow_apply)
+    monkeypatch.setattr("mordred_hermes._core._self_update.apply", slow_apply)
     monkeypatch.setattr(uninstall_cli, "run_uninstall", lambda ctx, opts: 0)
     started = _post(env, "/update/apply", {"version": "0.2.0a3"})
     assert started["ok"]
@@ -713,7 +723,7 @@ def test_update_and_uninstall_exclude_each_other(env, update_core, monkeypatch):
 
 
 def test_update_apply_failure_carries_the_step_output(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     update_core.apply_error = core.UpdateFailed("install-package", "resolver said no")
     started = _post(env, "/update/apply", {"version": "0.2.0a3"})
@@ -729,7 +739,7 @@ def test_update_apply_failure_carries_the_step_output(env, update_core):
 
 
 def test_update_apply_failed_rollback_has_its_own_code(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     update_core.apply_error = core.UpdateFailed("install-requirements", "no", rolled_back=False, rollback_output="rb")
     started = _post(env, "/update/apply", {"version": "0.2.0a3"})
@@ -739,7 +749,7 @@ def test_update_apply_failed_rollback_has_its_own_code(env, update_core):
 
 
 def test_update_apply_refusal_inside_the_job_is_reported(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     update_core.apply_error = core.UpdateRefused("no-uv", "uv vanished")
     started = _post(env, "/update/apply", {"version": "0.2.0a3"})
@@ -749,7 +759,7 @@ def test_update_apply_refusal_inside_the_job_is_reported(env, update_core):
 
 
 def test_update_apply_hermes_floor_refusal_reports_a_failed_rollback(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     update_core.apply_error = core.UpdateRefused(
         "hermes-too-old", "needs Hermes 0.30 (restoring FAILED)", rolled_back=False

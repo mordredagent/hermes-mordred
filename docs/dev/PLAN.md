@@ -3,18 +3,48 @@
 > **Status**: current implementation map. Completed PR-by-PR history lives in
 > Git and PR descriptions; this document describes the architecture to maintain
 > now. [`SPEC.md`](./SPEC.md) defines behavior and [`TODO.md`](./TODO.md) lists
-> open work.
+> open work. The dated execution sequences below retain stable headings for
+> references; they are not independent task queues. Use TODO for reconciled
+> implementation/acceptance status and CI for actual validation evidence.
 
 Mordred is a standalone Python distribution loaded through
 `hermes_agent.plugins`. It does not fork Hermes and does not submit changes to
 Hermes upstream.
 
+
+## Bounded macOS presence reuse
+
+`keyvault/_presence.py` binds operation-local scope, fixed-purpose credential
+observations, admission and cancellation; `_presence_transport.py` bounds the
+private pipe protocol. `PresenceSession.swift` owns native authentication and
+expiry. `_presence_hosts.py` adapts verified Hermes/Desktop identities; extension
+connections bind their pairing generation directly. No service instance stores
+caller authority. Both raw mail workers and Desktop jobs carry context and
+revoke it before draining cancelled work. A cancelled operation cannot create a
+helper after a late capability result. Weakly held operation scopes revoke a
+caller's previous profile before a late worker can acquire presence. Monitor
+checks observe the process home independently of request ContextVars; callbacks
+that read profile-specific pairing state temporarily bind only Hermes's profile
+selector in a fresh context, retaining no request-context secrets.
+Nonzero opt-in explicitly requires OS
+presence even for unattended keys; zero preserves their previous behavior.
+The native helper owns LAContext expiry, independent lock/sleep notifications
+and parent lifetime. Python owns bounded admission, prompt-free compatibility
+negotiation and operation-local profile/session/purpose binding. Existing custody
+observations remain authoritative on each decrypt. No plaintext cache is added.
+Run critical feedback and complete containing security modules, then one final
+regression, static checks and the CI extras type environment. Record isolated
+live-device evidence in VALIDATION_LOG before setting a profile to 300 seconds.
+
+
 ## Current architecture
 
 One Hermes entry point, `mordred` (`plugin.py`), registers these components in
-this order: keyvault, llm_guard, network, privacy_check, e2e, wizard. The
-component names below are the pre-0.2.0a0 entry-point names, which survive as
-config section names (`plugins.mordred_network`, ...).
+this order: keyvault, llm_guard, network, privacy_check, dbcrypt, e2e,
+activity, wizard. The component names below are the pre-0.2.0a0 entry-point
+names, which survive as config section names (`plugins.mordred_network`, ...);
+`dbcrypt` and `activity` never had their own entry point (`activity` reads
+`plugins.mordred_activity`).
 
 | Component (former entry point) | Implementation | Responsibility |
 |---|---|---|
@@ -24,6 +54,8 @@ config section names (`plugins.mordred_network`, ...).
 | `mordred_network` | `network/` | Process-wide Tor/VPN/clearnet route |
 | `mordred_keyvault` | `keyvault/` | Vault, hardware key, backup, and signing |
 | `mordred_e2e` | `extension/gateway_plugin.py` | Slack/Discord E2E gateway hook, Telegram tools |
+| (none) | `dbcrypt/` | Shared SQLCipher lifecycle, monitoring, migration and backup authority |
+| (none) | `activity/` | Encrypted browser-activity capture, store and corrections |
 
 Shared policy, path, audit, YAML, provider, and terminal boundaries live at the
 package root. The extension package also contains the standalone localhost
@@ -48,6 +80,16 @@ Phase 0 is complete. Its rules remain the baseline for every change.
 - The optional `hermes-upstream` remote is for source inspection only.
 - `.github/workflows/upstream-check.yml` checks both the latest PyPI release and
   upstream `main` for hook-name and consumed-payload drift.
+- The AST scanner recognizes `invoke_hook` and `ainvoke_hook`, their imported
+  aliases, and module-level wrappers that forward the first parameter and
+  untouched `**kwargs` to either dispatcher. Modified payloads and hook names
+  are not treated as transparent wrappers.
+- The isolated reporter normalizes exact status tokens before constructing
+  Issue API inputs. It paginates open `upstream-drift` issues and manages only
+  its fixed-title `github-actions[bot]` reports. PyPI drift/unavailability or
+  an incomplete check job sets `actionable`; main-only problems remove it.
+  Repeated reports replace the body while preserving unrelated labels; an
+  all-ok run closes managed reports. No weekly comments or upstream PRs.
 
 ### 0.3 Mordred-owned paths (kept in sync with PATHS.md)
 
@@ -224,7 +266,7 @@ regressing silently.
 Database encryption is implemented in `dbcrypt`: the startup shim selects
 SQLCipher, conversion uses journals and process-lifetime locks, and hooks check
 protection each turn. The CLI owns conversion and uninstall ordering; see
-[`STATE_DB_ENCRYPTION.md`](./STATE_DB_ENCRYPTION.md) for the macOS-only lifecycle.
+[`STATE_DB_ENCRYPTION.md`](./STATE_DB_ENCRYPTION.md) for the lifecycle and its admitted platforms.
 
 ### Documentation
 
@@ -453,7 +495,7 @@ Result: actual NitroTPM custody, Python integration, cross-instance rejection,
 stop/start persistence, CLI installation, and deletion all passed. No baseline
 product defect was found in these exercised paths. Linux memory encryption
 remains inactive, as expected. Full evidence scope and limitations are recorded
-in [CI.md](CI.md#manual-live-device-validation-log).
+in [VALIDATION_LOG.md](VALIDATION_LOG.md#manual-live-device-validation-log).
 
 ### Task 1: Keyvault — isolated Linux memory-key custody
 
@@ -1301,8 +1343,8 @@ an acceptance failure in the requested live run.
 |---|---|---|
 | Keyvault runtime | `keyvault/_storage.py`, `_memory_key.py`, `_memory_hook.py`, `_plaintext_capture.py`, `_extension_config.py`, `log_encryption.py` | Memory custody provision/reset/purge, no replacement key on unavailable data, retained data |
 | Wizard | `wizard/env_file_writer.py`, `policy_writer.py`, `credentials_writer.py`, `audit_cli.py`, `openclaw_migration.py`, installation flows | Config preservation, permission migration, packaged installation under ordinary user |
-| Network | Network audit/config users of `_audit_io.py`, `_file_lock.py`, `_log_rotation.py` | Native startup/audit plus route/strict failure behavior |
-| LLM guard/policy | Policy and audit users of `_policy_io.py` and shared I/O | Policy integrity and refusal behavior |
+| Network | Network audit/config users of `_core/_audit_io.py`, `_core/_file_lock.py`, `_core/_log_rotation.py` | Native startup/audit plus route/strict failure behavior |
+| LLM guard/policy | Policy and audit users of `_core/_policy_io.py` and shared I/O | Policy integrity and refusal behavior |
 | Privacy check | `privacy_check/audit.py` | Multi-process append/rotation, private audit retention |
 | Extension/Desktop | `extension/pairing.py`, `history.py`, `telegram/store.py`, `desktop/install.py` | Store/pairing lifecycle, runtime/UI and later Windows 11/MSIX acceptance |
 
@@ -1327,10 +1369,10 @@ without a separate instruction. Documentation is English.
 | --- | --- | --- | --- |
 | C1a: checked lifecycle primitives | #192 | `_private_fs/`, shared storage tests | deletion/metadata/enumeration/append/rename failure injection, native ACL/reparse/hardlink/identity and process-lock tests |
 | C1b: confidential shared parent | C1a | distinct `_private_fs` directory/file admission and checked absence | safe inherited ACLs accepted, private boundary unchanged, unsafe grants/owners/reparse/ancestor absence refused, new files private before bytes |
-| C2: shared policy transaction | C1 | `_policy_io.py`, `_yaml_io.py`, shared caller coordinator | cross-directory pending-marker failures, nested writer coordination and hostile cache inputs |
+| C2: shared policy transaction | C1 | `_core/_policy_io.py`, `_core/_yaml_io.py`, shared caller coordinator | cross-directory pending-marker failures, nested writer coordination and hostile cache inputs |
 | C3: wizard configuration | C2 | `wizard/policy_writer.py`, `env_file_writer.py`, `credentials_writer.py`, cleanup backups | concurrent policy/config/dotenv updates, preserved YAML, unsafe-state refusal, native configure rerun |
 | C4: native install/helper | #190, C1b | `scripts/install.ps1`, wizard interpreter/launcher resolution, native helper command and setup/status | PowerShell 5.1 and pwsh, spaces/non-ASCII, selected venv identity, owned launcher upgrade/removal, sdist/wheel installation |
-| C7a: shared audit operations | C1 | `_audit_io.py`, `_log_rotation.py` | stable transaction, append rollback, no-replace rotation, compression and identity-bound retention |
+| C7a: shared audit operations | C1 | `_core/_audit_io.py`, `_core/_log_rotation.py` | stable transaction, append rollback, no-replace rotation, compression and identity-bound retention |
 | C5: keyvault lifecycle/runtime | C1, C7a, #190, #194 | keyvault memory storage, markers, capture/export, runtime discovery/hooks, encrypted audit and file-vault gates | real CNG custody, failure preservation, runtime discovery refusal, foreign-user denial, restart/reboot, isolated reset and excluded recovery refusal |
 | C6: wizard encryption lifecycle | C3–C5 | wizard memory/Telegram/export/reset/uninstall orchestration and excluded seal/recovery gates | installed Hermes runtime consumes encrypted memory, no plaintext removal before verified runtime, verified backups and honest status |
 | C7b: audit and privacy callers | C7a, C5 | privacy writer, then wizard audit CLI in separate PRs | multi-process NDJSON/MRAL append, rollback, rotation/compression, retention/purge identity and uncertain outcomes |
@@ -2286,3 +2328,467 @@ pin their platform seam explicitly, including when run on native Windows.
 
 Native Windows source/wheel reruns, a real Telegram account and Windows 11
 acceptance remain independent completion gates.
+
+## Browser activity learning implementation
+
+Behavior: [`SPEC.md`](./SPEC.md) §"Browser activity and conditional learning
+(2026-10-20)". Design:
+[`2026-10-19-browser-activity-learning-design.md`](../superpowers/specs/2026-10-19-browser-activity-learning-design.md);
+implementation plan:
+[`2026-10-20-browser-activity-learning-plan.md`](../superpowers/plans/2026-10-20-browser-activity-learning-plan.md).
+
+| Design component | Modules |
+|---|---|
+| Operator and extension collectors | the paired browser extension (its collector code is not in this repository; Hermes's own capture is `activity/capture_hermes.py`); the operator collector (operator repository) was retired on 2026-10-30 |
+| Authenticated receiver | `extension/activity_api.py` (`activity_batch` / `activity_status` frames, `EXTENSION_PRINCIPAL`), `activity/contracts.py` (normalization, `PeerPrincipal`), `activity/ingest.py` (`build_receiver`, hourly bounded retention after append), `activity/_capture_audit.py` (`activity.capture_refused`, once per process and code) |
+| Secret redaction | `activity/_redaction.py` (standard-library-only masking, bounded scanning and caches); `activity/contracts.py` explicitly re-exports its public redaction functions, constants and type alongside event validation, serialization and digests |
+| Activity store | `activity/_paths.py`, `activity/_gate.py` (protection gate, keyed opener), `activity/_schema.py` (schema v3, in-place v1→v2→v3 migration), `activity/store.py` (append, episodes, status, backup/restore, `plan_retention`/`apply_retention`) |
+| Corrections | `activity/corrections.py` (record-only: one `user_correction` event appended to an existing episode; nothing derived) |
+| Term matching helpers | `activity/matching.py` (`terms` with CJK bigrams, `SessionBudget` counting characters and shown episodes per session) |
+| History for Hermes (B1) | `activity/history.py` (bounded queries `episodes_for_site` / `episodes_for_terms` / `episode_detail`, `render_block`), `activity/_history_access.py` (configuration cached by mtime, gated store reader, session budget, `activity.history_unavailable` audit), `activity/hooks_history.py` (`transform_tool_result`, `pre_llm_call`), `activity/tools.py` (`mordred_browser_history`, `mordred_browser_history_episode`, skill registration), `activity/skills/browser-history/SKILL.md` |
+| Commands | `wizard/activity_cli.py` (`status`, `use on\|off`, `tools on\|off`, `correct`; `set_history_switch` writes `history_enabled` / `history_tools_enabled`), `wizard/activity_store_cli.py` (`backup`, `restore`, `retention`) |
+| Configuration | `activity/config.py` (`plugins.mordred_activity`; `history_tools_active` gates the lookup tools) |
+
+`plugin.py` wires `activity` after `e2e` and before `wizard`; its
+`register()` adds the two history hooks, the two lookup tools and the
+`browser-history` skill (no auxiliary task), reading no configuration and
+opening no store at registration.
+Tests use an explicit plain-SQLite opener passed to `ActivityStore`;
+production code only uses the opener built by `_gate.open_store` after the
+gate passed.
+
+The lesson pipeline (candidate lessons, validation and adoption, the LLM
+review, the recall tools and skills) was removed on 2026-10-22 before any
+release; the deleted modules are `lessons.py`, `review.py`,
+`_review_jobs.py`, `_review_output.py`, `_review_run.py`,
+`_review_snapshot.py`, `boundary.py`, `tools.py`, `retrieval.py`, `skills/`,
+`wizard/activity_lessons_cli.py` and `wizard/activity_review_cli.py`. Schema
+v3 drops their tables.
+
+Delivery as shipped:
+
+1. **Contracts and recording** — gate, store, receiver, peer credentials, WS
+   frames, `status`/`pair-operator`/`peers` CLI, operator collector. The
+   operator peer credential, its frames and the `pair-operator` / `peers`
+   commands were removed on 2026-10-30 with the operator collector.
+2. **Corrections as raw events** — `activity correct` and operator-sent
+   corrections are stored as events; retention, backup and restore.
+3. **Hermes-side use of the history** — designed in
+   [`2026-10-22-browser-history-for-hermes-design.md`](../superpowers/specs/2026-10-22-browser-history-for-hermes-design.md).
+   B1 (read side: navigation block, turn-start context, lookup tools, master
+   switch, secret-shaped typed-text check) and B2 (Hermes as a collector of
+   its own browser calls and of chat corrections) are shipped; B3 (live
+   validation) remains, see [`TODO.md`](./TODO.md)
+   §"Browser activity learning".
+4. **Measured expansion (deferred)** — more collectors (including human DOM
+   observation), an encrypted client outbox and a raw-history administrative
+   viewer. Each waits for measured benefit.
+
+Gaps between the design and this code are listed in SPEC §"Not implemented in
+this delivery".
+## Imported message provenance implementation
+
+**Spec:** [Imported message provenance](SPEC.md#imported-message-provenance-2026-10-22).
+Design record:
+[`2026-10-19-imported-message-provenance-design.md`](../superpowers/specs/2026-10-19-imported-message-provenance-design.md).
+Status: steps 1 to 11 have landed on `feat/imported-message-provenance` (see
+"Landed steps" below); step 12 is in progress. One component per PR, docs first;
+security-sensitive PRs (3, 4, 7, 8, 10) run their complete containing test
+modules.
+
+**Architecture:** a library package `src/mordred_hermes/imports/` holds the
+record contract, store, renderer and evidence validator. Telegram sync, the mail
+collector and the Hermes tool are thin consumers. Everything lives in
+`<home>/plugin-data/mordred/mordred.db` behind the activity protection gate.
+
+### PR sequence
+
+| Step | PR | Files | Tests |
+|---|---|---|---|
+| 0 | Precondition (other session) | commit the `activity` work on `feat/browser-activity-learning` and reconcile SPEC activity schema v2 versus code v1; then `git worktree add ../hermes-mordred-provenance -b feat/imported-message-provenance feat/browser-activity-learning`; rebase onto `dev` after the activity PR merges | none |
+| 1 | Docs | SPEC, PLAN, TODO, PATHS, HOOK_PAYLOADS, CI, design-doc revision note | existing doc-contract tests |
+| 2 | Records, render, evidence | `imports/records.py`, `imports/render.py`, `imports/evidence.py` | `tests/imports/test_records.py`, `test_render.py`, `test_evidence.py` |
+| 3 | Store | `imports/store.py`, `imports/_mail_reconcile.py`, `imports/_schema.py`, `imports/legacy_enc.py`; `activity/_gate.py` renames `_keyed_opener` to public `keyed_opener` | `tests/imports/test_import_store.py` (plain-sqlite seam) |
+| 4 | Telegram conversion and sync | `extension/telegram/client.py` (`convert_import_message`), `history.py` sinks, `service.py`, `store.py` index version 2 | extend `tests/extension/test_telegram_import.py`, `tests/test_windows_telegram_archive.py` |
+| 5 | `telegram migrate-store` | `wizard/` migrate-store command and parser | `tests/extension/test_telegram_migrate_store.py` |
+| 6 | Ask rendering and evidence | `extension/telegram/ask.py`, `service.py` (`on_evidence`), `api.py` (`telegram_ask_evidence` frame) | extend `test_telegram_local_llm.py`, `test_telegram_api.py`, `test_telegram_hermes_tools.py`, `tests/integration/test_telegram_local_llm.py` |
+| 7 | Reader mode | `privacy_check/egress.py`, `privacy_check/_reader_sessions.py`, `hooks.py`, `_audit_reasons.py`, `tools/hook_payload_contract.json` | full `tests/test_privacy_check_egress.py`, new `tests/test_privacy_check_reader_mode.py`; lands before 8 |
+| 8 | `mordred_history_search` | `extension/telegram/hermes_tools.py`, `skill/SKILL.md` section "Reading imported history", tool prompt | `tests/extension/test_history_search_tool.py` |
+| 9 | Mail collector library | `imports/mail/` (`source`, `headers`, `owner`, `threading`, `body`, `segment`, `normalize`, `importer`) and `tests/fixtures/mail/` | `tests/test_mail_source.py`, `_headers`, `_owner`, `_threading`, `_segment`, `_body`, `_normalize` |
+| 10 | Mail CLI | `wizard/mail_cli.py`, `_add_mail` in `_cli_parsers.py` | `tests/test_mail_import_cli.py` |
+| 11 | Evaluation generator and scorer | `tools/provenance_eval/` (`scenarios`, `generate`, `truth`, `questions`, `score`, `report`) | `tests/test_provenance_eval_generator.py`, `_score.py`, `_conformance.py` (conformance needs 9) |
+| 12 | Evaluation drivers | `tools/provenance_eval/drivers.py`, `__main__.py`; then a docs PR with live results and the header-language decision | `tests/integration/test_provenance_eval.py` (gated) |
+
+Step 11 may start in parallel with step 9. Steps 4 and 6 are end-to-end changes
+and must keep the Linux and Windows `.enc` paths unchanged.
+
+`ImportStore` owns connections, transaction boundaries, writer guards, cursor
+updates and publication. Its shared `_write_messages` path handles copy
+selection, reference persistence, message writes and counts for both thread
+and batch imports. Thread staging (including dry-run rollback) and batch
+publication retain their separate caller boundaries. Mail thread reconciliation
+lives in `_mail_reconcile.py`, using the caller's connection and participant
+decoder/conversation merger without opening or committing a connection.
+Conversation updates and merges share metadata calculation inside `store.py`;
+each caller explicitly chooses its existing cursor precedence.
+
+### Landed steps (2026-10-22)
+
+Commits on `feat/imported-message-provenance` since
+`feat/browser-activity-learning` (`git log --oneline
+feat/browser-activity-learning..HEAD`), grouped by step:
+
+| Step | Commit subjects |
+|---|---|
+| 1 | `docs: specify imported-message provenance on mordred.db` |
+| 2 | `feat: add imports library with records, aliases, renderer and evidence` |
+| 7 | `feat: add reader mode to privacy_check tool egress`; `fix: close three provenance security-review findings` |
+| 3 | `feat: add ImportStore on mordred.db and the legacy .enc adapter`; `docs: reconcile store schema details and the reader-mode reason code` |
+| 9 | `feat: add the file-based mail collector library`; `fix: harden mail owner classification, quote linking and parser limits` |
+| 4 | `feat: convert Telegram messages with provenance and sync into mordred.db` |
+| 10 | `feat: add hermes-mordred mail import and mail status` |
+| 5 | `feat: add telegram migrate-store and delete import rows on logout --forget` |
+| 6 | `feat: render attributed head lines and validated evidence in telegram ask` |
+| 11 | `feat: add the provenance evaluation harness without model drivers` |
+| 5, 6 fixes | `fix: verify Telegram quote containment and stop logout --forget on undeleted rows`; `fix: uninstall forces the Telegram forget and documents the stop-unless-force rule` |
+| 8 | `feat: add mordred_history_search and the reader-mode self-check` |
+
+Step 12 (`tools/provenance_eval/drivers.py`, the gated integration test, then a
+docs PR with live results and the header-language decision) is in progress.
+Follow-ups that the landed code leaves open are in
+[`TODO.md`](./TODO.md#imported-message-provenance).
+
+### Per-PR verification
+
+Each PR: `uv run python tools/run_critical_tests.py`, its changed modules,
+`uv run ruff check src tests scripts`, `uv run ruff format --check src tests
+scripts`, `uv run mypy --strict src tools scripts/keyvault_offline_digest.py`,
+and coverage at or above 80%. Live-gated results are recorded in
+[`VALIDATION_LOG.md`](VALIDATION_LOG.md#manual-live-device-validation-log) after execution; see
+[Provenance evaluation runs](CI.md#provenance-evaluation-runs).
+
+Risks: loss of per-question Touch ID for Telegram text (accepted); Hermes keeps
+its own copy of tool results; session-id inheritance after compaction is
+untested on Hermes 0.19.0 and 0.21.5 (the tool refuses when unknown); head
+lines cost roughly 20 to 30 percent of the context budget (measured by the
+evaluation).
+
+## Imported mail collector implementation
+
+**Spec:** [Imported mail collector](SPEC.md#imported-mail-collector-2026-10-22).
+Delivered in PRs 9 (library) and 10 (CLI) of the sequence above.
+
+- Library `src/mordred_hermes/imports/mail/`: `source.py` (streaming `rb` mbox
+  splitter and `.eml` reader), `headers.py`, `owner.py` (`classify()`),
+  `threading.py`, `body.py`, `segment.py`, `normalize.py`, `importer.py` (two
+  passes). Standard library only.
+- Fixtures in `tests/fixtures/mail/`, hand written with RFC 2606 domains:
+  `takeout_small.mbox`, `mboxo_from_escape.mbox`, `iso2022jp_ext.eml`,
+  `gmail_ja_forward.eml`, `outlook_ja_reply.eml`, `thunderbird_ja.eml`,
+  `nested_quotes.eml`, `html_only.eml`, `list_rewrite.eml`,
+  `spoof_own_dmarc_fail.eml`, `bot_noreply.eml`, `missing_date.eml`,
+  `forged_head_line.eml`.
+- CLI tests assert that canary strings never reach stdout, stderr or `caplog`,
+  that `plugin-data` stays absent when the gate refuses, and that a second import
+  reports duplicates.
+- Later, outside this plan: a Gmail API collector that feeds the same
+  normalization and `write_thread` path.
+
+### IMAP sync (2026-10-22)
+
+**Spec:** [IMAP sync](SPEC.md#imap-sync-2026-10-22); design record
+[`2026-10-22-mail-imap-sync-design.md`](../superpowers/specs/2026-10-22-mail-imap-sync-design.md)
+(the Codex review revision at its end overrides its earlier text). Delivered
+in three stages that are committed separately:
+
+1. Documentation: this subsection, the SPEC subsection, PATHS rows for
+   `<home>/mordred/mail/` and the `mail_imap.*` cursor keys, the
+   `mordred_mail_sync` handler codes in HOOK_PAYLOADS section 9, the USAGE
+   steps, the CI note and the TODO entries.
+2. Library and CLI:
+   - `imports/mail/source.py`: `TrustedMeta` and `TrustedBytes`; `RawMessage`
+     gains `trusted`. `owner.py` (`classify(..., trusted=)`, the evidence code
+     `imap_sent_folder`, `SENT_EVIDENCE`), `normalize.py` (`with_trusted`) and
+     `importer.py` read labels and thread ids from it and ignore the embedded
+     headers.
+   - `imports/mail/_imap_codec.py` (modified UTF-7, tokenizer, FETCH, LIST,
+     SEARCH and `X-GM-LABELS` parsing), `imap.py` (egress route, SOCKS5 with
+     remote DNS, TLS context, the command allowlist, `ImapSession`),
+     `secrets.py` (Enclave-sealed credentials, role
+     `mordred-hermes.mail.credentials.v1`) and `imap_sync.py` (`run_fetch`,
+     cursors, batches, `FetchResult`, the writer lock).
+   - `imports/store.py`: `commit_batch`, `fail_open_runs`, `meta_items` and
+     `write_thread(merge_conversation=True)`.
+   - `wizard/mail_sync_cli.py` (`mail setup|fetch|forget`, the IMAP part of
+     `mail status`); `wizard/mail_cli.py` dispatches to it, prints the IMAP
+     status and takes the writer lock in `mail import`.
+3. Hermes tool: `extension/telegram/mail_tool.py` (`mordred_mail_sync`),
+   registered in `hermes_tools.register_tools`; `privacy_check/egress.py`
+   (`MAIL_SYNC_TOOL` in `FIRST_PARTY_TOOLS` and `READER_ALLOWED`, never in
+   `READER_TOOLS`/`TAINT_SOURCES`); the Telegram skill section "Syncing mail".
+
+Tests (offline, no network): `tests/_fake_imap.py` is a scripted IMAP server
+driven by the real `imaplib` client over a socket pair; it records every
+command and reports `SELECT`, `STORE`, `COPY`, `EXPUNGE`, `APPEND` or a body
+fetch without `.PEEK` as a violation. `tests/test_mail_imap_sync.py` (Gmail
+labels and thread ids, forged headers ignored, the generic two-folder path,
+cursors, `UID n:*` self-inclusion, `UIDVALIDITY` epochs, newest-N and
+`excluded_history`, `--since` backfill, 200-UID groups and 64 MiB batches,
+oversize skipped before any literal, a failed batch leaving the cursor at the
+last committed one, a server hang-up, the time budget, reclaim, merge, dry
+run, the gate matrix and canaries), `test_mail_imap_client.py` (codec, route
+to direct and SOCKS5, refused proxy kinds, TLS context, SNI, the command
+allowlist, silenced debug output), `test_mail_trusted_meta.py`,
+`test_mail_store_batches.py`, `test_mail_secrets.py` (with a fake Enclave),
+`test_mail_sync_cli.py` and `tests/extension/test_mail_sync_tool.py`
+(arguments, `check_fn` matrix, counts-only result, budget, lock); reader-mode
+cases in `tests/test_privacy_check_reader_mode.py`. A real fetch is
+live-gated ([CI.md](CI.md#provenance-evaluation-runs)).
+
+- Desktop follow-up (2026-10-23): the setup flow and the forget logic move into
+  `imports/mail/setup_flow.py` and `imports/mail/forget.py` so `mail setup`,
+  `mail forget` and the Desktop page share them; `imap.py` adds `ImapError.hint`
+  (PR D2 of the
+  [Desktop mail and ceremony pages implementation](#desktop-mail-and-ceremony-pages-implementation)).
+
+## Desktop mail and ceremony pages implementation
+
+**Spec:** [Desktop mail and ceremony pages](SPEC.md#desktop-mail-and-ceremony-pages-2026-10-23);
+design record
+[`2026-10-23-desktop-mail-and-ceremonies-design.md`](../superpowers/specs/2026-10-23-desktop-mail-and-ceremonies-design.md).
+D1–D4 are implemented in the merged Desktop/mail code; D5 direct-tools and D6
+history switches are also present. Remaining UI/native acceptance and regressions
+are tracked under [TODO](TODO.md#imported-message-provenance). The sequence below
+records component boundaries and validation requirements, not unstarted tasks.
+
+One component per PR, all targeting `dev`. Each PR runs
+`uv run python tools/run_critical_tests.py`, the changed test modules, `ruff` and
+`mypy --strict`; D2 and D4 also run their complete containing test modules
+(security-sensitive). One full regression runs at the end of D4.
+
+### D1: documentation
+
+- Component: docs. Files: SPEC, PLAN, TODO, PATHS and CI under `docs/dev/`; USAGE,
+  TELEGRAM and QUICKSTART under `docs/user/`; the design document.
+- Tests: `tests/test_docs_links.py`. Depends on: nothing.
+- `tools/ci_scope_paths.json` lists only existing paths (a test asserts it), so
+  entries for new files are added by the PR that creates each file: D2 for
+  `src/mordred_hermes/imports/mail/setup_flow.py`, `forget.py` and
+  `tests/test_mail_setup_flow.py`; D3 for `tests/test_desktop_page.py` and
+  `tests/_desktop_page.py`.
+
+### D2: mail library
+
+- Component: `imports/mail`, its `wizard/mail_sync_cli.py` driver and the read-only
+  opener in `imports/store.py`.
+- Also (Codex design review F5, F6, F14, F19, F7): `secrets.py` writes temporary
+  files and renames in order, reports the residue state `credentials_left` from
+  `flags()`, and `ensure_key` returns the effective Touch ID policy that `store`
+  records (`touch_id_policy_mismatch`); `imap_sync.py` persists `last_attempt` and
+  `last_success`; `imap.py` parses the response code from `exc.args[0]` (bytes or
+  str) and keeps the hint off `FetchResult.as_dict()`; the setup flow takes the
+  writer lock for admission and `finish`, reaps on every call and through a public
+  `reap()`, allows ONE pending flow (`mail_setup_busy`), builds provisional
+  credentials, validates the selection (`invalid_selection`), keeps the generation
+  tombstone `<home>/mordred/mail/generation` (`mail_setup_stale`) and re-checks the
+  effective key policy at finish. `imports.store.open_import_store_readonly(home)` is
+  non-creating (pure path resolution, `is_file()` first, `file:?mode=ro`) with its own
+  non-unlocking gate (key material must decode to 32 bytes; no `check_protection`, no
+  provider), `store_uninitialised`, `disk_full`, and no schema initialisation.
+- Files: `imap.py` (`ImapError.hint`, `IMAP_HINTS`), `setup_flow.py`
+  (`MailSetupFlow`, `MailSetupFlows`, `MailSetupError`), `forget.py`
+  (`forget()`), `cmd_setup` and `cmd_forget` driving them, hint printing in
+  `mail fetch`.
+- Tests: `tests/test_mail_setup_flow.py` (new, on `tests/_fake_imap.py`),
+  `tests/test_mail_imap_client.py`, `tests/test_mail_sync_cli.py`,
+  `tests/test_mail_secrets.py`, the complete `tests/test_mail_imap_sync.py` and the
+  store tests for the read-only opener.
+- Depends on: D1.
+
+### D3: page framework
+
+- Component: `desktop` (page only; no new backend).
+- Files: `src/mordred_hermes/desktop/assets/desktop/plugin.js` (`Step` states,
+  `BLOCKERS`, overview card, groups, "Why?" blocks, accessibility, theme colours,
+  `client_version=4` with the "Update Mordred" rendering).
+- Tests: `tests/_desktop_page.py` (the `block()` / `render_page()` helpers moved
+  from `test_desktop_windows_page.py`), `tests/test_desktop_page.py` (new) and
+  `tests/test_desktop_windows_page.py` (harness moved; the `client_version` assertion is updated deliberately, the other
+  assertions are unchanged).
+- Depends on: D1; can run in parallel with D2.
+
+### D4: Desktop backend and sections
+
+- Component: `desktop` (api and page).
+- Files: `desktop/api.py` (`/status` v4, `/databases/*`, `/imports/status`,
+  `/mail/*`, `vault_anchor_stale` with `anchor_store`) and `plugin.js`
+  (`DatabasesStep`, `MailStep`, store-backed Telegram counts, new `MESSAGES` and
+  `IMAP_HINTS`). Also: `POST /vault/prepare` and `POST /vault/{flow_id}/commit`
+  (passphrase shown before anything is created), `/status.vault`, memory-only
+  `/memory/enable` requiring `env_enrolled && env_injecting` (`env_required`);
+  `/databases/status` and the schedule-or-report `/databases/encrypt` (no `migrate()`);
+  the periodic 30 s reaper for mail and vault flows with `cancel_all()` on shutdown; the shared body-parsing helper (`invalid_body`) applied to
+  every secret-bearing route including the existing ones; the closed
+  `_mail_projection` and `_imports_projection`; `telegram_archive: {"legacy": null}`;
+  `cancel_all` on forget; a coalescing status refresh. It consumes
+  `open_import_store_readonly` from D2.
+- Tests: the complete `tests/extension/test_desktop_api.py` (security-sensitive;
+  adds `/imports/status`, `/databases/status`, `/vault/prepare` and `/commit`, setup finish and
+  cancel, residue, restart with `job_not_found`, and malformed bodies posted to every
+  secret-bearing route) and `tests/test_desktop_page.py`; the live checklist of the design is recorded in
+  [VALIDATION_LOG.md](VALIDATION_LOG.md#manual-live-device-validation-log).
+- Depends on: D2 and D3.
+
+### D5: direct tool calls
+
+- Component: `wizard` (library and CLI) and `desktop` (routes and page), one PR: the
+  page and the CLI drive the same library. Spec:
+  [Direct tool calls](SPEC.md#direct-tool-calls-2026-10-23); owner decision of
+  2026-10-23 (default deferred, explicit opt-in). After two Codex reviews (REVISE) the
+  write is delegated to Hermes: Mordred never edits config.yaml.
+- Files: `wizard/direct_tools.py` (`read_mode`, `set_direct` running Hermes's own
+  `hermes config set|unset|get` in Hermes's environment under one lock, `hermes_command`,
+  the reader child with its sha256 answer cache, closed codes `config_unreadable`,
+  `config_vault_managed`, `config_write_failed`, `config_has_setting`,
+  `hermes_cli_missing`, `config_unsupported_shape`, `hermes_cli_unsupported` for a
+  Hermes without `config get`/`unset`, found by a `get` probe before any write),
+  `wizard/_direct_tools_yaml.py` (the
+  reader child's `main`: Hermes's YAML 1.1 C-first loader setup and rule, shared-mapping
+  detection, warnings captured),
+  `wizard/direct_tools_cli.py` and `_cli_parsers.py` (`direct-tools on | off |
+  status`), `desktop/_seams.py` (`tools_mode`, `set_direct_tools`),
+  `desktop/_maintenance_routes.py` (`GET` / `POST /tools/direct`),
+  `desktop/_status_v4.py` (`tools` on every platform), `plugin.js` (the Tool calls card
+  under Maintenance with the manual three-line snippet and Copy, step 2.1's
+  recommendation, seven `MESSAGES`); USAGE, SPEC, PLAN, TODO and
+  `tools/ci_scope_paths.json`.
+- Tests: `tests/test_direct_tools.py` (the 26-case Hermes parity table and `%YAML 1.2`
+  directives, YAML warnings kept in the reader child while another thread churns
+  warning contexts, the child's stdin/one-line contract and cache, shared mappings,
+  a relative home, two simultaneous `off` requests, the lifecycle hook's reseal, a fake
+  `hermes` console script for get/set/unset (the `get` probe, a Hermes without `get`/
+  `unset` refused with no write, a probe already as asked),
+  a missing script, non-zero exits, a timeout, a verification mismatch, hidden output,
+  sealed-away and unreadable configs, the Windows read and delegation, and one real
+  `hermes config` test that is version-aware: a round trip on hermes-agent 0.19/0.21,
+  `hermes_cli_unsupported` with config.yaml byte-for-byte unchanged on 0.13, the Linux
+  floor; `MORDRED_TEST_HERMES_BIN` points it at another venv),
+  `tests/test_direct_tools_cli.py` (output, exit codes, the snippet, canaries),
+  `tests/extension/test_desktop_tools.py` (routes, strict boolean, closed codes, the
+  status field), `tests/test_desktop_page.py` (card, snippet and Copy, checkbox state,
+  payload, restart control, recommendation, `MESSAGES`), the version 4 key sets in
+  `tests/extension/test_desktop_status_v4.py`, `/tools/direct` in
+  `tests/extension/test_desktop_bodies.py`, and the unchanged Windows snapshot.
+- Depends on: D4. Review records: Codex review passes 1–3 (2026-10-23; notes retired
+  from the tree, available in Git history).
+
+### D6: browser history switches
+
+- Component: `activity` (the `history_tools_enabled` switch and the tools' gate),
+  `wizard` (`activity tools on|off`, the shared writer) and `desktop` (routes, status
+  field, page card), one PR: the page and the CLI drive the same writer. Spec:
+  [History for Hermes](SPEC.md#history-for-hermes-2026-10-22) and
+  [Browser history switches](SPEC.md#browser-history-switches-2026-10-24).
+- Files: `activity/config.py` (`history_tools_enabled`, `history_tools_active`,
+  `load(strict=True)`), `activity/tools.py` (`check_fn`, `history_tools_disabled`),
+  `wizard/activity_cli.py` (`set_history_switch`, `cmd_tools`, the status `lookups:`
+  line), `wizard/_cli_parsers.py`, `desktop/_seams.py` (`activity_history`,
+  `set_history_switch`), `desktop/_status_v4.py` (`activity_safe`),
+  `desktop/_maintenance_routes.py` (`GET` / `POST /activity/history`), `plugin.js` (the
+  Browser history card after Tool calls, `MESSAGES.history_config_*`).
+- Tests: `tests/test_activity_config.py`, `tests/test_activity_tools.py`,
+  `tests/test_activity_hooks_history.py` (the automatic blocks stay with the tools off),
+  `tests/test_activity_cli.py` (byte-identical round trips, status),
+  `tests/extension/test_desktop_activity.py` (routes, strict bodies, write failures,
+  no store/gate/Touch ID seam, the status field), the version 4 key sets and
+  `tests/test_desktop_page.py` (card, buttons, payload, alerts).
+
+### K1: keyvault (reference)
+
+- Separate component, already in [TODO.md](TODO.md) as the stale file-vault anchor:
+  `ensure_initialised` / `init` refuse a stale anchor with a code, a scoped
+  file-vault reset, a `status` line. Independent of D1 to D4; once it lands,
+  D4's `vault_anchor_stale` classification becomes a pass-through.
+
+## Imported-message provenance evaluation implementation
+
+**Spec:** [Imported-message provenance evaluation](SPEC.md#imported-message-provenance-evaluation-2026-10-22).
+Delivered in PRs 11 and 12.
+
+- Modules in `tools/provenance_eval/` (landed in PR 11): `scenarios.py`,
+  `generate.py`, `truth.py`, `questions.py`, `encode_mail.py`,
+  `encode_telegram.py`, `context.py`, `conformance.py`, `plan.py`, `score.py`,
+  `metrics.py`, `report.py`, `cli.py`, `__main__.py` and small helpers; `drivers.py` is PR 12
+  (in progress). Covered by `mypy --strict`, excluded from the wheel. Run it as
+  `uv run python tools/provenance_eval <command>`.
+- CI tests run without a model: `tests/test_provenance_eval_generator.py`,
+  `test_provenance_eval_score.py` (includes a refuse-everything model that must
+  fail the thresholds) and `test_provenance_eval_conformance.py` (mail
+  normalizer against the generated mbox).
+- Live drivers and `tests/integration/test_provenance_eval.py` are gated by
+  `MORDRED_PROVENANCE_EVAL=1`; tiers, budgets and the log template are in
+  [`CI.md`](CI.md#provenance-evaluation-runs).
+- Cost control: about 600 calls per header style, so tiers plus resumable JSONL
+  output; the header A/B runs on the privacy driver only.
+
+## Cross-platform database encryption rollout (proposed, 2026-10-24)
+
+**Spec:** [Cross-platform database encryption](SPEC.md#cross-platform-database-encryption-proposed-2026-10-24).
+**Design:** [Selected Approach A](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md).
+The user approved the architecture on 2026-10-24. The
+[implementation plan](../superpowers/plans/2026-10-24-cross-platform-database-encryption.md)
+defines the stage gate, exact interfaces, test tasks and component PR boundaries.
+Product code merged in PR #270 on 2026-10-28; platform acceptance is still recorded
+separately in docs/dev/CI.md's manual validation log.
+
+Keep independent component PRs in dependency order:
+
+1. Freeze ownership, failure, compatibility and AWS acceptance contracts in
+   documentation before cross-component implementation.
+2. Establish Windows SQLCipher/VFS feasibility with the actual driver before
+   downstream Windows implementation; a probe pass is not native filesystem
+   security acceptance, and a failing or not-run gate remains visible.
+3. Establish inert lease contracts and keyvault's root database-key authority
+   and dependency guards for key disable/reset/purge, retaining independent
+   profile memory custody. Complete checked Windows I/O before activation.
+4. Port `dbcrypt` driver capability, startup, locking, migration/decryption,
+   monitoring and backup behavior; preserve existing macOS database bytes and
+   key derivation. Wizard lifecycle and uninstall consumers land separately.
+5. Port activity/import-store protection and checked storage consumers, then
+   Telegram destination selection/migration and mail credentials/collectors in
+   their own component slices. Extend Windows custody schemas explicitly before
+   adding a mail role.
+6. Complete CLI/Desktop capability consumers after their platform prerequisites
+   land, retaining truthful unsupported/pending/error states.
+7. Validate source and fresh installed wheels on the retained AWS Linux and
+   Windows hosts, record independent outcomes in CI's manual log, and perform
+   final regression at integration freeze. Windows 11/Desktop and actual
+   external-service gates remain independently tracked.
+
+The design owns architecture and acceptance boundaries; the implementation plan
+owns exact interfaces and test tasks. This rollout outline does not authorize
+skipping native gates or combining unrelated component implementations into one PR.
+
+### Data-preserving uninstall implementation
+
+1. Establish the shared contract in SPEC before component changes.
+2. DB layer: complete preflight inventory, authenticated retained backups, fresh
+   plaintext verification, lease-bound operation permits, atomic plaintext
+   backup export and adversarial regression tests.
+3. Keyvault layer: explicitly consume restore versus deletion permits at the
+   final mutation boundaries; leave unrelated callers conservative and SQL-free.
+4. Wizard layer: root/profile plan and confirmation, read-only preflight,
+   restoration and verification, integration cleanup, then package removal.
+   Keep required recovery resources and print reinstall/export instructions.
+5. Verify each containing security test module and critical feedback, then lint,
+   formatting, strict typing and one final full regression. Native candidate
+   wheel acceptance uses isolated homes/keys on macOS Secure Enclave, Linux TPM
+   and supported Windows Server CNG; record actual evidence in CI, never infer
+   live-device coverage from mocks. No production home or key is a test fixture.
+
+Known-failure preflight includes package target availability, stopped Hermes,
+all profile restoration keys, incomplete conversion/backup records, unsupported
+archives and deletion dependencies. Preserve unknown state and require explicit
+recovery instead of guessing. Staged exports are verified against their source
+schema/count result and published only to an absent output. Retained backup
+registrations and native source bindings survive ordinary uninstall/reinstall.

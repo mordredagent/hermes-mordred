@@ -9,6 +9,7 @@ import pytest
 from mordred_hermes._private_fs import PrivateFSError
 from mordred_hermes.keyvault import _memory_storage as storage
 from mordred_hermes.keyvault import _windows_custody as custody
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from mordred_hermes.keyvault.memory_crypto import is_sealed, seal, unseal
 from tests._child_env import with_package_under_test
 from tests._keyvault_fakes import FakeBackend
@@ -49,8 +50,11 @@ def test_native_inherited_memory_seal_keeps_parents_and_casing_aad(native_memory
     directory = descriptor(home / "memories")
     original_file = descriptor(home / "memories" / "MEMORY.md")
     assert "ID;" in original_file
-    with custody.windows_custody_session(home, create=True, backend=backend) as owner:
-        key = owner.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        custody.windows_custody_session(home, create=True, backend=backend) as owner,
+    ):
+        key = owner.enroll_memory(database_lease=database_lease)
     # Fixture publication creates an existing seal, without an arming ceremony.
     from mordred_hermes._private_fs import open_confidential_directory
 
@@ -121,7 +125,7 @@ with windows_memory_session(Path(sys.argv[1]), create=True) as session:
     session.write_entries('MEMORY.md', ['child'], delimiter='\\n§\\n')
 print('done', flush=True)
 """
-    from mordred_hermes._windows_runtime import scrubbed_environment
+    from mordred_hermes._core._windows_runtime import scrubbed_environment
 
     env = with_package_under_test(scrubbed_environment(os.environ))
     env.update(HERMES_HOME=str(home), HERMES_SAFE_MODE="1", PYTHONUTF8="1")

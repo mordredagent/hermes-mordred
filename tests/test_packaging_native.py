@@ -104,3 +104,12 @@ def test_sdist_ships_native_installer(built_wheel: Path) -> None:
     with tarfile.open(next(built_wheel.parent.glob("*.tar.gz"))) as archive:
         names = {name.partition("/")[2] for name in archive.getnames()}
     assert "scripts/install.ps1" in names
+
+
+def test_wheel_bundles_the_plugin_skills(wheel_names: frozenset[str]) -> None:
+    """``register_skill`` points at SKILL.md files next to the modules; they must ship in the wheel."""
+    for skill in (
+        "mordred_hermes/activity/skills/browser-history/SKILL.md",
+        "mordred_hermes/extension/telegram/skill/SKILL.md",
+    ):
+        assert skill in wheel_names

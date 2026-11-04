@@ -1,0 +1,238 @@
+"""``plugins.mordred_activity`` parsing: site exclusions, raw-event retention and unknown keys."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from mordred_hermes.activity.config import ActivityConfig
+from mordred_hermes.activity.contracts import DEFAULT_EXCLUDED_SITES, site_excluded
+
+
+def test_site_keys_default_to_the_built_in_exclusions() -> None:
+    assert not DEFAULT_EXCLUDED_SITES
+    assert ActivityConfig().excluded_sites == DEFAULT_EXCLUDED_SITES
+    assert ActivityConfig.from_mapping({}).excluded_sites == DEFAULT_EXCLUDED_SITES
+
+
+def test_configured_exclusions_extend_the_empty_default_and_cover_subdomains() -> None:
+    config = ActivityConfig.from_mapping({"excluded_sites": [" Mail.Example ", "bank.example"]})
+    assert config.excluded_sites == DEFAULT_EXCLUDED_SITES | {"mail.example", "bank.example"}
+    assert config.warnings == ()
+    assert site_excluded("mail.example", config.excluded_sites)
+    assert site_excluded("eu.mail.example", config.excluded_sites)
+    assert not site_excluded("example", config.excluded_sites)
+    assert not site_excluded("notmail.example", config.excluded_sites)
+
+
+def test_unknown_site_keys_are_ignored_with_a_warning() -> None:
+    config = ActivityConfig.from_mapping({"excluded_sites": ["mail.example"], "allowed_sites": ["mail.example"]})
+    assert config.excluded_sites == frozenset({"mail.example"})
+    assert config.warnings == ("unknown key allowed_sites",)
+
+
+@pytest.mark.parametrize(
+    ("raw", "kept"),
+    [
+        ("mail.example", {"mail.example"}),
+        ([1], set()),
+        ([" "], set()),
+        (None, set()),
+        (["bank.example", "not a host"], {"bank.example"}),
+        (["Bank.example", 7, "*.pay.example"], {"bank.example", "pay.example"}),
+    ],
+)
+def test_invalid_excluded_sites_warn_keep_the_named_hosts_and_stop_collection(raw: Any, kept: set[str]) -> None:
+    config = ActivityConfig.from_mapping({"enabled": True, "collection_enabled": True, "excluded_sites": raw})
+    assert config.excluded_sites == DEFAULT_EXCLUDED_SITES | kept
+    assert config.warnings == ("invalid value for excluded_sites",)
+    # Never "record what was excluded before": the receiver refuses until the value is fixed.
+    assert (config.collecting, config.collection_refusal) == (False, "excluded_sites_invalid")
+    assert config.history_active is False
+
+
+def test_collection_refusal_codes() -> None:
+    assert ActivityConfig.from_mapping({}).collection_refusal == "collection_disabled"
+    assert ActivityConfig.from_mapping({"enabled": True}).collection_refusal == "collection_disabled"
+    on = ActivityConfig.from_mapping({"enabled": True, "collection_enabled": True, "excluded_sites": ["a.example"]})
+    assert (on.collecting, on.collection_refusal) == (True, None)
+    # Collection off wins over the exclusions: the switch is the reason a collector sees.
+    off = ActivityConfig.from_mapping({"enabled": True, "excluded_sites": "a.example"})
+    assert off.collection_refusal == "collection_disabled"
+
+
+def test_raw_retention_defaults_to_a_year() -> None:
+    assert ActivityConfig().retention_raw_days == ActivityConfig.from_mapping({}).retention_raw_days == 365
+
+
+def test_raw_retention_zero_means_keep_forever() -> None:
+    config = ActivityConfig.from_mapping({"retention_raw_days": 0})
+    assert (config.retention_raw_days, config.warnings) == (0, ())
+
+
+@pytest.mark.parametrize("raw", [-1, True, 1.5, "30", None])
+def test_invalid_raw_retention_falls_back_with_a_warning(raw: Any) -> None:
+    config = ActivityConfig.from_mapping({"retention_raw_days": raw})
+    assert config.retention_raw_days == 365
+    assert config.warnings == ("invalid value for retention_raw_days",)
+
+
+@pytest.mark.parametrize(
+    "key", ["review_mode", "recall_enabled", "review_provider", "recall_max_bytes", "retention_candidate_days"]
+)
+def test_keys_of_the_removed_lesson_pipeline_are_unknown(key: str) -> None:
+    config = ActivityConfig.from_mapping({"enabled": True, key: 1})
+    assert config.enabled is True
+    assert config.warnings == (f"unknown key {key}",)
+    assert not hasattr(config, key)
+
+
+# --- history_* keys ---------------------------------------------------------------------------------------
+
+HISTORY_DEFAULTS = {
+    "history_enabled": True,
+    "history_tools_enabled": True,
+    "history_on_navigate": True,
+    "history_turn_context": True,
+    "history_capture_hermes": True,
+    "history_chat_corrections": True,
+    "history_human_platforms": frozenset({"cli", "tui", "desktop"}),
+    "history_max_chars": 1500,
+    "history_max_episodes": 3,
+    "history_lookback_days": 90,
+    "history_session_budget_chars": 8000,
+    "history_max_tool_bytes": 4096,
+}
+
+
+def test_history_keys_default_to_on_but_the_feature_stays_off() -> None:
+    config = ActivityConfig.from_mapping({})
+    assert {key: getattr(config, key) for key in HISTORY_DEFAULTS} == HISTORY_DEFAULTS
+    assert config.enabled is False
+    assert config.history_active is False
+    assert ActivityConfig.from_mapping({"enabled": True}).history_active is True
+    assert ActivityConfig.from_mapping({"enabled": True, "history_enabled": False}).history_active is False
+
+
+def test_history_keys_parse_valid_values_without_warnings() -> None:
+    section = {
+        "history_enabled": False,
+        "history_tools_enabled": False,
+        "history_on_navigate": False,
+        "history_turn_context": False,
+        "history_capture_hermes": False,
+        "history_chat_corrections": False,
+        "history_max_chars": 800,
+        "history_max_episodes": 10,
+        "history_lookback_days": 7,
+        "history_session_budget_chars": 0,
+        "history_max_tool_bytes": 65536,
+    }
+    config = ActivityConfig.from_mapping(section)
+    assert {key: getattr(config, key) for key in section} == section
+    assert config.warnings == ()
+
+
+@pytest.mark.parametrize(
+    ("key", "raw"),
+    [
+        ("history_enabled", "yes"),
+        ("history_tools_enabled", "off"),
+        ("history_tools_enabled", 0),
+        ("history_turn_context", 1),
+        ("history_max_chars", 199),
+        ("history_max_chars", 8001),
+        ("history_max_episodes", 0),
+        ("history_max_episodes", 11),
+        ("history_lookback_days", 0),
+        ("history_session_budget_chars", -1),
+        ("history_max_tool_bytes", 1023),
+        ("history_max_tool_bytes", True),
+        ("history_max_tool_bytes", 4096.0),
+        ("history_human_platforms", "telegram"),
+        ("history_human_platforms", ["cli", 3]),
+        ("history_human_platforms", ["cli", ""]),
+        ("history_human_platforms", ["cli", "two words"]),
+        ("history_human_platforms", ["cli", "subagent"]),
+        ("history_human_platforms", ["cron"]),
+        ("history_human_platforms", ["Curator"]),
+        ("history_human_platforms", ["p"] * 65),
+    ],
+)
+def test_invalid_history_values_fall_back_with_a_warning(key: str, raw: Any) -> None:
+    config = ActivityConfig.from_mapping({key: raw})
+    assert getattr(config, key) == HISTORY_DEFAULTS[key]
+    assert config.warnings == (f"invalid value for {key}",)
+
+
+def test_the_tools_switch_defaults_to_on_and_needs_the_history() -> None:
+    assert ActivityConfig.from_mapping({}).history_tools_enabled is True
+    assert ActivityConfig.from_mapping({"enabled": True}).history_tools_active is True
+    off = ActivityConfig.from_mapping({"enabled": True, "history_tools_enabled": False})
+    # Off removes only the lookup tools: the automatic blocks stay (history_active).
+    assert (off.history_tools_enabled, off.history_active, off.history_tools_active) == (False, True, False)
+    assert off.warnings == ()
+    for section in ({}, {"enabled": True, "history_enabled": False}, {"enabled": True, "excluded_sites": "x.example"}):
+        assert ActivityConfig.from_mapping(section).history_tools_active is False, section
+
+
+def test_an_invalid_tools_switch_is_warned_and_stays_on() -> None:
+    config = ActivityConfig.from_mapping({"enabled": True, "history_tools_enabled": "no"})
+    assert config.history_tools_enabled is True and config.history_tools_active is True
+    assert config.warnings == ("invalid value for history_tools_enabled",)
+
+
+def test_strict_load_raises_for_an_unparsable_file_and_the_default_load_does_not(tmp_path) -> None:
+    (tmp_path / "config.yaml").write_text("plugins: [unclosed\n", encoding="utf-8")
+    assert ActivityConfig.load(tmp_path) == ActivityConfig()
+    from ruamel.yaml.error import YAMLError
+
+    with pytest.raises(YAMLError):
+        ActivityConfig.load(tmp_path, strict=True)
+    (tmp_path / "config.yaml").unlink()
+    assert ActivityConfig.load(tmp_path, strict=True) == ActivityConfig()  # an absent file is the defaults
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  mordred_activity:\n    history_tools_enabled: false\n", encoding="utf-8"
+    )
+    assert ActivityConfig.load(tmp_path, strict=True).history_tools_enabled is False
+
+
+def test_excluded_sites_are_normalized_to_bare_hosts() -> None:
+    raw = ["https://Bank.example.com/login", "*.mail.example", "shop.example.", "pay.example:443", "bücher.example"]
+    config = ActivityConfig.from_mapping({"enabled": True, "excluded_sites": raw})
+    assert config.excluded_sites == {
+        "bank.example.com",
+        "mail.example",
+        "shop.example",
+        "pay.example",
+        "xn--bcher-kva.example",
+    }
+    assert config.warnings == ()
+    assert config.history_active is True
+
+
+@pytest.mark.parametrize("raw", ["bank.example", ["ok.example", ""], ["ok.example", "not a host"], [None]])
+def test_an_invalid_exclusion_list_switches_the_history_off(raw: Any) -> None:
+    config = ActivityConfig.from_mapping({"enabled": True, "excluded_sites": raw})
+    assert config.excluded_sites_valid is False
+    assert config.history_active is False
+
+
+def test_human_platforms_default_to_the_local_surfaces() -> None:
+    assert ActivityConfig().history_human_platforms == frozenset({"cli", "tui", "desktop"})
+    assert "telegram" not in ActivityConfig.from_mapping({}).history_human_platforms
+
+
+@pytest.mark.parametrize(
+    ("raw", "parsed"),
+    [
+        (["cli", " Telegram ", "slack"], {"cli", "telegram", "slack"}),
+        (["desktop"], {"desktop"}),
+        ([], set()),  # no platform's turns are the user's words
+        (["whatsapp_cloud", "my-gateway.v2"], {"whatsapp_cloud", "my-gateway.v2"}),
+    ],
+)
+def test_human_platforms_parse_a_list_of_platform_names(raw: Any, parsed: set[str]) -> None:
+    config = ActivityConfig.from_mapping({"history_human_platforms": raw})
+    assert (config.history_human_platforms, config.warnings) == (frozenset(parsed), ())

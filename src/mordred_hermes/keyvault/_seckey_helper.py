@@ -34,6 +34,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ._native_deletion import _assert_native_tag_delete
 from ._seckey_errors import _OPS_REASONS, _OpsError
 
 # Helper executable name (as installed by native/sekey-helper/build.sh).
@@ -100,7 +101,7 @@ def find_winkey_helper() -> str | None:
     Existence and suffix checks are not publisher/authenticity verification;
     the operator must trust the selected installation and PATH directories.
     """
-    from mordred_hermes._home import hermes_home
+    from mordred_hermes._core._home import hermes_home
 
     def executable(path: Path) -> str | None:
         if path.is_absolute() and path.suffix.lower() == ".exe" and path.is_file():
@@ -285,7 +286,7 @@ def _run_helper(
         if env_override is not None:
             env = dict(os.environ)
             env[env_override[0]] = env_override[1]
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603 - list argv, no shell
             [binary],
             input=json.dumps(payload).encode("utf-8"),
             capture_output=True,
@@ -379,6 +380,7 @@ class _HelperSecKeyOps:
     ) -> None:
         self._binary = binary
         self._env_override = env_override
+        self._presence_capable: bool | None = None
 
     def with_store_override(self, env_name: str, store: Path) -> _HelperSecKeyOps:
         """Clone this helper ops with an explicit per-keyvault blob store."""
@@ -400,6 +402,9 @@ class _HelperSecKeyOps:
         )
 
     def create_keypair(self, tag: bytes, label: str, *, unattended: bool = False) -> bytes:
+        from ._presence import revoke
+
+        revoke()
         response = self._invoke(
             {"cmd": "generate", "tag_hex": tag.hex(), "label": label, "unattended": unattended},
         )
@@ -410,12 +415,31 @@ class _HelperSecKeyOps:
         return _hex_field(response, "public_key_hex")
 
     def delete_key(self, tag: bytes) -> None:
+        _assert_native_tag_delete(ops=self, tag=tag)
+        from ._presence import revoke
+
+        revoke()
         # Acknowledge deletion or confirmed absence; ambiguous native state refuses.
         response = self._invoke({"cmd": "delete", "tag_hex": tag.hex()})
         if response.get("ok") is not True:
             raise _OpsError(-1, "helper", "helper did not acknowledge deletion")
 
     def key_exchange(self, tag: bytes, peer_pub: bytes) -> bytes:
+        from . import _presence
+
+        authority = _presence.eligible(tag)
+        if authority is not None:
+            if self._presence_capable is None:
+                try:
+                    self._presence_capable = self._invoke({"cmd": "capabilities"}).get("presence_session") == 1
+                except _OpsError:
+                    self._presence_capable = False  # prompt-free legacy negotiation only
+            if self._presence_capable:
+                scope, seconds, binding = authority
+                response = _presence._pool.exchange(
+                    scope, self._binary, self._env_override, tag, peer_pub, seconds, binding
+                )
+                return _hex_field(response, "shared_hex")
         response = self._invoke(
             {"cmd": "ecdh", "tag_hex": tag.hex(), "peer_pub_hex": peer_pub.hex()},
         )

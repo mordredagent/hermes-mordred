@@ -60,3 +60,55 @@ def test_other_errors_are_not_retried(tmp_path: Path, monkeypatch: pytest.Monkey
     with pytest.raises(KeyvaultPermissionError):
         _storage._open_validated_lock(path, label="lock")
     assert calls["n"] == 1
+
+
+def test_actual_held_lock_assertion_expires_with_scope(tmp_path: Path) -> None:
+    path = _lock(tmp_path)
+    with pytest.raises(KeyvaultPermissionError):
+        _storage.assert_advisory_lock_held(path)
+    with _storage._advisory_file_lock(path, label="test"):
+        _storage.assert_advisory_lock_held(path)
+        with _storage._advisory_file_lock(path, label="test"):
+            _storage.assert_advisory_lock_held(path)
+    with pytest.raises(KeyvaultPermissionError):
+        _storage.assert_advisory_lock_held(path)
+
+
+def test_other_thread_cannot_claim_global_active_lock_descriptor(tmp_path: Path) -> None:
+    import threading
+
+    path = _lock(tmp_path)
+    refused = []
+    assert_held = _storage.assert_advisory_lock_held
+
+    def attempt():
+        try:
+            assert_held(path)
+        except KeyvaultPermissionError:
+            refused.append(True)
+
+    with _storage._advisory_file_lock(path, label="test"):
+        thread = threading.Thread(target=attempt)
+        thread.start()
+        thread.join()
+        assert refused == [True]
+        _storage.assert_advisory_lock_held(path)
+
+
+def test_held_descriptor_identity_is_checked_not_only_current_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    path = _lock(tmp_path)
+    with _storage._advisory_file_lock(path, label="test"):
+        original = os.fstat
+        with monkeypatch.context() as patch:
+
+            def invalid(fd):
+                raise OSError(errno.EBADF, "descriptor was closed")
+
+            patch.setattr(os, "fstat", invalid)
+            with pytest.raises(KeyvaultPermissionError):
+                _storage.assert_advisory_lock_held(path)
+        assert os.fstat is original

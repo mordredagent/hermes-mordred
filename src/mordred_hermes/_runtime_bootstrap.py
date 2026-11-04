@@ -29,7 +29,7 @@ import threading
 from collections.abc import Callable
 from typing import Any, Final, NoReturn, cast
 
-from ._proxy_bypass import ensure_loopback_proxy_bypass
+from ._core._proxy_bypass import ensure_loopback_proxy_bypass
 
 _WRAPPED_MARKER: Final = "__mordred_integrity_discovery_wrapper__"
 _MANDATORY_HOOK_MARKER: Final = "__mordred_mandatory_integrity_hook__"

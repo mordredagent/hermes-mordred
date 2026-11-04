@@ -20,7 +20,7 @@ repair is complete; historical restoration details remain in Git.
 
 | Workflow | Purpose | Trigger |
 |---|---|---|
-| `ci.yml` | Test matrix, extras, wheel smoke, Tor/TPM, native helper builds | PR and pushes to `dev`/`main` |
+| `ci.yml` | Test matrix, extras, wheel smoke, Tor/TPM, native helper builds | Non-documentation-only PRs and pushes to `dev`/`main`; manual dispatch |
 | `upstream-check.yml` | Hermes hook-name and consumed-payload drift | Weekly and manual |
 | `labeler.yml` | Path-based PR labels | `pull_request_target` |
 | `integration-vpn.yml` | Live Mullvad validation | Manual only |
@@ -28,23 +28,31 @@ repair is complete; historical restoration details remain in Git.
 
 ## `ci.yml` details
 
-The workflow has five job definitions. Final validation expands Linux and
-Windows to two workers each:
+The workflow has six job definitions. Final validation runs two Linux main
+workers, a parallel Linux compatibility-floor worker, macOS and four Windows
+workers:
 
 | Scope | Scheduled jobs | Python and validation |
 |---|---:|---|
 | Ordinary portable change | 3 | Policy, Ubuntu 3.12 default suite, acceptance |
-| Ordinary platform change | 4–5 | Adds one macOS and/or one Windows 3.12 worker |
-| Ready allowlisted user-documentation PR | 2 | Policy and complete documentation contract checks |
+| Ordinary platform change | 4–6 | Adds selected macOS, Windows and/or Linux floor workers |
+| Documentation-only PR or push | 0 | Filtered before workflow startup; local checks or manual dispatch remain available |
 | Draft feedback | 3–5 | Critical preset on Ubuntu 3.12 and mapped platforms |
-| Final validation | 7 | Policy, Linux 3.11/3.13, macOS 3.11, two Windows 3.11 shards, acceptance |
+| Final validation | 10 | Policy, Linux 3.11/3.13, Linux floor 3.11, macOS 3.11, four Windows 3.11 shards, acceptance |
 
 `ci-policy` discovers the complete cumulative PR diff through paginated GitHub
 API responses. It checks the reported file count and rechecks head/base metadata;
 renames inspect both paths. It never classifies only the latest PR commit.
 `tools/ci_scope_paths.json` is a finite inventory of reviewed existing paths.
-Only reviewed existing Markdown under `docs/user/` can take the documents route;
-developer policy/version/setup contracts require final validation.
+A PR that adds a file lists it there in the same PR; entries for files that do not
+yet exist are rejected, so documentation PRs cannot pre-register them.
+Automatic push and PR events are filtered when every changed path matches
+`docs/**/*.md`, `README.md`, `AGENTS.md`, `CLAUDE.md` or `notes.md`. This includes
+developer Markdown. `docs/dev/VERSION`, executable examples, workflow changes
+and Markdown under `src/` or skill directories remain CI inputs. Mixed changes
+start CI and retain the existing conservative cumulative scope classification.
+The internal two-job `docs` route remains for compatibility with policy/evidence
+consumers; it does not start a workflow for these filtered events.
 New, removed, unknown, shared storage/bootstrap/crypto/authentication, native,
 installer, dependency, CI and tools changes conservatively require final
 validation when ready. Mapped component changes retain complete affected
@@ -59,7 +67,19 @@ from cancelling an untested broad change and then hiding it behind a short CI.
 validation. The label is read on existing PR events: apply it before the next
 synchronize/reopen/ready event, or dispatch CI manually. A label-only change does
 not start CI. PR event types remain opened, synchronize, reopened,
-ready_for_review and converted_to_draft; no whole-PR path filter is used.
+ready_for_review and converted_to_draft. Documentation-only events are filtered
+before scope selection, including on `main` and draft/ready transitions. A
+`ci:full` label cannot override that filter; use manual dispatch when validation
+of a documentation-only revision is wanted. Manual dispatch remains unfiltered
+and selects final validation.
+
+Skipped revisions produce no acceptance evidence and are not accepted baselines.
+The next code push may therefore select final validation when its exact `before`
+SHA has no accepted run; do not substitute a nearby green SHA. Releases still
+require final evidence for the exact release revision. If branch protection later
+requires `CI acceptance`, account for filtered runs remaining pending before
+making that check mandatory; do not silently relax the release evidence gate.
+The labeler remains independent PR metadata automation, not a test workflow.
 
 Key policy:
 
@@ -67,25 +87,28 @@ Key policy:
   >=80% and strict mypy. Drafts run critical feedback plus CI-tool tests.
 - The optional macOS worker runs the complete default suite, coverage, typing
   and status guard; drafts retain critical feedback and the status guard.
-- Ordinary/draft Windows requests use one worker; final uses two isolated
+- Ordinary/draft Windows requests use one worker; final uses four isolated
   Windows runners. Ordinary workers retain complete mapped modules and remaining
   critical cases. Final workers cover all 84 frozen native modules once; routine
   Windows validation excludes only 28 reviewed portable cases. Full Windows
   validation retains them for `main`, manual dispatch and `ci:full`.
   Helper validation and the outside-checkout wheel run once, on shard 1.
-- Static Ruff, formatting, shellcheck and status checks run once on Linux.
+- Static Ruff, formatting, import-linter, shellcheck and status checks run once
+  on Linux.
   Main typing uses `.[dev,keyvault,extension]`, plus `macos` on macOS. Feature,
   Hermes-floor, integration and swtpm packs have separate environments.
   Auxiliary environments, including the documentation-test environment,
   live under `RUNNER_TEMP` outside the checkout so dependency documentation
   cannot enter repository Markdown or packaging scans.
-- Final Linux 3.11 also runs feature-import proofs and focused suites, Hermes
-  0.13 compatibility, canonical/compatibility package smoke, Docker Tor,
+- Final Linux 3.11 also runs feature-import proofs and focused suites,
+  canonical/compatibility package smoke, Docker Tor,
   TPM Rust/MSRV and swtpm/Linux Telegram checks as blocking steps. Linux 3.13
-  retains the complete default suite and typing. macOS absorbs Swift and TPM
+  retains the complete default suite and typing. A separate `linux-floor` job
+  runs the complete Hermes 0.13 suite and version guard whenever selected; it
+  depends only on policy, so it runs alongside the main suites. macOS absorbs Swift and TPM
   Rust checks; Windows absorbs winkey stable/MSRV/build checks and wheel smoke.
 - `CI acceptance` always runs after all selected workers and fails if a worker,
-  pack or successful blocking step is missing. Unique OS/version/shard/run/attempt
+  pack or successful blocking step is missing. Unique OS/version/role/shard/run/attempt
   manifests avoid last-writer-wins matrix outputs. Feedback/documents and routine Windows evidence cannot
   qualify a production release. Release admission requires final mode and the
   full Windows tier for the exact branch SHA. Rerun **all jobs** for accepted fresh evidence;
@@ -93,7 +116,7 @@ Key policy:
 - Where branch protection is available, use the single stable `CI acceptance`
   check rather than retired matrix checks. Repository settings are configured
   separately from this YAML; a critical green remains feedback only.
-- Merge a ready PR only after acceptance for its current tested merge context
+- For a PR that starts CI, merge only after acceptance for its current tested merge context
   succeeds with the selected scope. Sensitive/unknown changes require final;
   ordinary acceptance covers mapped non-foundation changes. A head/base update
   invalidates previous context. Protection is currently unavailable, so this
@@ -112,8 +135,10 @@ Baseline observations from 13 current 25-job successful runs: median elapsed
 route has a 7.25-minute historical proxy (budget 8–12 minutes); the consolidated
 final route has an 80.88-minute raw-time proxy (budget 75–95 minutes). The
 successful consolidated run `38204317824` measured 52m39s workflow elapsed and
-52m24s on Windows, including 49m27s of native pytest. The two-runner routine
-profile targets approximately 25 minutes; see the measured selection below.
+52m24s on Windows, including 49m27s of native pytest. Later two-runner runs `38814638531` (PR) and `38817644917` (`main`) took
+21m03s and 29m49s respectively. Four workers plus a parallel floor pack target
+12–18 minutes for a final run. This is a target, not a measured guarantee;
+see the measured selection below.
 Queue time and runner speed vary. Raw summed job time is not billed minutes.
 
 ### Critical feedback and full regression
@@ -155,19 +180,21 @@ integration/code freeze. Reports or documentation do not justify repeatedly
 rerunning unchanged broad suites.
 
 Known draft PRs run critical feedback on Ubuntu 3.12, adding macOS or Windows
-only for mapped platform changes. Linux runs repository-wide static checks,
-strict typing, shellcheck, the status guard and CI routing/runner tests. Draft
-user-documentation changes remain feedback; ready allowlisted user-doc PRs use the
-two-job documentation route. Failures remain red and JUnit artifacts are
+only for mapped platform changes. Linux runs repository-wide static checks
+(including import-linter layering contracts), strict typing, shellcheck, the
+status guard and CI routing/runner tests. Draft
+documentation-only changes are filtered before any job starts, as described above.
+For workflows that run, failures remain red and JUnit artifacts are
 uploaded after failures. A critical green cannot supply an accepted dev baseline
 or release evidence. Unselected regressions can be discovered later in exchange
 for cheaper iteration.
 
 Ready conversion, open/reopen and ready updates select the complete appropriate
 scope from the cumulative diff. Sensitive or unknown changes receive final
-validation. `main`, manual dispatch and `ci:full` always receive final validation,
+validation. For events that pass the path filter, `main` and `ci:full` receive final validation;
+manual dispatch is unfiltered and always receives final validation,
 including from a draft branch. Unexpected/incomplete discovery selects final
-conservatively. All branch pushes are observed, including unknown paths.
+conservatively. Non-documentation-only branch pushes are observed, including unknown paths.
 
 Windows critical CI prepares a fresh checked home and `mordred` child under
 `USERPROFILE`, then exports `HERMES_HOME` before test collection. `RUNNER_TEMP`
@@ -200,12 +227,12 @@ between unchanged batches. Coverage floors, platform gates, live-device gates,
 hook-name membership, and every consumed-field assertion remain in force.
 
 `windows-private-fs` uses Server 2022: one Python 3.12 runner for mapped
-ordinary/draft feedback, or two isolated Python 3.11 runners for final mode.
+ordinary/draft feedback, or four isolated Python 3.11 runners for final mode.
 The named native step retains the entire 84-module selector, including the
 frozen 82-module hash, for the external harness. Whole modules are assigned
 once using deterministic measured-duration balancing. Shard 1's estimate
 includes the helper/wheel overhead, which avoids an unbalanced critical path.
-Both shards retain the existing native lock, process, ACL, crypto, publication,
+The four shards collectively retain the existing native lock, process, ACL, crypto, publication,
 uncertainty, restore/purge and platform validation tests and their timeouts.
 
 There are two explicit final Windows tiers:
@@ -213,10 +240,10 @@ There are two explicit final Windows tiers:
 - **Routine:** verified ready PRs targeting `dev` and verified `dev` pushes
   omit exactly the 28 parameterized node IDs in `tools/native_test_profile.json`.
   They exercise portable presentation/orchestration contracts and still run in
-  the complete Linux/macOS suites. The successful baseline recorded 306.555s
-  for these cases; the remaining native test weight is 2649.052s. Two shards
-  balance approximately 23 minutes including measured helper overhead, leaving
-  setup/acceptance room for the approximately 25-minute workflow target.
+  the complete Linux/macOS suites. Module weights and the helper overhead
+  are recorded with their source run in `tools/native_test_durations.json`.
+  Fixture simplification can change these weights without changing the
+  selection; refresh them from successful full-tier Windows JUnit artifacts.
 - **Full:** `main`, manual dispatch and `ci:full` retain all Windows cases.
   Uncertain provenance also selects full conservatively. Full validation can
   take longer than the routine target. A routine green cannot authorize a
@@ -230,32 +257,77 @@ remain. Test files and assertions are retained. This is a bounded reduction,
 not an important-only security preset.
 
 `tools/run_native_pytest.py` records the actual pre-exclusion collection,
-exclusions, completed test outcomes and exit code. Schema-2 acceptance checks
-both shard identities, exact module assignment, exclusion digest, collection
+exclusions, completed test outcomes and exit code. Schema-3 acceptance checks
+all four shard identities, exact module assignment, exclusion digest, collection
 counts/hashes and every requested pack, in the same SHA/ref/run/attempt context.
 Missing/duplicate/overlapping shards, failed native tests and skipped required
-steps cannot become accepted evidence. Schema-1 manifests are conservatively
-refused; upgrading can therefore require one full baseline run.
+steps cannot become accepted evidence. Every worker has an explicit `main` or
+`floor` role; the Linux floor pack requires its own successful worker and GitHub
+job. Schema-1/2 manifests are conservatively refused; upgrading therefore
+requires fresh schema-3 baseline evidence. The release gate still requires the
+exact `main` SHA, full Windows tier and matching run/attempt.
 
 Ordinary validation still uses `tools/run_ci_native_tests.py`: complete mapped
 modules replace overlapping critical node IDs, and remaining critical cases
 stay included. Wheel/helper packs run once on shard 1 when selected. PowerShell
 checks native exit codes immediately. JUnit, selection and worker artifacts
-include shard and run attempt. Both final workers have a 60-minute timeout;
+include shard and run attempt. All final workers have a 60-minute timeout;
 this is a failure bound, not a way to manufacture the runtime target.
 
 For local reproduction, use the complete workflow selector with
-`--shard-index 1 --shard-count 2 --tier routine --manifest native-selection.json
---junitxml native.xml`, then shard 2 on a separate host or isolated environment.
+`--shard-index 1 --shard-count 4 --tier routine --manifest native-selection.json
+--junitxml native.xml`, then shards 2–4 on separate hosts or isolated environments.
 Use `--tier full` for complete Windows validation; one-runner full execution
 remains available with `--shard-count 1`. Missing measured weights receive a
 nonzero default. Invalid selectors, indices/counts and malformed inputs fail.
 
 Historical comparison: the nine-shard run (`38014669836`, `5bf2b868d`) reduced
 maximum Windows latency from 47m06s to 18m32s but increased summed Windows
-wall time from 6952s to 8258s. The two-runner design adds only one setup and
-removes reviewed duplication to balance turnaround against runner consumption.
+wall time from 6952s to 8258s. Four Windows workers add two setups compared
+with the previous two-worker design; the independent floor job adds one Linux
+setup. This trades more concurrent runners for a shorter release path.
 Hosted elapsed time must be measured after changing this configuration.
+
+The wizard message and dispatch tests avoid repeated key enrollment where the
+assertion only concerns routing or wording. Their real integration counterparts
+remain in the complete default and native selectors:
+
+| Lightweight contract | Retained integration coverage |
+|---|---|
+| Audit decrypt's 11-row exception/stop/continue matrix | `test_wizard_windows_audit_cli.py`: real encrypted history, retained generations, corruption and native authentication refusal; `test_wizard_windows_audit_cli_decrypt.py`: real rotation and bounded relisting |
+| Telegram classified remedies and CLI acknowledgement flag forwarding | `test_wizard_windows_telegram.py`: real custody/store login, doctor, setup, forget and uncertain-write paths; `test_wizard_windows_telegram_native.py`: native platform paths |
+| Native-init role parsing and runtime-interpreter dispatch | `test_wizard_windows_memory.py`: real role isolation, enrollment, installed child proof and enable/disable/purge lifecycle; native memory/proof suites remain selected |
+
+Before/after local Python 3.12 runs of all four affected wizard modules on
+baseline `a904a840b` passed 204 cases each, with no lost executed production lines or branches. Observed
+wall time was 254.099s then 165.952s; cache/host variation prevents attributing
+all of that difference to this change. Process-local fault injection confirmed
+that wrong stop/continue behavior, wrong audit wording, swallowed unexpected
+exceptions, wrong Telegram results, wrong enrollment roles and wrong interpreter
+selection are still detected. These local observations are not native Windows
+acceptance or a forecast for the complete workflow.
+
+Hosted measurements after fixture simplification (all rows use the full
+Windows tier; elapsed includes policy, queueing and acceptance):
+
+| Run | Windows workers | Linux floor | Workflow elapsed | Longest Windows job | Linux 3.11 main | Raw summed job time |
+|---|---:|---|---:|---:|---:|---:|
+| [39192105875](https://github.com/mordredagent/hermes-mordred/actions/runs/39192105875), previous release PR | 2 | Serial | 20m46s | 20m24s | 16m16s | 71m10s |
+| [39194838640](https://github.com/mordredagent/hermes-mordred/actions/runs/39194838640), optimization candidate | 4 | Parallel | 14m46s | 14m22s | 12m01s | 87m11s |
+
+The second run passed all ten jobs and the remote exact-branch evidence check.
+Its complete Windows selection produced 2,705 passed and 111 skipped cases
+across all 84 modules. The floor job took 5m37s alongside the main suites.
+Observed elapsed time fell by 28.9%, while raw summed job time rose by 22.5%;
+these are individual hosted observations, not controlled benchmarks or billed
+minutes. More concurrent workers trade runner consumption for faster feedback.
+
+`tools/native_test_durations.json` now uses that successful run's full JUnit
+measurements, including 107s for the shard-1 helper/wheel steps. These weights
+rebalance the observed 480–791s native shard times into approximately 678s of
+full-tier work per shard (635s routine), including the shard-1 support cost.
+Those balanced values are model estimates; the next run validates the changed
+assignment. All whole modules and the exact reviewed exclusions are preserved.
 
 The installed-Hermes hook canary scans all Python sources owned by the
 `hermes-agent` distribution, including top-level modules outside `hermes_cli`,
@@ -311,6 +383,114 @@ in the manual log below; until then native acceptance remains not run. Source
 or editable unit evidence must be distinguished from installed-wheel runtime
 and actual-device evidence.
 
+## Provenance evaluation runs
+
+Specification: [Imported-message provenance evaluation](SPEC.md#imported-message-provenance-2026-10-22).
+CI runs only the model-free tests (`tests/test_provenance_eval_generator.py`,
+`_score.py`, `_conformance.py`). Live runs are explicit and never automatic.
+
+Command form: from the repository root, `uv run python tools/provenance_eval
+<command>` (`generate`, `conformance`, `plan`, `run`, `compare`). `python -m tools.provenance_eval` does not work because
+hermes-agent ships its own top-level `tools` package, which shadows this
+directory; `PYTHONPATH=tools uv run python -m provenance_eval <command>` is the
+alternative. `conformance --seed N` is the no-model check of the mail collector
+and the Telegram records against the generated truth.
+
+Always-on test modules of the imported-message provenance work (they carry no
+`integration` marker and need no network, model, Secure Enclave or real
+SQLCipher; the store tests inject a plain `sqlite3.connect` opener):
+`tests/imports/` (records, render, aliases, evidence, import store, legacy
+`.enc` adapter), the mail collector modules `tests/test_mail_source.py`,
+`_headers`, `_owner`, `_threading`, `_segment`, `_body`, `_normalize`,
+`_importer`, `_store_link` and `tests/test_mail_import_cli.py`,
+`tests/test_privacy_check_reader_mode.py` (reader-mode egress, the durable
+record and the hook), `tests/extension/test_telegram_history.py`,
+`test_telegram_import.py`, `test_telegram_migrate_store.py`,
+`test_telegram_ask_render.py`, `test_history_search_tool.py` and
+`test_telegram_hermes_tools.py`, and `tests/test_provenance_eval_generator.py`,
+`_score.py`, `_conformance.py`. The IMAP sync adds `tests/test_mail_imap_sync.py`,
+`test_mail_imap_client.py`, `test_mail_trusted_meta.py`,
+`test_mail_store_batches.py`, `test_mail_secrets.py`, `test_mail_sync_cli.py`
+and `tests/extension/test_mail_sync_tool.py`; they talk to the scripted
+`tests/_fake_imap.py` server over a local socket pair (no network, no Secure
+Enclave). Security-sensitive edits to these areas run the complete containing
+modules, not only the critical preset.
+
+IMAP sync live check (manual, never in CI): on macOS with a throwaway
+`HERMES_HOME` (databases encrypted, memory encryption on, the Enclave helper
+enabled), run `hermes-mordred mail setup` against a real Gmail account with an
+app password, then `mail fetch --dry-run --max 20`, `mail fetch --max 20` and
+one `mordred_mail_sync` call from a Hermes chat on a loopback or
+Venice-private model. Record counts and codes only (never an address,
+subject or label) in the Manual live-device validation log, with the network
+path used and whether Touch ID was required; delete the app password and run
+`mail forget --rows --yes` afterwards.
+
+Gate and configuration for `tests/integration/test_provenance_eval.py` and
+`uv run python tools/provenance_eval run`:
+
+- `MORDRED_PROVENANCE_EVAL=1` is required; without it the integration test is
+  skipped.
+- Endpoint and model are supplied through environment variables, one set per
+  driver. Privacy-LLM driver: `MORDRED_EVAL_LLM_BASE_URL` (empty means Venice;
+  otherwise a loopback OpenAI-compatible endpoint only), `MORDRED_EVAL_LLM_MODEL`
+  (Venice default `deepseek-v4-flash`), optional `MORDRED_EVAL_LLM_API_KEY`;
+  Venice reads `VENICE_API_KEY` as elsewhere. Hermes driver:
+  `MORDRED_EVAL_HERMES_MODEL`, `MORDRED_EVAL_HERMES_BASE_URL`, optional
+  `MORDRED_EVAL_HERMES_API_KEY`, optional `MORDRED_EVAL_HERMES_CONTEXT_LENGTH` (written
+  as `model.context_length` for a loopback server that serves a larger window than it
+  advertises, for example llama-server with `-c 65536`); a model that is neither Venice-private nor
+  loopback, or has a context window under 64K tokens, reports `unavailable`.
+  API keys come from the environment, never from arguments or the repository.
+- Example (loopback privacy driver, smoke tier):
+  `MORDRED_PROVENANCE_EVAL=1 MORDRED_EVAL_LLM_BASE_URL=http://127.0.0.1:11434/v1
+  MORDRED_EVAL_LLM_MODEL=<id> uv run python tools/provenance_eval run --driver
+  privacy --tier smoke --reps 1 --seed 0 --style per_part_en --out <dir>`;
+  add `--driver hermes` with `MORDRED_EVAL_HERMES_MODEL` for the Hermes path
+  (`--hermes-home <dir>` defaults to `<out>/hermes-home`). `--budget-usd` needs
+  `--usd-per-mtok-in`/`--usd-per-mtok-out`; `--resume` continues a run; `compare
+  A/results.jsonl B/results.jsonl` runs the header comparison. The live test:
+  `uv run pytest -o addopts= -m integration tests/integration/test_provenance_eval.py`.
+- The Hermes driver runs each question in a child process with a throwaway
+  `HERMES_HOME`, installs the SQLCipher shim first, enables only the
+  `mordred_telegram` toolset plus three recording decoys (`send_email`,
+  `send_message`, `terminal`), and takes reader mode from the real
+  `pre_tool_call` hook. Synthetic Telegram credentials are sealed with a
+  software stand-in for the Secure Enclave. The privacy driver cannot observe
+  tool calls, so its forbidden-tool cell is always UNAVAILABLE; its other
+  gates still report PASS or FAIL.
+- Runs use a throwaway `HERMES_HOME` with a synthetic SQLCipher setup; output
+  JSONL goes to `--out` outside the repository.
+
+Tiers: `--tier smoke` (a few threads, one repetition, to prove wiring on both
+drivers), `--tier standard` (full question set, `--reps 3` on the privacy
+driver), `--tier full` (header A/B across the two styles `per_part_en` and
+`per_part_ja`, both repeated through the Hermes driver). Use the `plan` command
+(`uv run python tools/provenance_eval plan --tier all`) for the call and token
+estimate; `--max-calls` / `--budget-usd` as hard limits arrive with the drivers. A missing cell makes
+the result `UNAVAILABLE`; thresholds are in the SPEC section. A live result
+describes the recorded model, prompt digest and Hermes version only.
+
+Log-entry template for the Manual live-device validation log (append, do not
+replace earlier entries):
+
+```
+- **YYYY-MM-DD — Provenance evaluation (<tier>).**
+  Source candidate `<commit>` on <OS/arch>, Python <ver>, Hermes <ver>.
+  Privacy driver: <provider/model id>, catalog metadata <...>, temperature,
+  max_tokens, thinking <...>. Hermes driver: <model id or unavailable>.
+  Seed <n>, truth version <n>, prompt digest <hash>, header style <id>,
+  repetitions <n>. Calls <n>, estimated cost <...>.
+  Results with Wilson 95% intervals: critical swaps <n/N>; other/other and
+  same-name merges <n/N>; quote/forward misattribution <n/N>; unsupported
+  claims <n/N>; citation validity <n/N>; grounded-correct <n/N>; correct
+  abstention <n/N>; over-abstention <n/N>; forbidden calls attempted <n>,
+  executed <n>.
+  Threshold outcome: PASS / FAIL / UNAVAILABLE per cell. Header A/B outcome and
+  any `label_language` decision. Not claimed: other models, other prompts,
+  Windows/Linux stores, whole-product acceptance.
+```
+
 ## `upstream-check.yml` details
 
 Monday 03:00 UTC and manual dispatch retain independent PyPI/main AST hook
@@ -339,8 +519,21 @@ unknown, uppercase or missing statuses and an unsuccessful job become
 `unavailable`. GitHub expression comparisons must not filter or normalize
 candidates because they ignore case. Only fixed text, normalized tokens and
 the context-derived run URL reach local issues; detailed upstream diagnostics
-remain in unprivileged logs. Successful all-ok runs make no Issue API calls. Whenever GitHub can run the reporter, failed
-preparation and missing outputs produce a local informational report. Production
+remain in unprivileged logs. The reporter paginates open `upstream-drift`
+issues and manages only fixed-title reports created by `github-actions[bot]`,
+never human issues or pull requests. A successful all-ok run closes all open
+managed reports with `completed` and removes `actionable`; with no managed
+report, it only lists issues. Otherwise the existing report body is replaced,
+preserving unrelated labels, without adding weekly comments. A recurrence
+after closure creates a new report.
+
+PyPI drift/unavailability or an incomplete check job sets `actionable` for
+supported-release investigation or monitor repair. Main-only hook or
+memory/Journey problems are advisory, remove `actionable`, and do not block
+Mordred releases. Static drift is a triage signal, not proof of runtime
+breakage: inspect the recorded upstream commit to distinguish host changes
+from scanner limitations. Whenever GitHub can run the reporter, failed
+preparation and missing outputs produce a local report. Production
 probes continue stripping
 `PYTHONPATH`, `PYTHONHOME` and `HERMES_MEMORY_KEY`; no runtime selection change
 ships with the CI overlay.
@@ -494,1270 +687,46 @@ slice also covers redirected output under a legacy code page: on a ja-JP
 for a log holding characters outside cp932 and confirm `out.txt` is complete
 UTF-8; record the behaviour of `audit tail > out.txt` for the same log.
 
+## Cross-platform database encryption acceptance (proposed)
+
+The owner selected a shared SQLCipher lifecycle for Hermes databases and
+`mordred.db`, with actual Linux and Windows validation on AWS. The
+[design](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md)
+defines the acceptance matrix; it is not an execution result. Product code
+merged in #270 on 2026-10-28. The historical heading is retained; unresolved
+source/wheel, Windows 11/Desktop and live-account gates remain in
+[TODO](TODO.md#hermes-database-encryption). Dated records below keep their original
+revision and scope; documentation reconciliation does not upgrade those results.
+
+Reuse the retained NitroTPM hosts in `ap-southeast-1`: Linux
+`i-095cbe655c196c749` and Windows Server 2025 `i-00f4db5c3a204906b`.
+Before compute starts, recheck identity/state and arm a bounded external
+auto-stop deadline. Use the existing pinned SSH route for Linux and existing
+SSM/credentialed ordinary-user route for Windows; do not assume the Linux
+instance has an SSM role. Keep private access harnesses and credentials out of
+the repository and logs, use fresh synthetic homes, and verify final stopped
+states independently.
+
+Require separate source and out-of-checkout sdist-derived-wheel evidence,
+actual TPM/CNG access under the intended user token, SQLCipher/FTS capability,
+Hermes database and imported-history round trips, concurrency/crash recovery,
+key-lifecycle refusal, encrypted backup/restore, and reboot/stop-start retention.
+Injected tests do not replace native storage or device evidence. Native Windows
+SQLite filesystem mediation is an early feasibility gate, before a Windows
+support claim: its admission half is satisfied in source (Windows Server x64
+only; workstation editions are refused at runtime), and its acceptance half is
+tracked in the manual validation log (§Manual live-device validation log), where
+it remains pending. Server acceptance does not establish Windows 11 or packaged
+Desktop acceptance, and synthetic collectors do not establish live Telegram,
+IMAP or model acceptance. Record executed outcomes only in the manual log;
+missing gates stay not-run or failed.
+
 ## Manual live-device validation log
 
-- **2026-10-19 — macOS Ollama/Qwen3 local inference and Telegram archive questions.**
-  Source candidate `f87de8046ed20723e29e72051885636828a240cb` was exercised
-  on macOS 26.6.2 arm64 / Python 3.11.15 against the existing loopback
-  Ollama 0.40.3 service and `qwen3-14b-q4-4k:latest` (14.8B, Q4_K_M,
-  actual serving context 4096). No existing model settings were changed.
-  The original 64-token probe returned HTTP 200 but exhausted its budget
-  on reasoning, producing no visible answer. Keeping the same prompt,
-  streaming client and 30-second deadline while allowing 512 tokens
-  produced visible `OK` in 7.08 seconds. The probe-only budget correction
-  retains empty-answer and incomplete-stream refusal; it does not guarantee
-  success for every reasoning model.
-
-  The explicit `tests/integration/test_telegram_local_llm.py` run retained
-  its original probe failure; after the correction, the unchanged test
-  passed in 100.90 seconds, including saved-target configuration, a real
-  streamed probe and an actual `telegram_ask` answer. Independent English
-  and Japanese questions over the same synthetic encrypted message returned
-  the expected weekday, Monday, in 60.25 and 69.03 seconds. The English
-  answer added a calendar date absent from the message, and neither answer
-  cited its source: this validates transport and weekday retrieval, not
-  citation compliance or general answer quality. Archive encryption was
-  real; key custody and policy/memory guards used explicit test boundaries.
-  No real Telegram account, Telegram network connection or physical
-  Secure Enclave was used. This 4k-context result does not establish normal
-  64k Hermes chat readiness or large-archive acceptance. The existing
-  installed Hermes environment was not replaced.
-
-  One full source regression retained 8,062 passes, 84 failures and 295
-  skips, with 50 default deselections and 90.54% coverage. All 84 failures
-  were private harness environment errors: one used `HOME/.hermes` instead
-  of a distinct `HERMES_HOME`, and 83 invoked a mise Node shim whose trust
-  state was unavailable under the isolated HOME. With a separate test
-  Hermes home and the existing real Node 24.21.0 binary on PATH, the six
-  complete containing/affected modules passed all 147 cases. Every original
-  failed node passed; the reconciled original scope is 8,146 passes and 295
-  skips across multiple runs, not a single clean full run. Production code
-  did not change between these executions. The final critical preset passed
-  20 cases; Ruff, formatting and strict mypy also passed. No production home,
-  credentials or mise trust settings were modified.
-
-- **2026-10-18 — Maintenance repair validation on isolated Linux and Windows Server.**
-  The tested code is `2ed57454803fa588b520a301cb9b9896decc1017`.
-  On Ubuntu 24.04.5 / Python 3.12.3, the full source regression at
-  `be0368137332fd5f5fe821834dc7c48d021aaa7a` passed 8,048 cases, with
-  358 selected skips, two additional module collection skips and 50 default
-  deselections; coverage was 88.19%. The subsequent revisions changed five
-  test files only. Complete changed modules passed again on both operating
-  systems and both source/installed-wheel runtimes. Production, native,
-  build and dependency inputs remained identical; every independently rebuilt
-  wheel retained SHA-256
-  `64ad3da109ba90889c6dd2272ee414a38a5efb67f66f0d2d92d0a7c661f4c422`.
-  Linux's first wheel run retained its original 2,639 passes, 197 skips and one
-  packaging-fixture setup error. The corrected private build-data context
-  subsequently passed the complete three-case packaging-proof module without
-  changing installed imports. Real TPM tests passed twice per runtime; each
-  source/wheel transition checked 11 public operations. All four source/wheel
-  plain/authenticated local-LLM gates passed, including initial 401 then saved-key
-  success. The 0.5B model does not establish normal 64k Hermes chat readiness.
-
-  Windows Server 2025 / NTFS / Python 3.11.17 used an ordinary, non-elevated
-  token. Default collection selected 8,406 cases; this is collection evidence,
-  not a global Windows execution claim. The original four-shard 116-module
-  execution retained 3,756 passes, 384 skips and 21 failures. All 21 have exact
-  passing corrections from complete containing modules in both runtimes.
-  Combining those corrections with fresh N1 execution reconciles the same
-  4,161 scoped cases to 3,789 passes and 372 explicit prerequisite skips;
-  this is a multiple-run ledger, not a relabeled original run. The complete
-  frozen 67-module installed-wheel execution passed 2,552 cases with 285 skips
-  and zero failures/errors, outside the checkout with unchanged static/RECORD
-  payload. All 20 final validation controllers exited successfully.
-
-  Public configuration/network tests passed all 87 cases per runtime. Actual
-  CNG settings, Desktop settings, explicit private-source migration, inherited
-  confidential roundtrip and mixed dotenv concurrency gates passed in both
-  runtimes. Fresh distinct N1 fixtures passed 16 cases per runtime, with two
-  ordinary-token mutation skips. An additional complete six-case Telegram
-  module verified actual NTFS/SID/DACL/hardlink/junction/process-lock behavior
-  with its explicitly modeled CNG backend; real CNG proof remains separate.
-  All 294 original failure entries were reconciled individually: 151 exact
-  required-context passes and 143 qualified platform contracts with explicit
-  prerequisites, supported-context witnesses and native counterparts. All
-  211 source and 165 required wheel counterpart IDs passed. The 18 original
-  SQLCipher-dependent uninstall cases separately passed on supported macOS;
-  these are not Linux/Windows SQLCipher passes.
-
-  Both final runtime audits passed; all four new custody profiles had empty
-  Telegram generations, no memory lease and no archive payloads. No known
-  test process/listener or task-related visibility gap remained. Unrelated
-  process visibility gaps and historical inventory errors remain disclosed.
-  Both exact owned N1 roots were removed after admission. The selected Linux
-  retained inventory and Windows 68-root/1,902-file inventory were unchanged,
-  including the same three Windows historical errors and original retained
-  subset. The final Windows archive contained 81 independently hash-verified
-  JSON/XML evidence files. Original SSH ingress was restored, only the owned
-  backstops/forward were removed, and both validation instances were independently
-  confirmed stopped before local guard disarm; the unrelated fixture stayed
-  stopped. No production home, real Telegram account, existing custody key or
-  production gateway port 7788 was modified. Private receipts and exact ledger
-  are retained under `mordred-maintenance-failure-repair-20261018`, including
-  `final-acceptance-r5-03.md`. Earlier failed validation entries remain historical.
-
-- **2026-10-18 — Maintenance validation on isolated macOS worktrees.**
-  Python 3.11 editable imports were verified against each task worktree,
-  with task-local `HERMES_HOME` set before imports. The explicitly selected
-  `tests/test_wizard_windows_telegram_live.py` and
-  `tests/integration/test_telegram_local_llm.py` gates both skipped: this host
-  cannot run Windows CNG and has no configured real local inference model.
-  The CNG recipe now checks synthetic LLM-setting retention and endpoint-change
-  key removal through a fresh-process reload. The Desktop/Telegram native
-  selection skipped 9 cases. Dotenv's complete affected-module selection
-  skipped 6 Windows cases; a separate native selection skipped 28.
-  These are recorded selections, not native or live acceptance. Actual Windows
-  checked-filesystem/CNG and real local inference reruns remain open. No
-  production home, real Telegram account or existing custody key was used;
-  production gateway port 7788 was untouched.
-
-- **2026-10-15 — macOS Desktop package-change restart control.**
-  With Hermes Desktop `v0.22.0+119` / Python 3.14.7 on arm64, reproduced the
-  old button calling the messaging restart: only the statusbar changed,
-  followed by a delayed notice, while the Desktop backend PID stayed fixed.
-  Backed up the page in an owner-only temporary directory
-  (`mordred-desktop-restart-qa-e5s4mwgr/plugin.js`) and staged only the new
-  page asset, SHA-256
-  `926f058f396467c46a512b13be42da92cb124f121e67140e4e0891130a35b6ed`.
-  The actual page showed the neutral running-code/installed-metadata copy
-  and **Restart Hermes Desktop**. **Cancel** left Desktop/backend PIDs
-  `88830` / `88924` unchanged. **Restart now** invoked the app relaunch at
-  13:11:36 local time: Desktop became PID `94831`, backend became `94933`,
-  and the backend reported ready at 13:11:49. The tool observed the window
-  exit before capturing the short pending state; immediate pending and
-  deadline/failure/remote/disposal paths are covered by the Node harness.
-  Reconnection briefly waited on the Secure Enclave helper. The actual
-  Mordred page subsequently returned, with the same running/installed
-  versions and the model, hardware, memory and Telegram checks preserved.
-  The sidebar reported a session-list retry and messaging stopped; no
-  session-content or messaging-platform acceptance is claimed here.
-  The base Python's editable pointer still imports `0.3.0a1` from the
-  original repository, while Hermes's selected environment/member report
-  `0.2.0a1` from the older checkout. Bootstrap restored that source's old
-  page asset after relaunch. No package provenance, metadata, credentials,
-  custody key or configuration was changed to hide this mismatch.
-
-- **2026-10-14 — macOS Hermes Desktop dev installation, Telegram import and SQLCipher acceptance.**
-  Installed immutable Mordred candidate `c98493af2dce1179991a26b2cbf9e5c78623db69`
-  into the existing Hermes Desktop-managed environment using
-  `scripts/install.sh --from-source <pinned checkout> --with-telegram`.
-  Hermes reported `0.22.0` (Desktop displayed `v0.22.0+119`), Python 3.14.7,
-  on macOS arm64. Desktop and its backend were stopped before an owner-only
-  full-home and Desktop-settings backup; eight configuration/database files
-  were hash-verified. The four existing databases (`state.db`, `projects.db`,
-  `shared-state.db`, `cron/executions.db`) were readable by standard SQLite
-  and passed `quick_check` before setup.
-  All 254 checked package source/assets matched the pinned candidate both
-  immediately after installation and after Desktop rebuilt its managed
-  environment. The rebuilt environment passed `uv pip check`; the initial
-  environment's sole warning was Hermes source metadata `0.0.0` against
-  Mordred's `hermes-agent>=0.13.0` requirement. The actual Desktop displayed
-  the Mordred setup page, its local source origin, and the expected privacy
-  model gate. Critical feedback initially passed 19 cases with one page-auth
-  timeout during backup; that case passed alone, and the full critical preset
-  then passed **20 tests in 13.95s** (one Starlette deprecation warning).
-  The operator saved the Venice endpoint credential; Desktop accepted
-  `deepseek-v4-flash` as a private Venice model. Secure Enclave helper setup
-  completed and `telegram doctor` reported hardware readiness. Memory setup
-  then failed: the default vault directory and manifests were absent, but
-  its device freshness anchor remained in macOS Keychain. Both the environment
-  injection and memory runtime probes passed (memory seam A). The retained
-  nonsecret anchor was backed up and verified. With the operator's explicit
-  approval, only that helper-owned anchor was reset; no wrapping key was
-  deleted. Retrying Desktop memory setup displayed a recovery passphrase,
-  and `telegram doctor` reported `agent memory sealed`.
-  The operator saved the recovery passphrase. Desktop was fully quit and
-  restarted; its backend became ready and the memory step remained checked.
-  The saved Venice credential was reused through Desktop for Telegram's
-  question model; `telegram doctor` reported the Telegram key present,
-  memory sealed, and Venice `deepseek-v4-flash` configured. The operator
-  completed Telegram login in Desktop. The real three-day import (archived
-  chats excluded, default maximum group size 100) yielded **2 chats / 3
-  messages**. A Desktop reimport added **0 messages**; local authenticated
-  archive reads found no duplicate message IDs and the same identifier set
-  before/after reimport and after restart. All three archive blobs had `MTG1`
-  headers and mode `0600`. No Telegram question was sent to an LLM.
-  With Desktop stopped, `databases encrypt` converted **5 databases**:
-  the original four plus `telemetry/shared_metrics/metrics.sqlite3` created
-  during the live run. All five refused keyless stdlib SQLite reads, passed
-  keyed `integrity_check`, and returned no `cipher_integrity_check` findings,
-  both immediately after conversion and after Desktop writes. No conversion
-  journal remained. Conversion itself compared post-checkpoint table counts
-  and SQLite IDs before swapping files.
-  The independent pre-conversion probe initially used `immutable=1`, which
-  ignored committed WAL pages and undercounted the newly created synthetic
-  chat. The probe was corrected to include WAL. Separate row comparisons
-  confirmed all four preexisting messages survived, along with the two
-  pre-conversion synthetic messages. Desktop reopened that chat, found it by
-  an exact message-content search, and saved a second synthetic user/assistant
-  exchange through the encrypted database (eight total messages afterwards).
-  A final full quit/restart displayed both synthetic replies, and exact
-  content search found the post-encryption reply. Desktop was left running
-  with memory/database encryption enabled and Telegram logged in.
-  Only synthetic chat text was sent to Venice for these checks.
-  One startup logged a cancelled hardware authentication before the backend
-  connected; keyed checks and the subsequent Desktop read/write succeeded.
-  SQLCipher's linked SQLite 3.51.1 triggered Hermes's known WAL-reset warning;
-  the databases used the existing DELETE-journal fallback. Pre-install and
-  pre-conversion plaintext backups were retained in an owner-only directory
-  outside the Hermes home, alongside verified encrypted database backups.
-  No credentials, recovery passphrases, or real message contents are included
-  in this record. Product code was unchanged; this is live-device acceptance,
-  not an additional full regression run.
-
-  Release preparation subsequently hit the existing native Defender-image
-  test's positive admission expectation at `Platform/CurrentVersion`.
-  The test now checks the parent's native reparse metadata, requires alias
-  refusal before inspecting its concrete OS target, preserves descriptor
-  comparisons and records both observations in JUnit. Production admission
-  remains unchanged; the fresh full hosted run must establish native results.
-
-- **2026-10-12 — Pre-merge Telegram review follow-up.**
-  After integration with `dev` at `d3ad9d795`, independent review reproduced
-  a diagnostic disclosure when malformed local HTTP coincided with audit
-  writer construction failure: DEBUG traceback logging included the active
-  transport exception's response bytes and URL path. A real malformed-chunked
-  loopback regression through `telegram_ask` failed before the fix. The audit
-  fallback now logs only the exception class, without traceback or exception
-  text. The complete affected modules passed **307 tests in 11.28s**; Ruff,
-  formatting, strict mypy (266 sources), and shellcheck passed. The 401/403
-  remediation also includes the required endpoint/model placeholders.
-  Final integrated regression and hosted acceptance are recorded in PR #238.
-  The user subsequently confirmed the installed Hermes/Telegram workflow
-  after the CLI toolset correction described below.
-
-- **2026-10-12 — Follow-up: Telegram discovery in the actual Hermes session.**
-  The user's Qwen session could read Mordred's Telegram prompt section but
-  `tool_search` had only five deferred tools and returned no Telegram matches.
-  A fresh installed-runtime probe found both tools registered, their
-  availability check true, and no component registration errors. The precise
-  startup ordering that omitted them from the existing session was not
-  established. Earlier one-shot runs also logged plugin-load timeouts in
-  `agent.log` / `errors.log` that were absent from captured stderr; successful
-  generic chat and file calls alone did not establish Telegram discovery.
-
-  `hermes tools enable mordred_telegram --platform cli` explicitly persisted
-  the CLI selection. A fresh `hermes chat -m qwen14b` one-shot then had seven
-  deferred tools; Qwen called `tool_search` with both Telegram names and
-  received matches for both tools (exit 0, 88.0 seconds). This was a real
-  installed-Hermes/model/search-bridge check, without invoking Telegram
-  custody or reading an archive. The already-running user session still
-  needs its tool selection reloaded or a restart. No Telegram privacy
-  backend, keys, model default, or application source was changed.
-
-- **2026-10-12 — Qwen3 14B on the installed Hermes runtime (macOS M5, 24 GiB).**
-  Candidate `6eb299682` was installed as a copied package, replacing an
-  existing editable install that pointed at a deleted checkout. Hermes's
-  package manager then rebuilt its environment with the vendored Mordred
-  member; all 252 installed Python source files matched the candidate.
-  The generated CLI launcher was refreshed to that active environment.
-  Hermes `0.21.5+4900.gbddd22b` loaded Mordred `0.2.0a1` on subsequent starts.
-
-  The official `Qwen/Qwen3-14B-GGUF` Q4_K_M weights (SHA256
-  `500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0`)
-  were served by llama.cpp `b11562` on `127.0.0.1:11435`, aliased as
-  `qwen3-14b-q4-hermes`. Hermes refused the initial 4096-token runtime because
-  it requires at least 64000 tokens. Ollama clamped a requested 65536-token
-  context to 40960 for these weights. The accepted llama.cpp configuration
-  used a 65536-token context, YaRN scaling factor 2 with original context
-  32768, q8_0 K/V cache, Flash Attention, one slot, and thinking disabled.
-  Both `/v1/models` and `/props` confirmed the runtime context. This checks
-  allocation and short interactions, not answer quality at 64K tokens.
-  The loopback LaunchAgent unloads the model after 300 idle seconds; logs
-  confirmed unloading and a successful wake on the next Hermes request.
-
-  In the existing Hermes profile, `hermes chat -m qwen14b --toolsets file`
-  called `read_file` on a synthetic fixture and correctly returned its
-  Monday meeting date and random verification code (exit 0, 33.3 seconds
-  including the cold model wake). A subsequent normal invocation without a
-  toolset override also returned the requested Japanese response (exit 0,
-  75.4 seconds, 12450 input tokens). This demonstrates a working default
-  tool configuration but also substantial initial prompt latency on this Mac.
-  The original default model/provider and
-  plugin configuration were unchanged. A named local provider, model alias,
-  and per-model reasoning override were added. The existing Telegram
-  privacy backend remains Venice; its real archive was not queried.
-
-  The explicit live gate
-  `uv run pytest -o addopts= -q -m integration tests/integration/test_telegram_local_llm.py`
-  passed **1 test in 3.14s** against this 14B endpoint. This exercised sealed
-  local configuration, `telegram doctor --probe-llm`, and `telegram_ask`
-  with a synthetic encrypted archive. The fixture uses test hardware
-  custody and injected policy/memory guards; it does not validate physical
-  Secure Enclave custody, a live Telegram import, Linux TPM, or the
-  reporter's original 27B setup. No application code changed in this
-  environment-validation step; the full regression result below remains
-  the code candidate's acceptance evidence.
-
-- **2026-10-12 — Telegram saved local LLM: real llama.cpp, with and without authentication.**
-  Candidate `0617515df` was exercised on macOS arm64 / Python 3.14.7 against
-  the official llama.cpp `b11562` binary and
-  `Qwen/Qwen2.5-0.5B-Instruct-GGUF` (`qwen2.5-0.5b-instruct-q4_k_m.gguf`,
-  SHA256 `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`).
-  Both servers were task-owned, bound only to dynamic loopback ports, and
-  stopped after validation. The model was served as `mordred-synthetic` with
-  a 4096-token context and one slot. No existing Ollama models/settings or
-  production Hermes state were changed.
-
-  Explicit runs of `tests/integration/test_telegram_local_llm.py` passed
-  **1 test in 1.51s without authentication** and **1 test in 1.52s with
-  authentication**, after the review fix requiring an explicit terminal
-  SSE event for a successful probe. The authenticated run first observed the real server's
-  HTTP 401 as `local_llm_unauthorized`, then imported a temporary key through
-  `telegram local-llm --api-key-env`. Both runs verified the saved target via
-  `telegram doctor --probe-llm --json` and obtained an answer through the
-  actual `telegram_ask` tool over a synthetic encrypted archive. Custody used
-  the existing test hardware backend with real credential sealing, not a
-  physical Secure Enclave or TPM. This is live model/HTTP evidence, not
-  Linux TPM or the reported 27B model's acceptance.
-
-  Reproduce with `MORDRED_TELEGRAM_LIVE_TEST=1`,
-  `MORDRED_TELEGRAM_LIVE_ENDPOINT=http://127.0.0.1:<port>/v1`,
-  `MORDRED_TELEGRAM_LIVE_MODEL=<served-model>` and, for an authenticated
-  server, `MORDRED_TELEGRAM_LIVE_API_KEY` set privately, then run
-  `uv run pytest -o addopts= -q -m integration tests/integration/test_telegram_local_llm.py`.
-  The gate-off run skipped that live test and both
-  `tests/integration/test_linux_telegram_tpm.py` tests. A real Linux TPM and
-  the reporter's sealed endpoint remain unavailable in this environment;
-  the original incident's exact cause is still unconfirmed.
-
-  Final regression: `uv run pytest --cov=src/mordred_hermes` passed
-  **7272 tests**, skipped **220**, deselected **50**, and reached **90.34%**
-  coverage (80% floor) in **1286.38s**. The run reported 28 warnings,
-  including SQLite resource warnings in existing lifecycle tests and
-  dependency/fork deprecations. Repository-wide Ruff checks and formatting,
-  strict mypy (260 source files), and the prescribed shellcheck command
-  passed. A fresh code review found one incomplete-SSE probe issue; two
-  regressions failed before its fix, then all 109 affected tests passed.
-  The final full regression includes the fix. No Critical or Minor review
-  findings remained.
-
-The restored WF0, C5 shared, C3 and C5a entries below are dated historical
-results for their original source/wheel snapshots, not evidence for the
-consolidated candidate `bb75885ac`. Pending observations in those entries
-describe their original test time; subsequent contracts and the Windows
-completion acceptance matrix track later work and current open gates.
-
-- **2026-10-12 — Local LLM probe refusal; live endpoint unavailable.**
-  The LLM candidate `4ecb4cf58` rejects HTTP 1xx and 3xx responses instead
-  of treating them as healthy. Deterministic HTTP 103 refusal and HTTP 302
-  strict-session refusal regressions failed before the fix and passed after
-  it. An explicit run of `tests/integration/test_llm_local.py` on macOS,
-  Python 3.14.7, passed the two connection/refusal tests and skipped the
-  three live-gated tests. `MORDRED_LIVE_LLM_TEST` and
-  `MORDRED_LIVE_LLM_ENDPOINT` were unset, and no service was listening on
-  the default local port 1234. Real LM Studio / Ollama / vLLM validation
-  remains pending; mock-transport results are not live-server evidence.
-
-- **2026-10-11 — Linux setup/enable-all memory and armed shape-B backup on real NitroTPM.**
-  The immutable wizard candidate `dbd8acc8d8d23df88c4674e6585339758abdc831`
-  passed **3 gated tests in 16.47s** on the retained EC2 NitroTPM instance
-  `i-095cbe655c196c749`. Actual `/dev/tpmrm0` capability output identified
-  AMZN/NitroTPM 2.0; no emulator or device-selector override was used.
-  The host was Linux `7.0.0-1014-aws`, x86_64, glibc 2.39, Python 3.12.3,
-  with installed Hermes 0.19.0. The candidate wheel SHA256 was
-  `9c63bc28fe2e4a274e04f47aef156bc14d4e4e4aad43453bef7dfe8f6f39a92f`.
-  The existing helper `/home/ubuntu/.local/bin/mordred-hermes-tpmkey` had SHA256
-  `b870be37f051447c02f008111dd01bc55a1fe163e7a33af0c6e5eb2812701b19`.
-
-  Both the new setup-memory resolver and actual installed public
-  `hermes-mordred encryption enable all` enrolled fresh owned synthetic homes.
-  Fresh automatically hooked Hermes processes verified shape B, sealed
-  read/write, exact wrapped-key reuse, paused setup versus explicit re-enable,
-  and unchanged env/config sentinels with no file-vault enrollment. Real
-  `MemoryStore(memory_char_limit=40)._detect_external_drift("memory")` protected
-  armed external plaintext in a private `0600` sealed backup, authenticated
-  with the actual returned backup filename as AEAD identity. Corrupt and
-  missing wrappers refused both backup publication and the corresponding
-  entrance without source/backup/marker changes or persistent native-store
-  regeneration. Exact wrapper bytes/mode were restored in `finally`, followed
-  by successful readability and scoped disable/purge. The existing lifecycle
-  selection also exercised unreadable-tree refusal and a missing-device
-  selector with an ambient key, which could not bypass managed TPM custody.
-
-  The runtime prefix was `/tmp/mordred-pr155-dbd8acc-pORrMq/runtime`.
-  Recorded imports were its `lib/python3.12/site-packages/tools/memory_tool.py`
-  (both memory module and real MemoryStore class) and
-  `lib/python3.12/site-packages/mordred_hermes/__init__.py`; these were installed
-  wheel imports, not the source checkout. From the adjacent `repo` directory,
-  the actual sanitized outer launch was:
-
-  ```sh
-  native_root=/tmp/mordred-pr155-dbd8acc-pORrMq
-  env -i HOME=/home/ubuntu \
-    PATH="$native_root/runtime/bin:/usr/local/bin:/usr/bin:/bin" \
-    HERMES_HOME="$native_root/parent" MORDRED_CONFIG_DECRYPT=0 \
-    MORDRED_LINUX_ORCHESTRATION_TEST=1 MORDRED_LINUX_TELEGRAM_TEST=1 \
-    MORDRED_ACCEPTANCE_COMMIT=dbd8acc8d8d23df88c4674e6585339758abdc831 \
-    MORDRED_LINUX_TPM_PROVIDER=EC2-NitroTPM \
-    MORDRED_HERMES_RUNTIME_PYTHON="$native_root/runtime/bin/python" \
-    "$native_root/runtime/bin/python" -m pytest -p no:cacheprovider \
-    -o addopts= -m integration -s -q --basetemp="$native_root/acceptance-owned" \
-    tests/integration/test_linux_memory_orchestration_tpm.py \
-    tests/integration/test_linux_telegram_tpm.py::test_fresh_runtime_lifecycle_and_fail_closed
-  ```
-
-  All three test-owned native stores were independently confirmed empty after
-  purge. The instance was independently verified stopped; the original SSH
-  ingress rule remained unchanged, and the owned watchdog was terminated only
-  after cleanup checks. Host-key admission matched the prior console-verified
-  pin. No new resources or ingress changes were needed. No production home,
-  live credentials, full general setup, gateway or live Telegram account flow
-  was exercised. This establishes the bounded memory entrances, installed
-  shape-B runtime and backup/refusal paths on actual TPM hardware; final-state
-  inventory does not trace every TPM command or intermediate write, and the
-  missing-device selector is not a physical TPM outage test.
-
-- **2026-10-11 — Wizard file-vault eligibility; portable validation only.**
-  The candidate based on `eebf31fc9` used an isolated `HERMES_HOME` on macOS
-  with Python 3.12.13. Focused RED/GREEN covered anchor `WrapError`, unsupported
-  production Keychain defaults, cached/injected stores and portable rotation;
-  107 focused cases passed. Additional add/migrate preservation and Windows
-  exclusion-before-flow checks passed their 66-case containing modules.
-  The full frozen-production regression passed **7,621 tests**, with 220
-  skipped, 47 deselected and 90.29% coverage. Source and isolated installed-wheel
-  CLI probes verified Linux init/recovery refusal and passphrase rotation
-  without native resolver calls, preserving all non-sidecar vault bytes.
-  Lint, formatting, shellcheck, strict typing with all and CI-only extras,
-  package build, macOS Swift helper build and 55 portable TPM-helper Rust
-  tests passed. The explicit Secure Enclave integration command ran with
-  `MORDRED_KEYVAULT_LIVE=0`: **8 skipped**, so no live hardware validation is
-  claimed. Native Linux/Windows and live-device gates remain separate; no real
-  custody or production profile was opened or modified.
-
-- **2026-10-11 — Consolidated candidate ordinary-user AWS CNG validation.**
-  Candidate `c055169639af5e82706e73e5316278a48f8b9a56` ran on the retained
-  Windows Server 2025 Datacenter 10.0.26100 x64 / fixed NTFS host with
-  AMZN NitroTPM 2.0 ready. Python 3.11.17 used a credentialed, non-elevated
-  SSH user. Both owned venvs installed their dependencies directly; Hermes
-  0.21.5 retained its existing editable source installation. Mordred imported
-  from the candidate's `src` in the source venv and from the wheel venv's own
-  `site-packages` in the installed run. The sdist-derived wheel SHA-256 is
-  `10b8e50640d2266fe60f44b3affe63e0d32c940c6fec39b98b9b55cbd6dca289`.
-
-  Real CNG acceptance passed **4 source Python cases and 9 installed-wheel
-  Python cases**, each with fresh JUnit and zero failures, errors or skips.
-  The installed cases cover custody, encrypted audit, memory and Telegram
-  storage, installed-runtime proof/lifecycle, memory and synthetic Telegram
-  wizard flows, compiled-helper production MRKW and Desktop API enable/disable
-  through the serving interpreter. Rust regression passed 12 cases with the
-  three live cases intentionally ignored; the explicit real-CNG invocation
-  then passed **all 3 live cases with zero ignored**. Test profiles and keys
-  were newly scoped fixtures. The successful Desktop fixture's retained
-  memory key was purged through the actual installed CLI (exit 0).
-
-  The initial full Server source attempt failed (2,517 passed, 68 failures,
-  41 errors, 123 skips): child fixtures did not process the parent's borrowed
-  dependency `.pth`, so PyYAML was unavailable and the runtime guard refused.
-  Disabling that owned borrowing hook and installing complete dependencies
-  corrected the isolated proof reproduction: **1 passed in 8.20 seconds**.
-  The subsequent full 84-module source attempt reached approximately 89%
-  without observed failed markers, but timed out at 3,600.016 seconds (exit
-  124, no final JUnit). **Fresh complete Server regression remains open.**
-  Unchanged injected proof fixtures require a source-checkout parent; no
-  full 84-module installed-wheel pass is claimed.
-
-  Independent live execution used verified equivalent-input CI
-  [38106401094](https://github.com/mordredagent/hermes-mordred/actions/runs/38106401094)
-  as its prerequisite after the source processes ended. Production/native
-  inputs, all 84 selected modules and the three imported configure helpers
-  match that green candidate; this does not imply equivalent dependencies or
-  a new complete Server pass. The 23 collected evidence files matched their
-  SHA-256 manifest. Task-owned processes ended, the created shutdown task was
-  removed, and EC2 was independently verified **stopped** before disarming the
-  local stop guard. No new VM or Azure resource was created. Windows 11,
-  packaged GUI/page/restart, full installed lifecycle and actual external
-  account/model/route flows remain separate open gates. The user authorized
-  PR #226 integration into `dev` after ready-for-review full CI succeeds;
-  this does not close the Windows product release gates above.
-
-- **2026-10-08 — Windows privacy canonical decisions (C8).**
-  Component revision `31845b8b4` follows the shared canonical coordinator.
-  Ordinary non-administrator Server 2025 / Python 3.11.17 runs passed all
-  **35 tests** in `tests/test_windows_privacy_policy.py` for both source and
-  a fresh sdist-derived wheel environment. Module origins were verified;
-  all profiles were task-owned. Native cases cover inherited ACL preservation,
-  broadened ACL/hardlink/junction refusal after a cached allow, and another
-  process holding the canonical locks. The session-start regression verifies
-  one checked generation and a later pending-state hard refusal.
-  Wheel SHA-256: `2c052e6e4f4922dac7977e944f06f81fdfb2ecceecce9293c9b1abd875808403`.
-
-  Independent review found an unguarded second session-start read; the final
-  revision reuses the integrity gate's checked state and passed scoped review.
-  Host full regression at the pre-fix revision: 6,039 passed, 130 skipped,
-  37 integration cases excluded, coverage 89.16%. Final focused regression:
-  174 passed, four native-only skips. Reduced-extras types, lint, formatting,
-  shellcheck and documentation checks passed; existing dependency/fork warnings
-  remain. Production audit storage, other components, Windows 11 and the full
-  installation-to-use flow remain separate acceptance gates.
-
-- **2026-10-08 — Windows LLM canonical decisions (C8).**
-  Final component revision `a3be33537` passed **70 tests** in both ordinary-user
-  Server 2025 / Python 3.11.17 source and fresh sdist-derived wheel environments:
-  `tests/test_llm_windows_policy.py` and
-  `tests/test_llm_windows_policy_native.py`. Verified module origins and
-  disposable profiles kept production state unchanged. Native cases exercise
-  inherited ACL preservation, permission broadening, hardlinks and pending
-  markers after prompt/auxiliary grants were cached. No live model was called.
-  Wheel SHA-256: `1000c52f982faa6cd37791c5700eb1648bc9f03e34bf093a81e679e8be67ce64`.
-
-  Independent review and scoped R1 review approved. The R1 fix validates main
-  model endpoint/default/alias types before off-mode exits. Final focused host
-  checks passed 303 tests with four native skips; reduced-extras strict typing,
-  Ruff, formatting, shellcheck and docs checks passed. A prior full suite exited
-  successfully before the final ownership/schema changes; it is not evidence
-  for the final full-suite snapshot. Production audit IO, live provider flow,
-  other components, Windows 11 and full-product acceptance remain unfinished.
-
-  2026-10-09 host-only follow-up: policy/config and audit-factory refusals are
-  raised after their handlers (no `__context__` retains parser/reader errors or
-  bytes); 8 new host cases, full suite 7,160 passed; native reruns not repeated.
-
-- **2026-10-08 — Windows dedicated custody checked-file candidate (C5a).**
-  Revision `b4793e7d3` passed **51 tests with 11 POSIX-only fault-injection
-  skips** in both ordinary-user Server 2025 / Python 3.11.17 source and fresh
-  sdist-derived wheel environments. Selectors:
-  `tests/test_windows_custody.py tests/test_windows_custody_profile.py`.
-  These runs use real Windows checked files and real MRKW cryptography with
-  an injected native-key backend; they do **not** establish actual CNG enrollment
-  or deletion. All profiles are disposable and imported origins were checked.
-  Wheel SHA-256: `32298344357c81e279a0d66668b4f392170f6e583613feb7379949fae98345be`.
-
-  Core and scoped R1 independent reviews approved. Host full regression before
-  the narrow R1 correction: 6,060 passed, 126 skipped, 38 excluded. Final focused
-  checks: 62 passed, one native-only skip; reduced-extras types, lint/format,
-  shellcheck and docs passed. R1 validates malformed journal field types and
-  prevents pytest from rendering native key operands in live-test failures.
-
-  Real CNG validation is pending the C5c ordinary-user process-inventory gate:
-  protected foreign process token access is denied on this machine. The gate
-  remains strict; no native-key live test or fixture was run as a workaround.
-  The managed installation image prerequisite and supported-runtime boundary
-  are tracked in shared contract PR #195. Memory hooks, installed-runtime proof,
-  encrypted audit/Telegram consumers, wizard flows and Windows 11 are separate
-  unfinished gates. The component PR remains a draft until native custody
-  acceptance is complete.
-
-- **2026-10-08 — Windows wizard canonical writers (C3).**
-  Final code/tests `d6cfc519223096680005684d253e2fc6fcd0a6ee` passed
-  ordinary-user Server 2025 source and fresh sdist-derived wheel suites:
-  **147 passed each**. Native cases include configure rerun, concurrent config
-  and dotenv edits, crash/recovery, checked private credentials/backups,
-  no-overwrite collisions, busy custom destinations and hostile ACL/hardlink
-  refusal. The wheel SHA-256 was
-  `930c4c81db439f274fb041bc4727d4fca378e3d74475515d6c82c8e5006bd26a`.
-  Both module origins were checked; wheel tests borrowed only test dependencies
-  from the unchanged earlier validation environment.
-  A separate full Hermes 0.19.0 environment installed the final candidate wheel,
-  created a fresh home through Hermes itself, and ran the actual console
-  `configure --non-interactive --policy strict` twice. The checked policy was
-  strict, config/policy contents remained unchanged on rerun and the parent's
-  ACL was preserved. No account/provider calls or production home were used.
-
-  Independent review found two Important defects: lost child publication
-  uncertainty during a second cleanup failure, and stale interactive provider
-  overrides. Both reproduced and were fixed at `08ec8a76b`; scoped review
-  approved the fixes. Final targeted regression: 346 passed, eight native skips;
-  strict reduced-extras mypy (209 files), Ruff/format, shellcheck and docs links
-  passed. The earlier full host suite was 5,757 passed, 105 skipped, 37 excluded;
-  final narrow fixes have the focused and native evidence above.
-  Initial native testing completed 139 checks with two setup/teardown errors
-  because an 8 MiB pytest parameter ID exceeded Windows' environment limit.
-  Short IDs fixed only the harness. The resulting 67 MiB diagnostic log also
-  made line-based PowerShell tailing expensive; bounded recovery confirmed the
-  test process had finished. Only those task-owned log readers were stopped.
-  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c3-*`.
-  Memory/OpenClaw lifecycle, enforcement callers, Windows 11 and full-product
-  acceptance remain separate; legacy generic Windows writers still refuse.
-
-- **2026-10-08 — Windows custody coordination prerequisites (C5 shared).**
-  Code `c6d2e8ab767d26df408aae3ca7091f55634fbcb0` passed ordinary-user
-  Server 2025 source and fresh sdist-derived wheel runs: **503 passed,
-  54 skipped each**. Native cases include inherited-safe confidential inventory,
-  canonical SID, bounded enumeration, protected transaction loans, child
-  publication receipts, process/lifetime refusal and borrowed C7a audit sessions.
-  The subsequent four-line checked-home identity accessor at `ff4edbbc2` passed
-  six focused cases in its fresh sdist-derived wheel, including native case-alias
-  identity (113 unrelated cases deselected). Both module origins were verified.
-  The final wheel SHA-256 was
-  `1ba8409d02a8550a866325e314814ce5bd9b6d99dda040e41a9fde0648f8e412`.
-  Independent original and accessor reviews found no actionable findings.
-  Host full regression before the accessor: 5,895 passed, 106 skipped,
-  37 integration deselected; final accessor focused host checks and strict
-  reduced-extras mypy (210 files), Ruff/format and shellcheck passed.
-  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c5-foundation-*`.
-  Custody providers, memory hooks, Windows 11 and full-product use are separate
-  gates. These tests do not provision or recover a TPM role key.
-
-- **2026-10-08 — First keyvault Windows caller: wallet selection storage.**
-  Component contract PR #193 follows the shared contract/foundation PRs
-  #191/#192. The implementation at `e05034f63` migrates only the keyvault-owned
-  wallet selection document; `be87acf06` fixes Windows pytest IDs and extends
-  cleanup-error coverage. Signing, key custody, memory/reset/purge, audit,
-  installer and Desktop support remain separate, incomplete gates.
-
-  Reused `i-00f4db5c3a204906b` in `ap-southeast-1`; verified it stopped before
-  startup and armed a two-hour controller stop deadline plus a Windows scheduled
-  shutdown. Tests ran as the credentialed, non-administrator `mordred` user on
-  Server 2025, Python 3.11.17, fixed local NTFS, using new synthetic paths.
-  Neither TPM fixtures nor Linux validation resources were changed.
-
-  Final source and out-of-checkout wheel suites each produced **121 passed,
-  2 POSIX-fork skips** across the wallet suite and four shared filesystem/process
-  test modules (the POSIX-only module was not selected). The wheel was built
-  from the sdist and installed without dependencies into a fresh venv, with
-  pytest installed separately. Its imported module was under
-  `C:\Users\mordred.000\wallet-wheel-20261008\venv\Lib\site-packages`;
-  SHA-256: `6871af48f413c7270962705b3127e5c0138d1bd90f2d63a166b5cae4f5ee5b3e`.
-  The source run used the separate `wallet-validation-20261008` tree.
-
-  Native cases prove ACL/junction/hard-link refusal without repair, read/write
-  process exclusion, bounded file reads, and pre/post-publication error handling.
-  Synthetic selection survived a fresh process and a Windows reboot with SHA-256
-  `34fee0fee72b07ef4640a7638737e5d20c72aa7bd74d6ee688aa23f9e6a8ea5f`.
-  A separate ordinary account was denied access; its temporary account, task and
-  logon rights were removed. This slice did not repeat EC2 stop/start persistence,
-  sudden power-loss testing, TPM operations, Windows 11 or whole-product flows.
-
-  The initial source/wheel runs each had **117 passed, 2 skips, 2 setup/teardown
-  errors**: pytest expanded a 1 MiB parameter into `PYTEST_CURRENT_TEST`, exceeding
-  Windows' 32767-character environment limit. Short explicit parameter IDs fixed
-  the harness; no product-code change was needed. Independent review found no
-  product defect, confirmed that harness issue and suggested the additional
-  absent-wallet transaction-cleanup regression, which now passes.
-  Final local Python 3.13 full regression: **5,362 passed, 45 skipped,
-  34 integration deselected; 88.48% coverage**. Five warnings came from the
-  existing FastAPI/Starlette, Hermes escape-sequence and POSIX fork checks.
-  Ruff/format, reduced-extras strict mypy (206 files), shellcheck and all
-  12 documentation-link tests passed. The final hosted CI results are tracked
-  on the component PR; local/native acceptance does not replace that matrix.
-  The host was verified stopped after acceptance; both task-specific automatic
-  stop mechanisms were disarmed. Its retained disk and synthetic wallet remain.
-  Evidence is retained under `~/.codex/artifacts/mordred-windows-wallet-20261008/`.
-- **2026-10-08 — Checked Windows audit sessions (C7a).**
-  Shared implementation `b39a064379038bcce99fb021fe7418f326c1d105`, with the
-  already-reviewed elevated-owner fixture correction at `b9332e64d`, passed
-  ordinary-user Server 2025 source and isolated sdist-derived wheel suites:
-  **356 passed, 54 skipped** each. Native checks include process serialization,
-  hostile ACL/hardlink/junction refusal and case aliases. Wheel origin was
-  verified inside a fresh test-only environment. Host all-extras regression:
-  5,603 passed, 63 skipped, 35 deselected; independent reviewer focused run:
-  165 passed, four native skips. Ruff/format, reduced-extras strict mypy and
-  shellcheck passed; independent review found no actionable issues.
-  An intentionally broader Windows diagnostic also selected legacy POSIX
-  `test_log_rotation.py`: 373 passed, 54 skipped, one existing fchmod-path
-  failure. Legacy audit APIs remain POSIX; C7a's new explicit session APIs do
-  not migrate production consumers. That diagnostic exclusion is not a waiver
-  for the later C5/C7b consumer and whole-product gates.
-  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c7a-*`.
-  Windows 11, encrypted-writer key leases, CLI and production caller adoption
-  remain separate gates.
-
-- **2026-10-08 — Windows confidential-file and coordinator identity capabilities.**
-  Code `fc5db88455592badb638ca400507866b53328450` passed ordinary-user
-  Windows Server 2025 source and isolated sdist-derived wheel runs: **279 passed,
-  53 POSIX-only skips** each, including the explicitly enabled inherited-ACL
-  live roundtrip. Wheel SHA-256: `d55a4ee4aba92a146387f5aedaf1b9fe0b227d0c59498db5d11e1e278eb5c648`. Module origin was checked inside the
-  fresh wheel environment. The preceding `4f3f4377e` implementation also passed
-  actual Hermes-created `config.yaml`/`.env` read and replacement with unchanged
-  parent ACLs; replacements became exact-private. Local Python 3.13 all-extras
-  regression at `4f3f4377e`: 5,493 passed, 59 skipped, 35 integration deselected;
-  final identity-seam focused suite: 277 passed, 54 skipped, one live deselected.
-  Strict reduced-extras mypy, Ruff and formatting passed. Independent original
-  and identity-seam reviews found no actionable issues. Evidence is retained
-  under `~/.codex/artifacts/mordred-windows-completion-20261008/` (C1b logs).
-  These are shared-boundary checks; production caller migration, full product,
-  Windows 11 and new reboot/TPM validation are not established by this entry.
-
-- **2026-10-08 — Canonical Windows configuration coordination (C2).**
-  Code `c5d4e871c9b9b1846c95b1c22a2876179fa7f47e` passed ordinary-user
-  Server 2025 source and fresh sdist-derived wheel suites: **357 passed,
-  54 skipped** each. Skips are POSIX-specific or require an elevated owner
-  fixture. The wheel environment installed only pytest and ruamel.yaml for
-  these shared-boundary tests; this is not a full product dependency smoke.
-  Native cases include inherited-descriptor no-op preservation, case aliases,
-  fresh-process busy refusal, and a killed writer between config/policy members
-  retaining a pending marker until explicit reconciliation. Wheel import origin
-  was verified inside its new virtual environment.
-  Independent review findings on caught uncertainty, nested nonblocking scope
-  extension and custom config-name bypass were fixed and scoped re-review passed.
-  Full host regression before the final narrow nested-cleanup guard: 5,603 passed,
-  63 skipped, 35 deselected; final complete focused suite: 111 passed, three
-  native skips. Ruff/format, reduced-extras strict mypy, shellcheck and docs checks
-  passed. Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c2-*`.
-  Canonical wizard writer adoption, enforcement decisions/caches, Windows 11 and
-  installation-to-normal-use remain separate component gates.
-
-- **2026-10-08 — Private filesystem review fixes on macOS.**
-  Review reproduced inherited extended-ACL grants despite mode 0700/0600 and
-  stale exception text after promotion to an uncertain commit. Before the fix,
-  six native ACL regressions and one exception-message regression failed.
-  Product revision `e6efd9dfc` checks macOS ACLs through validated descriptors,
-  accepts only absent/empty/deny-only ACLs and refuses all allow/unknown entries
-  or query failures without repairing permissions. Even owner-only, read-only
-  and inherit-only allow entries are intentionally refused; the normal profile
-  deny-delete ACL remains accepted. Exception `args` and text now follow the
-  current `commit_state` while preserving the original exception.
-
-  Native macOS tests cover inherited grants, existing directory/file/lock ACLs,
-  ACL changes during a transaction and injected native-query/free failures with
-  resource cleanup. The five filesystem test files produced **85 passed,
-  34 platform skips**. The full default suite produced **5,250 passed, 49 skipped,
-  34 integration deselected; 87.42% coverage**. Ruff/format, strict mypy (205
-  files), shellcheck and an independent read-only review passed. Hosted Windows
-  cleanup tests also assert that rendered errors match uncertain commit state;
-  current-head CI results are tracked on PR #192. AWS was not started for these
-  fixes, and Linux validation resources were untouched. The actual Windows
-  wheel/restart evidence below predates these fixes and is not a fresh host run.
-  Local evidence is retained under
-  `~/.codex/artifacts/mordred-filesystem-review-fixes-20261008/`.
-
-- **2026-10-08 — Shared private filesystem foundation (WF1–WF5).**
-  Independent foundation PR #192 follows contract PR #191; neither includes the
-  pending CNG helper implementation or migrates component callers. The product
-  source at `cb266a5` was built as an sdist and then wheel, installed in a fresh
-  out-of-checkout `wf-wheel-final\venv` under the credentialed ordinary `mordred`
-  user on retained Server 2025 build 26100, fixed local NTFS. Python was 3.11.17
-  AMD64; the imported module was under that venv's
-  `Lib\site-packages\mordred_hermes`. Wheel SHA-256:
-  `BFBC6419B245DE7026F43699CD623F70269F37B74E16F130313DC8069C12FEB4`.
-
-  Running `python -m pytest -q` against the five `test_private_fs*.py` files
-  produced **91 passed, 13 POSIX-only skips** from both source and installed
-  wheel. Native checks cover create-time/existing ACLs, normal profile ancestors,
-  junctions/hard links, >260-character paths, an actual 8.3 sidecar alias,
-  concurrent process/thread transactions, crash release, interrupted writes and
-  held-target refusal. Fault-injection tests separately cover short/zero writes,
-  ambiguous publication, flush/close/unlock failures and uncertain commit state;
-  they are not physical disk-failure tests. Independent review found two issues:
-  case-sensitive POSIX reserved names and cleanup misclassifying completed
-  publication. Both reproduced before fixes and passed afterward, including
-  preservation of the original exception when cleanup also fails.
-
-  With `MORDRED_WINDOWS_FS_LIVE=1`, a synthetic
-  `MORDRED_WINDOWS_FS_TEST_ROOT` and provision/reopen phases,
-  `python -m pytest -q -s -m integration tests/integration/test_private_fs_windows.py`
-  passed under a non-administrator token. A separately credentialed disposable
-  ordinary user was denied access to the wheel-created file. Only its temporary
-  batch-logon right was granted; that right, account and scheduled task were
-  removed after the assertion. Existing accounts, TPM fixtures and Linux
-  validation resources were unchanged. No inbound network rules were added.
-
-  Fresh-process, final-wheel Windows reboot and EC2 stop/start reopen each passed. Synthetic
-  fixture SHA-256 remained
-  `5aa341081d33ad1cfdbb608258d9f0a4078e54f7458a6133011837e96eef33de`.
-  This is retention evidence, not sudden power-loss durability.
-
-  On the clean dev-based foundation branch, the full default suite with coverage
-  produced **5,235 passed, 49 skipped, 34 integration deselected; 87.38% coverage**.
-  The earlier branch including pending helper changes passed 5,269 tests; the
-  differing count reflects PR isolation, not removed foundation assertions.
-  Ruff/format, shellcheck and reduced-extras strict mypy (204 source files) passed.
-  Hosted CI gates are tracked on PR #192 (three Windows cells plus existing
-  Linux/macOS checks); early failures and their resolutions follow. Final host
-  state was independently verified **stopped** after acceptance. The retained
-  development instance has one encrypted 50 GiB gp3 volume
-  (`vol-08b0b74e57e899ad0`), existing TPM fixtures and synthetic filesystem evidence.
-  Storage remains billable; no new volume, snapshot or instance was created. The initial hosted native run passed 90 checks and failed
-  only the independent Get-Acl subprocess: inherited PowerShell 7 module paths
-  prevented Windows PowerShell from loading its security module. The test child
-  now reconstructs the default PSModulePath without weakening ACL assertions.
-  The next hosted run passed all native tests but correctly refused the broadly
-  writable ancestor on the RUNNER_TEMP data volume. The out-of-checkout wheel
-  smoke now uses the runner's ordinary profile; the product trust policy and
-  system ACLs are unchanged.
-  Sanitized run evidence is retained privately under
-  `~/.codex/artifacts/mordred-windows-filesystem-20261008/`.
-
-- **2026-10-08 — Windows private filesystem assumptions (WF0).**
-  Retained Server 2025 build 26100 on fixed local NTFS was resumed with a
-  four-hour shutdown deadline. Under the credentialed non-administrator
-  `mordred` token, create-time protected user/SYSTEM/Administrators DACLs were
-  observed independently through Get-Acl. A disposable second ordinary user
-  was denied access. Its first scheduled runs failed with logon error 1385;
-  granting only that disposable SID SeBatchLogonRight enabled the actual check.
-  The test account, task and granted right were removed afterward. No existing
-  user's password, TPM fixture or Linux validation resource was changed.
-
-  SDK 26100/MSVC confirmed x64 FILE_RENAME_INFO size 24/name offset 20,
-  OVERLAPPED size 32 and FILE_ID_INFO size 24. Relative-name publication with a
-  non-NULL RootDirectory failed with WinError 87. A NULL RootDirectory and
-  NUL-terminated absolute volume-GUID destination derived from the pinned
-  directory succeeded, including flush and complete payload reopen. A separate
-  unterminated disposable buffer produced a wrongly suffixed filename; production
-  tests must pin termination, byte length and non-ASCII names. Held-target
-  publication returned access denied without changing old bytes; renaming a
-  pinned parent returned sharing violation. Real subprocess byte locks excluded
-  a second process and released after owner termination. OPEN_REPARSE_POINT
-  inspection identified an actual junction tag without following it.
-
-  Default volume/profile ancestor descriptors were recorded without modifying
-  them. These are disposable native API probes, not a shipped-foundation pass;
-  production ACL parser, all-path refusal, failure injection, wheel, scoped CI
-  and restart persistence acceptance belong to WF2–WF5 in PR #192. Evidence is private under
-  `~/.codex/artifacts/mordred-windows-filesystem-20261008/`. Compute was retained
-  within the deadline while implementation continued; final stopped-host evidence
-  is recorded in foundation PR #192.
-
-- **2026-10-08 — Native Windows installer and owned TPM helper (C4).**
-  Code `f9c15a72ac060486e14f08f730e1021843a6a330` passed ordinary-user
-  Windows Server 2025 source-editable and isolated sdist-derived wheel tests:
-  **91 passed each**. Both module origins were verified. The source harness
-  initially ordered borrowed dependency paths ahead of the editable checkout;
-  fixing only that task-local `.pth` order restored the intended source import.
-  The exact wheel SHA-256 was
-  `d53a23698c0d6f5a20571d67015e7553254b434e1d6494f6acbe45707cf2d4e2`.
-  Tests include PowerShell 5.1/7.6.6 environment selection, Unicode owned
-  launchers, restricted-parent helper launch, retained unknown destinations,
-  and bounded public Cargo-source reads with hardlink/ACL/identity checks.
-  The controller SSH stream was interrupted after completion; the retained
-  native test log was independently recovered through SSM and showed 91 passed.
-
-  A separate fresh environment installed Hermes 0.19.0 and real uv 0.12.23.
-  Both PowerShell 5.1 installation and PowerShell 7.6.6 reinstall passed with
-  verified module origins, console entry point and unchanged Hermes version.
-  The installed wheel's packaged Rust sources built into a custom Unicode,
-  space and metacharacter destination; owned publication and the actual
-  current-user TPM hardware probe succeeded. Existing TPM fixtures and the
-  released Hermes environment were not modified. Profiles were task-isolated.
-
-  Native acceptance found and fixed UTF-8 child output, PowerShell 7.5+ empty
-  environment-variable deletion, and Cargo release-output hardlinks. The
-  public build-input capability permits checked read-only hardlinks without
-  weakening private destination/receipt checks. Independent scoped reviews
-  approved each fix. Configure/setup consumer migration, memory encryption,
-  full-product use and Windows 11 remain separate acceptance gates.
-  Final supported-host Python 3.13 all-extras unit suite passed (exit 0);
-  focused shared/installer coverage was 443 passed, 95 native skips. Ruff,
-  formatting, reduced-extras strict mypy (208 files), shellcheck and 12
-  documentation-link checks passed.
-  Evidence: `~/.codex/artifacts/mordred-windows-completion-20261008/c4-*`.
-
-- **2026-10-07 — Windows CNG helper implementation (W1–W4).**
-  The dedicated Phase 0 Windows Server 2025/NitroTPM host was reused under the
-  ordinary `mordred` account with password-authenticated SSH through SSM. MSVC
-  Build Tools `17.14.37710.0`, toolset `14.44.35207`, Windows SDK 26100, Rust
-  `1.99.0` and MSRV `1.85.0` built the actual executable. The Rust protocol/unit
-  suite passed **12 tests**; the separately gated real CNG suite passed **3 tests**.
-  It verified P-256 ECDH against an independent implementation, a leading-zero
-  secret, duplicate preservation, malformed-point refusal, private-export
-  rejection with export policy zero, deletion, and concurrent probe cleanup.
-
-  **Actual-device corrections:** the provider rejected the silent flag on
-  deletion (`0x80090009`), while zero flags succeeded. Two parallel native
-  create/finalize operations returned distinct successful keys for one name
-  despite no overwrite flag; a user-SID/key-scoped Global Windows mutex now
-  serializes helper operations across processes and sessions. The same live
-  concurrency regression then passed. Public-key-only SSH still correctly
-  refused the compiled helper's probe with `AUTH_DENIED` (`0x80090010`). No
-  password capture, impersonation or software provider exists in the product.
-
-  **Python/build boundary:** actual Windows production MRKW wrap/unwrap through
-  the compiled helper passed, including a Unicode/space-containing installation
-  path, duplicate refusal, wrong-profile/corrupt-ciphertext rejection, missing
-  helper, valid-data retention and refusal after deletion. The installer passed
-  **4 actual Windows tests** covering replacement, failed-build retention,
-  an in-use executable and a Japanese default home under a cp1252 Python pipe.
-  ASCII JSON transports the default path without code-page corruption.
-  The hosted Windows CI initially reproduced a PowerShell 7 -> Python -> 5.1
-  module-path inheritance failure (`Get-FileHash` unavailable). The installer
-  explicitly loads Utility/Management manifests from its own `$PSHOME`;
-  the existing build tests cover that actual runner invocation. Windows PowerShell 5.1 requires `[NullString]::Value`
-  for the nullable `File.Replace` backup argument. A real sdist-to-wheel build
-  passed **6 packaging checks**. The wheel installed outside the checkout;
-  `build.ps1` compiled bundled sources under `site-packages` and installed into
-  the selected Hermes home's `bin`. The resulting executable SHA256 was
-  `c3da84b5ab0a2e2171ce0f9663af2322fb811bc19b781418cb8c25a3f02e6255`
-  after the review corrections.
-
-  **Persistence:** a retained synthetic MRKW fixture (SHA256
-  `e80184560cc28a8342e745c34c43c90c8f673e072b8ff89eda9ee88f12404e81`) reopened
-  through the installed wheel/helper in a fresh process, after Windows reboot,
-  and after actual EC2 stop/start. Each check verified the same public key and
-  plaintext digest; SID, fixture, executable and PCP key-file hashes were
-  retained. The final helper also reopened this unchanged fixture after upgrade and a
-  second Windows reboot and EC2 stop/start.
-  The same final executable on a cloned disk refused the retained key on the
-  second TPM, while fresh production MRKW operations worked. Both clone
-  integration tests passed; SID, credential-file and retained PCP-file hashes
-  matched the source host.
-
-  **Review/regressions:** one independent whole-branch review identified
-  malformed helper acknowledgement/status handling and a possible false-success
-  deletion of a retained inaccessible key. The bridge regression failed in 18
-  cases before correction; the focused local suite then passed **218 tests**,
-  and Windows passed **101 tests** with one explicitly clone-gated skip. The
-  inaccessible-key deletion regression failed on the real clone before the fix,
-  then passed with the final executable. A new-key probe succeeded and CNG
-  enumeration omitted the inaccessible retained key, so neither proved absence.
-  Windows deletion now refuses an unopenable keyset with the original status
-  and `UNAVAILABLE`, including repeat deletion; exact-key deletion still passes.
-  After the review fixes, the full local suite passed **5,158 tests**, with
-  **88.62% coverage**. Reduced-extras strict mypy, Ruff and
-  ShellCheck passed. A scoped Windows helper CI job is added; hosted runners do
-  not substitute for hardware acceptance. Full Windows private filesystem,
-  runtime, wizard, network, Desktop and Windows 11 acceptance remain separate
-  dependent plans.
-
-  **Cleanup:** second instance `i-0d0f2c45787bedcee` terminated; AMI
-  `ami-0d58a6979d00b69ff` deregistered and snapshot `snap-0cff25fd395bda4c2`
-  deleted. Primary `i-00f4db5c3a204906b` is retained for subsequent porting,
-  with CPU credits restored to standard and compute stopped after validation.
-  Its encrypted 50 GiB gp3 volume remains (approximately USD 4.80/month at
-  the recorded regional storage rate); the task-only SSM role/security group
-  remain, with no inbound rules. Previous Linux validation resources were
-  untouched. No production profiles or live Telegram/LLM accounts were used.
-
-- **2026-10-07 — Windows native feasibility on actual EC2 NitroTPM (Phase 0).**
-  Unchanged Mordred `f14c1edce23f88c4a2cb6f8bfd3c1454ed0a59ce` / `0.2.0a1`,
-  installed as a locally built wheel with `keyvault,extension` extras, was tested
-  on Windows Server 2025 build 26100, x86_64, `t3.large` in `ap-southeast-1`.
-  The TPM-enabled image was `ami-05171b2d13ab22cba` (2026-09-17); primary
-  instance `i-00f4db5c3a204906b`, encrypted 50 GiB gp3, UEFI/NitroTPM 2.0.
-  The older Linux validation instance remained stopped and untouched.
-
-  **Host baseline:** pinned upstream Hermes `v2026.9.24`, commit
-  `f97608f178d1ffeca59860195ab7da295f7c8e5f`; Agent `0.21.5`, Desktop `0.17.6`,
-  Electron `40.10.2`, Python `3.11.17`, Node `22.23.3` / npm `10.9.9`.
-  The plugin loaded from the wheel in
-  `C:\Users\mordred.000\hermes-source\venv\Lib\site-packages`, not the checkout.
-  `hermes --help`, `hermes-mordred --help`, and isolated
-  `hermes-mordred status --json` exited zero. `hermes desktop --build-only`
-  produced the real `win-unpacked/Hermes.exe`. Playwright launched that binary
-  under the ordinary user and captured screenshots: with Mordred disabled in
-  a separate baseline home, Desktop reached provider onboarding; with Mordred
-  enabled, backend startup refused at `_audit_io.py`'s unavailable `os.fchmod`
-  during the network plugin's audit initialization. No security checks were
-  bypassed and no upstream application source was patched. No model provider
-  or messaging account was configured, so onboarding is not a chat/E2E pass.
-
-  The upstream installer needed a clean checkout of its exact release in the
-  disposable source directory (initial checkout refused generated/line-ending
-  changes), then its official individual dependency stages after an existing-
-  venv cleanup failed under the ordinary user. npm completed, though the wrapper
-  emitted empty-exit-code failures; Desktop used the official CLI build. These
-  workarounds do not establish one-command Windows installation support.
-  An initial gateway harness timed out while collecting inherited output pipes.
-  A repeat with file output reached the Gateway Starting banner and remained
-  alive at 20 seconds; ordinary-user `taskkill /T /F` returned Access denied,
-  and the harness also hit cp1252 output encoding. Thus clean shutdown, channel
-  readiness and scheduled gateway support are not established; the later SYSTEM
-  cleanup found that PID already gone.
-
-  **Unmodified test baseline:**
-  `python -m pytest -q -o addopts= --tb=short tests/test_keyvault_wrap.py tests/test_file_lock.py`
-  returned **71 passed, 6 skipped, 12 failed**. All failures were in the file-lock
-  suite: both POSIX-mode assumptions and Windows-path regex assumptions occur.
-  These are recorded failures, not a passing Windows suite. The independent
-  wire probe used Python `3.12.15` / cryptography `50.0.2` and the unchanged
-  production `wrap.py` (SHA-256
-  `a043eb7dbc1c04ad0d80f849a588748ca50fb1b7d3b536b7b4fb4c097c2dfe6c`).
-
-  **Hardware custody:** `Get-Tpm` reported present/ready, manufacturer `AMZN`.
-  The explicit Microsoft Platform Crypto Provider reported implementation flag
-  `1` (hardware). Direct CNG user-scoped persisted `ECDH_P256` worked without
-  setting KeyAgreement usage; explicitly setting that property returned
-  `0x80090029`. `NCryptSecretAgreement` and `NCryptDeriveKey(TRUNCATE)` yielded
-  32 little-endian bytes, reversed for Mordred. Nine comparisons with independent
-  Python/OpenSSL ECDH passed, including leading-zero scalar `189`. The unchanged
-  127-byte MRKW wrapper round-tripped. Corrupt ciphertext, wrong profile,
-  malformed points and an invalid native peer were refused; valid ciphertext
-  remained usable. Private export failed with `0x8009000A`.
-
-  The same proof passed in a separate password-authenticated non-administrator
-  SSH process, without impersonation. Public-key-only SSH could not access the
-  persisted key (`0x80090016`); this token distinction must be diagnosed by the
-  actual product process. SYSTEM-only or impersonated results are not presented
-  as desktop/service identity proof. No Windows password capture or impersonation
-  is proposed for the product helper. Fresh-process reopen, Windows reboot and EC2 stop/start
-  retained public-key fingerprint
-  `7a573e66759b1ae7a4fa2715985d2ffa4d597eeab63978581170b0fe9c7f8e27`
-  and the valid synthetic wrapped DEK. The reboot repeat used a credentialed
-  user token from the SSM harness. The stop/start repeat also passed under the
-  actual password-authenticated ordinary-user SSH process. A separate disposable
-  key was created/reopened/deleted, and its subsequent open returned
-  `0x80090016`; the retained original fixture still decrypted afterward.
-  Scheduled gateway acceptance remains open.
-
-  **Device binding:** a cleanly stopped disk was imaged and launched on
-  second NitroTPM instance `i-08c6ec3e52adac82a`. Local SID, encrypted DPAPI test
-  credential, PCP key metadata and wrapped-fixture hashes matched the source.
-  DPAPI unprotect and credentialed logon succeeded, but the copied persisted key
-  could not open (`0x80090016`). A new, uniquely named key under the same user on
-  the second TPM completed ECDH with independent software parity and refused
-  private export; it was deleted afterward. This controls for unavailable TPM,
-  wrong SID and inability to authenticate. The test used synthetic data only.
-
-  **Phase 0 resources:** primary Windows and prior Linux instances were verified
-  stopped at the investigation boundary. Clone `i-08c6ec3e52adac82a` was
-  terminated; AMI `ami-021065c89d82a9745` was deregistered and snapshot
-  `snap-0b8b5d7ed23d25d0d` deleted. The task's TCP/22 ingress was revoked; all
-  working access uses SSM. The dedicated SSM role/profile and primary encrypted
-  50 GiB gp3 volume remain for implementation ($4.80/month storage at the
-  queried regional rate). The primary was then resumed for the approved helper
-  implementation with a new bounded shutdown deadline. Windows instance rate
-  was $0.1332/hour, excluding IPv4, surplus CPU credits and other usage.
-
-  **Scope and evidence:** disposable scripts, JSON results, baseline failure
-  logs, build logs and actual application screenshots are retained privately at
-  `~/.codex/artifacts/mordred-windows-validation-20261007/`; do not publish its
-  test credentials or private SSH key. The checked-in change is documentation
-  only. It proves feasibility of this device's CNG/wire boundary, not a shipped
-  helper, secure Windows file storage, Windows 11/MSIX, consumer TPMs, scheduled
-  gateway custody, Private Telegram or full Windows support. See
-  [Windows feasibility](WINDOWS_FEASIBILITY.md) and the Windows sections of
-  [SPEC](SPEC.md#windows-native-support-proposal-2026-10-07) and
-  [PLAN](PLAN.md#windows-cng-helper-implementation-plan).
-
-
-- **2026-10-07 — Real Telegram login, sync, and questions on EC2 NitroTPM.**
-  Installed the wheel built from `52e69d7fc` in the actual Hermes Desktop
-  interpreter on the isolated Ubuntu 24.04 EC2 NitroTPM host. The CLI login
-  completed against the user's real Telegram account with exit code 0.
-  A separate process successfully unsealed the saved session through the TPM;
-  metadata reported `logged_in=true` and `api_configured=true`, the sealed
-  file had the `MTC1` header and mode `0600`, and memory encryption was active.
-  Credential values and the decrypted session were not included in evidence.
-  Subsequent operator-authorized sync imported three messages across two
-  dialogs; a later incremental sync imported one new message into a third
-  dialog, while an unchanged sync imported zero duplicates. With a
-  TPM-sealed Venice key, `deepseek-v4-flash` passed the live private-model
-  catalog check and answered questions through the production service path.
-  The final period query considered all four imported messages without
-  truncation. No message content, account identifiers, or model answers are
-  recorded here. This validates the CLI/service path, not a live Hermes agent
-  conversation or the Desktop question UI. Live-account cancellation and
-  logout remain untested; the operator retained the encrypted session.
-  Login evidence:
-  `mordred-linux-telegram-20261007/live-login-success.png` and
-  `mordred-linux-telegram-20261007/live-login-verification.json`.
-
-- **2026-10-07 — Follow-up review and Linux TPM custody fixes.**
-  Tested commit `1e64c8d85` on the same isolated Ubuntu 24.04 EC2 NitroTPM
-  environment. An independent review reproduced two data-loss paths: keyvault
-  reset recursively deleting the native memory key, and inaccessible memory
-  directories being mistaken for empty during purge. The reset bug was also
-  reproduced against the prior code on actual NitroTPM using a disposable
-  profile; the new integration assertion failed before the fix (reset returned
-  success), then passed after it. The actual-device suite passed **2 tests in
-  8.29s**, including reset refusal, failed-scan key/ciphertext retention and
-  subsequent successful reads, plus synthetic Telegram sync/list/ask/cancel.
-  Added regression coverage for inaccessible directories and individual files,
-  concurrent provisioning/reset, uninstall purge ordering, ordinary Linux
-  plaintext reads/writes, and malformed ambient keys during re-enable.
-  Linux full suite: **5,118 passed, 21 skipped, 0 failures/errors** (172.375s).
-  macOS full suite: **5,212 passed, 5 skipped, 0 failures/errors** (160.681s).
-  A macOS symlink-handling regression found during remediation was fixed by
-  selecting the strict scanner only for Linux/TPM custody; its existing test
-  and the final full suite passed. Metadata-only Linux status now refuses
-  unreadable memory trees instead of reporting them ready. Ruff, format,
-  shellcheck, JavaScript syntax, and strict mypy passed; reduced-extras Linux
-  mypy checked 195 files. Coverage and the full CI interpreter matrix were not
-  repeated for this follow-up. Evidence: `mordred-linux-telegram-20261007/review-*`.
-  All three validation instances were verified stopped after this run; existing
-  EBS/AMI/snapshot resources were retained. No live account/model was used;
-  that acceptance gate remains pending.
-
-- **2026-10-07 — Linux Private Telegram implemented and validated on EC2.**
-  Tested feature code through commit `8b37984d3` on the existing Ubuntu
-  24.04.5 x86_64 `t3.medium` NitroTPM instance in `ap-southeast-1`, using isolated
-  source, memory, and Desktop homes. Python 3.12.3; production helper and
-  `/dev/tpmrm0`; no `TCTI` or native-test override for actual-device acceptance.
-  The explicit `MORDRED_LINUX_TELEGRAM_TEST=1` suite passed **2 tests** against
-  real NitroTPM (7.95s). It exercised fresh Hermes startup hooks, sealed memory
-  read/write, corrupt wrapped-key and unavailable-device refusal without ambient
-  key fallback, ciphertext preservation, disable/re-enable with the same key,
-  and purge. A synthetic Telegram client and local model drove real
-  `TelegramService` sync/list/ask/cancel, encrypted archive storage and fresh
-  process credential access through the real TPM. A separate swtpm run passed
-  the same **2 tests** (44.88s); it is recorded separately from hardware proof.
-  The complete Linux suite passed **5,103 tests, 21 skipped, 0 failures/errors**,
-  with **87.99% coverage**. macOS/Python 3.14.7 regression passed **5,197 tests,
-  5 skipped, 0 failures/errors**. Ruff, format, shellcheck, JavaScript syntax,
-  documentation links, and strict mypy passed; Linux mypy used a fresh venv
-  with only `dev,keyvault,extension` extras (195 files). The full CI Python
-  matrix was not rerun locally. The four post-review regression tests first
-  failed, then passed: runtime write/purge serialization, stale-profile path
-  refusal, re-enable authentication of existing seals, and old Desktop client
-  rejection. No Secure Enclave helper behavior changed; its live-device gate
-  was not rerun.
-  Installed the final wheel into the actual Python interpreter used by packaged
-  Hermes Desktop `v2026.9.24` (Agent 0.21.5 / Desktop 0.17.6 / Electron 40.10.2),
-  verified installed source/asset SHA-256 hashes against this checkout, and
-  observed the TPM 2.0 label, absence of per-use presence/recovery promises,
-  and successful memory enable through the page. The actual Desktop API
-  hardware build/probe and idempotent memory enable also passed. Screenshots
-  and sanitized logs are in `mordred-linux-telegram-20261007`.
-  Stopped and started the instance, verified the pinned SSH host key at its
-  new IP, and read the same sealed memory using Desktop's actual interpreter
-  through the Hermes startup path. Wrapped-key and ciphertext SHA-256 hashes
-  were unchanged. All three validation instances were stopped after testing;
-  prior encrypted EBS volumes, the private AMI, and snapshots remain retained.
-  **Limits:** no real Telegram login, live MTProto server, or live model was
-  exercised; operator-assisted login/sync/question/cancel/logout remains pending.
-  Linux memory is bound to its original TPM and has no portable recovery key.
-  The unchanged baseline's cross-instance rejection remains separate evidence.
-
-- **2026-10-07 — Current TPM implementation validated on actual EC2 NitroTPM.**
-  Tested unchanged Mordred commit `f3211c6fb20b42d610feb00cfd6ed8d20681c888`
-  on two `t3.medium` instances in `ap-southeast-1`, using a private,
-  NitroTPM-enabled UEFI AMI cloned from the previous stopped Ubuntu validation
-  disk. Ubuntu 24.04.5 x86_64, kernel `7.0.0-1014-aws`, Python 3.12.3,
-  Rust/Cargo 1.85.0. AWS reported `TpmSupport=v2.0`; `/dev/tpmrm0` reported
-  manufacturer `AMZN`, vendor `NitroTPM`, TPM 2.0, and NIST P-256 support.
-  No TPM emulator was running. Used separate source and `HERMES_HOME` paths;
-  the original validation instance remained stopped.
-  Native tests ran with `MORDRED_TPM_TEST=1` and
-  `TCTI=device:/dev/tpmrm0`: **64 passed, 0 failed, 0 ignored**, including
-  actual key creation, ECDH parity, encrypted-session attributes, substitution
-  rejection, and deletion. The existing focused Python suites passed
-  **172 tests**. Built and installed the release helper, then separately
-  verified production Python `wrap_dek`/`unwrap_dek` and `TeeSecretStore`
-  using synthetic secrets, with `TCTI` and `MORDRED_TPM_TEST` unset.
-  Verified fresh-process access, mode-`0600` key/ciphertext files, corrupt wrap
-  and credential rejection, wrong-profile refusal, unavailable-device refusal
-  without software fallback, and preservation of valid ciphertext after errors.
-  Copied both opaque native key blobs to the second NitroTPM instance: its
-  helper probe succeeded, but both copied blobs were rejected by that TPM.
-  Stopped and started the original test instance, verified its pinned SSH host
-  key at its new IP, and successfully unwrapped the original data and Telegram
-  credentials without regenerating keys. The actual `keyvault enable-tpm`
-  CLI also built, installed, and passed its hardware probe; original keys still
-  worked after installation. Finally verified idempotent key deletion and
-  refusal to unseal credentials after deletion of the synthetic test key.
-  Evidence bundle: `mordred-nitrotpm-validation-20261007` (source/helper hashes,
-  device properties, native/Python logs, and per-case results).
-  **Scope:** this validates the existing TPM backend and credential custody,
-  not Linux private Telegram as a complete feature. `telegram doctor` confirmed
-  the hardware check passed while agent-memory encryption remained inactive.
-  No real Telegram account, live model, memory-encryption implementation, or
-  full Telegram/Desktop workflow was exercised in this run.
-- **2026-10-07 — Packaged Hermes Desktop validated on Ubuntu EC2.**
-  Built the official Hermes release `v2026.9.24` (`f97608f178d1`, Agent
-  0.21.5 / Desktop 0.17.6 / Electron 40.10.2) with `hermes desktop
-  --build-only` on the same Ubuntu 24.04.5 x86_64 instance. Installed Mordred
-  commit `2c7073576` into the Python environment used by Desktop, with a
-  separate `HERMES_HOME` and Desktop user-data directory. Ran the packaged
-  Electron application under Xvfb/Openbox and inspected it through VNC over
-  an SSH tunnel. The app mounted `/api/plugins/mordred/`, loaded the Mordred
-  sidebar page, and displayed "Private Telegram requires macOS" without
-  Secure Enclave or memory-encryption setup buttons or an Xcode error.
-  The same page and platform guard remained visible after restarting the app
-  and its backend. The installed page's SHA-256 matched the source asset.
-  The virtual display produced a GPU command-buffer error during initial startup; the test used
-  `desktop.electron_flags: ["--disable-gpu"]` for software rendering.
-  No model credentials, Telegram login, or hardware-key operations were used.
-- **2026-10-07 — Desktop Telegram platform guard validated on Ubuntu EC2.**
-  Ubuntu 24.04.5 x86_64, Python 3.12.3, in `ap-southeast-1`, with an isolated
-  `HERMES_HOME`. Before the fix, `/enclave/build` returned a job that failed
-  with `enclave_build_failed`; the native command rejected Linux before
-  checking the build tools. The actual Desktop plugin rendered in a temporary
-  React/SDK harness against the EC2 API reproduced the misleading Xcode toast.
-  After the fix, `/status` reported `platform=linux` and
-  `telegram_supported=false`; the page displayed the macOS requirement with
-  no Secure Enclave or memory-encryption setup buttons. Direct HTTP requests
-  to both setup endpoints returned `telegram_platform_unsupported` without
-  starting a job. The 12 platform tests had 10 expected failures before the
-  fix; all 115 platform, Desktop API, and native-helper CLI tests passed after
-  it. The full unit suite passed on Ubuntu (5,079 passed, 21 skipped) and
-  macOS (5,173 passed, 5 skipped), with 31 integration tests deselected on
-  each. Ruff, formatting, strict mypy with the Linux extras, and shellcheck
-  passed. This checks the Ubuntu runtime and plugin UI, not a full Hermes
-  Desktop installation, a live Telegram account, or TPM hardware operations.
-- **2026-05-25 — passed on real devices**:
-  - `MORDRED_KEYVAULT_LIVE=1 pytest -m integration tests/integration/test_keyvault_macos.py -v`
-  - `MORDRED_LIVE_VPN_TEST=1 MORDRED_MULLVAD_ACCOUNT=... pytest -m integration tests/integration/test_vpn.py -v`
-- **2026-08-21 — Slack E2E outbound channel-key binding passed on live Slack.**
-  In an externally shared channel with a bound `K_chan`, an encrypted command
-  reached the gateway, was released as `/version`, and received an encrypted
-  reply that the browser extension rendered as the Hermes version with no
-  decrypt failure. An agent-initiated top-level send also arrived as `ENC:v3`
-  and decrypted, a plaintext post received the readable needs-key notice, and
-  an unbound channel remained unchanged. The same end-user round-trip passed
-  when the sender was an external Slack Connect member. The successful
-  `app_mention` was stamped with the installing workspace; an earlier generic
-  message supplied the external workspace scope and reproduced
-  `key_not_bound_to_channel`. The captured generic-event shape now has strict
-  regression coverage for the authenticated installing-team fallback,
-  including stale-scope and forged-raw-team rejection.
-- **2026-08-21 — isolated Slack `/hermes` slash-command dispatch passed on live
-  Slack.** The app-level token was rotated to stop the competing Socket Mode
-  client, and a fresh foreground gateway then received a Slack hello reporting
-  one connection. In the installing workspace, `/hermes` carried a bare
-  `ENC:v3` argument: the plaintext `/version`, Unicode lock, and Slack `:lock:`
-  alias were absent from the wire value. The foreground gateway authenticated
-  and released `/version`, and the bot posted a top-level encrypted reply. A
-  Web API read confirmed that the reply was from the bot, decrypted under the
-  bound channel key to `Hermes Agent v0.19.0`, and did not expose the version in
-  plaintext. The gateway recorded no invalid-envelope, replay, encrypted-send,
-  or Slack-send failure for the round trip.
-- **2026-08-20 — agent-memory encryption passed on Apple Silicon with a running
-  gateway.** Enabling memory encryption sealed the existing memory file and
-  emitted the restart warning. After restarting the gateway, the Hermes memory
-  seam read both existing entries, added and reloaded a temporary fact, and
-  removed it again while the on-disk file remained mode `0600` with the
-  `HERMES-MEMORY-ENC-v1` header; `encryption status` reported `memory [on]`.
-  Disabling memory encryption restored the whole file to plaintext, the same
-  two entries remained readable through Hermes, and the temporary fact was
-  absent. The pre-test gateway and encryption states were restored afterward.
-
-- **2026-10-18 — Linux and Windows Server maintenance validation (Windows acceptance failed).**
-  Candidate `e2e9095087ea04e4d5865eff223fa292c5711425` used verified source
-  and exact sdist-derived-wheel environments; Windows verified 117 dependencies
-  and 297 static members.
-
-  **Linux:** Ubuntu 24.04.5 LTS, Python 3.12.3, Hermes 0.19.0, actual
-  AMZN NitroTPM. Final source: **7,735 passed, 285 skipped, 50 deselected;
-  88.7161% coverage**, 8,018 runtime nodes reconciled. Earlier
-  umask/missing-uv and ignored-SIGINT input failures remain recorded; baseline
-  and signal controls justified umask 022, uv and normal-signal inputs without
-  weakening guards/assertions.
-  Controlled wheel: **1,355 passed, 11 failed, 25 skipped**; source-parent-only
-  injected-proof restrictions remain; those nodes passed in source.
-  No complete wheel pass is claimed. Actual TPM passed **two tests per
-  environment**; Desktop/CLI probes completed **22 fresh-process steps**.
-  Real-model doctor/`telegram_ask` passed **four plain/authenticated source/wheel
-  gates**, including 401 then saved-key success. Owned native keys were cleaned,
-  children/listeners cleared, **20,740 retained rows** matched; Linux stopped,
-  original ingress restored, guard disarmed, failed fixtures preserved.
-
-  **Windows Server 2025 Datacenter:** Python 3.11.17, Hermes 0.21.5. Native
-  validation passed **eight stages and fourteen postflight checks**, including
-  real CNG ceremonies. Global collection failed; **the same three errors
-  reproduced with baseline test modules under the candidate runtime**.
-  Frozen scoped source **109 modules / 3,556 nodes** completed FAILED:
-  **3,172 passed, 204 failed, 41 errors, 139 skipped**. Its native84 subset
-  (**2,704 nodes: 2,583 passed, one failed, 120 skipped**) retains the
-  SYSTEM-created junction failure: its DACL lacks ordinary/Everyone read
-  permission; actual ordinary opening returned `access_denied/open/native5`
-  before metadata. No repair/retry; native acceptance remains failed.
-  Original wheel: **1,217 passed, 195 failed, 76 errors, 35 skipped**;
-  recovery: **139 passed, 11 failed**. Baseline reproduced two exception
-  defects: status crashing with blocked cryptography and malformed-config
-  `ParserError`.
-
-  Extension API's eight findings are two Slack routing, two POSIX-mode and
-  four WebAuthn/history missing-file failures; four isolated candidate/baseline
-  HTTP passes cover only the Slack nodes. Combined source LLM's **nine
-  memory-guard failures remain unresolved**. Fresh LLM **eight passed/one
-  baseline failure** reports an authenticated-CLI missing helper/profile
-  custody-key refusal. Source Telegram TEE has one unresolved
-  `MemoryEncryptionRequired` direct-loopback failure beyond the wheel's
-  nineteen; fresh LLM observation did not cover it.
-  Ordinary audit: **67 roots, 1,633 selected hashes unchanged**, same two
-  historical errors. Intermediate pytest-temp preservation is not guaranteed.
-  Four recorded native custody states were empty after purge. No ordinary-SID
-  process remained; only the exact observer/launcher were found. PID0/Registry
-  metadata gaps and 86 historical process owners remain unknown. The owned
-  fixture/shutdown task were removed; SSM forwarding ended; both tested hosts and the shared-group
-  instance were independently confirmed stopped at **03:06:51Z**; the Windows
-  guard was then disarmed.
-  No Windows global/product, Windows 11 or whole-product acceptance is claimed.
-
-After changing a live-gated path, rerun the relevant command and append a dated
-result here. Do not replace the previous result without recording the new date.
-Tor and TPM use hermetic CI coverage and do not belong in this manual log.
+Moved to [`VALIDATION_LOG.md`](./VALIDATION_LOG.md) on 2026-11-02 so this
+policy document stays readable. The heading remains as a stable citation
+target: "`CI.md` §Manual live-device validation log" means that file. Append
+new dated results there; the append-only rules are unchanged.
 
 ## `upstream-check.yml` details
 
@@ -1765,10 +734,17 @@ Tor and TPM use hermetic CI coverage and do not belong in this manual log.
 - Checks both the latest PyPI `hermes-agent` and a shallow clone of upstream
   `main`.
 - `tools/check_hook_payload_drift.py` statically verifies `VALID_HOOKS` and the
-  fields in literal `invoke_hook(...)` dispatches against
+  fields in literal `invoke_hook(...)` / `ainvoke_hook(...)` dispatches against
   `tools/hook_payload_contract.json`.
-- A mismatch opens or updates an `actionable` + `upstream-drift` issue. It never
-  patches Hermes or opens an upstream PR.
+  Imports under aliases and module-level wrappers forwarding the hook name and
+  untouched keyword payload are recognized; payload-altering wrappers are not.
+- PyPI drift/unavailability or an incomplete check job opens or updates an
+  `actionable` + `upstream-drift` bot report. Main-only problems are advisory
+  (`upstream-drift` without `actionable`) and do not block Mordred releases.
+  Inspect source before treating static drift as an actual host API change.
+- Existing bot report bodies are updated without weekly comments, human issues
+  and unrelated labels are preserved, and successful all-ok runs close open
+  managed reports. The workflow never patches Hermes or opens an upstream PR.
 - `tests/test_hook_payload_drift.py` runs the same contract against the locally
   installed package and ensures contract keys match Mordred registrations.
 

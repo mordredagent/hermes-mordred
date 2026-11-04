@@ -44,6 +44,7 @@ _MAINTAINED_DEV_DOCS = {
     "TODO.md",
     "UBUNTU_MANUAL_INSTALL_NOTES.md",
     "UPSTREAM.md",
+    "VALIDATION_LOG.md",
     "WINDOWS_FEASIBILITY.md",
     "WINDOWS_CONFIG_IO.md",
     "WINDOWS_AUDIT_IO.md",
@@ -316,6 +317,7 @@ def test_spec_cli_tree_matches_parser_direct_subcommands() -> None:
         if documented[command] != _direct_subcommands(command_parser)
     }
     assert not mismatches, f"SPEC.md direct subcommands differ from the parser: {mismatches}"
+    assert "diagnose" in documented["databases"], "Explicit database authentication must be documented"
 
 
 def test_setup_guides_include_agent_memory_encryption() -> None:

@@ -16,10 +16,11 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from mordred_hermes import _config_text_io
+from mordred_hermes._core import _config_text_io
 from mordred_hermes.wizard.policy_writer import (
     MORDRED_CONFIG_SECTIONS,
     MORDRED_PLUGIN_NAMES,
@@ -30,6 +31,34 @@ from tests._checked_fixture_helpers import assert_private, seed_private_file, se
 from tests._checked_fixture_helpers import tmp_path as tmp_path
 
 from ._helpers import _writer
+
+
+def _seed(home: Path, body: str) -> Path:
+    """Write ``body`` as the home's private ``config.yaml`` and return its path."""
+    config_path = home / "config.yaml"
+    seed_private_text(config_path, body, encoding="utf-8")
+    return config_path
+
+
+def _load_yaml(path: Path) -> Any:
+    from ruamel.yaml import YAML
+
+    with path.open(encoding="utf-8") as f:
+        return YAML(typ="safe", pure=True).load(f)
+
+
+def _network_answers(**overrides: Any) -> Any:
+    from mordred_hermes.wizard.network_cli import NetworkAnswers
+
+    fields: dict[str, Any] = {
+        "default_network_path": "tor",
+        "tor_binary_path": "/usr/bin/tor",
+        "tor_socks_port": 9050,
+        "mullvad_account_id_env": "MORDRED_MULLVAD_ACCOUNT",
+        "mullvad_relay_country": "auto",
+        "mullvad_killswitch": True,
+    }
+    return NetworkAnswers(**{**fields, **overrides})
 
 
 class TestEmitPolicyJson:
@@ -311,8 +340,7 @@ plugins:
     <<: *defs
     custom: value
 """
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(config_path, seed, encoding="utf-8")
+        config_path = _seed(tmp_path, seed)
 
         w = _writer(tmp_path)
         w.upsert_mordred_sections(
@@ -368,8 +396,7 @@ plugins:
     - some_user_plugin
     - mordred_wizard
 """
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(config_path, seed, encoding="utf-8")
+        config_path = _seed(tmp_path, seed)
 
         w = _writer(tmp_path)
         w.upsert_mordred_sections(
@@ -394,16 +421,12 @@ plugins:
         preserved: str | None,
     ) -> None:
         """A successful configure must not leave Hermes's opt-in list unusable."""
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(config_path, f"plugins:\n  enabled: {raw_enabled}\n", encoding="utf-8")
+        config_path = _seed(tmp_path, f"plugins:\n  enabled: {raw_enabled}\n")
 
         w = _writer(tmp_path)
         w.upsert_mordred_sections({"mordred_privacy_check": {"policy": "strict", "allow_cloud_llm": False}})
 
-        from ruamel.yaml import YAML
-
-        with config_path.open(encoding="utf-8") as f:
-            data = YAML(typ="safe", pure=True).load(f)
+        data = _load_yaml(config_path)
         enabled = data["plugins"]["enabled"]
         assert isinstance(enabled, list)
         if preserved is not None:
@@ -415,27 +438,20 @@ plugins:
         self,
         tmp_path: Path,
     ) -> None:
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(
-            config_path,
-            """\
+        seed = """\
 plugins:
   enabled:
     - {broken: true}
     - [also, broken]
     - ""
     - some_user_plugin
-""",
-            encoding="utf-8",
-        )
+"""
+        config_path = _seed(tmp_path, seed)
 
         w = _writer(tmp_path)
         w.upsert_mordred_sections({"mordred_privacy_check": {"policy": "strict", "allow_cloud_llm": False}})
 
-        from ruamel.yaml import YAML
-
-        with config_path.open(encoding="utf-8") as f:
-            data = YAML(typ="safe", pure=True).load(f)
+        data = _load_yaml(config_path)
         enabled = data["plugins"]["enabled"]
         assert enabled == ["some_user_plugin", *MORDRED_PLUGIN_NAMES]
 
@@ -497,17 +513,12 @@ plugins:
     tor_socks_port: 9050
     mullvad_account_id_env: MORDRED_MULLVAD_ACCOUNT
 """
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(config_path, seed, encoding="utf-8")
+        config_path = _seed(tmp_path, seed)
 
         w = _writer(tmp_path)
         w.merge_mordred_sections({"mordred_network": {"default_path": "clearnet"}})
 
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
+        data = _load_yaml(config_path)
         section = data["plugins"]["mordred_network"]
         assert section["default_path"] == "clearnet"
         assert section["tor_binary_path"] == "/usr/bin/tor"
@@ -521,8 +532,7 @@ plugins:
     default_path: tor
     tor_binary_path: /usr/bin/tor
 """
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(config_path, seed, encoding="utf-8")
+        config_path = _seed(tmp_path, seed)
 
         w = _writer(tmp_path)
         w.merge_mordred_sections({"mordred_network": {"default_path": "tor"}})
@@ -549,8 +559,7 @@ plugins:
     <<: *defs
     custom: value
 """
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(config_path, seed, encoding="utf-8")
+        config_path = _seed(tmp_path, seed)
 
         w = _writer(tmp_path)
         w.merge_mordred_sections({"mordred_network": {"default_path": "clearnet"}})
@@ -586,17 +595,12 @@ plugins:
   my_other_plugin:
     custom: value
 """
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(config_path, seed, encoding="utf-8")
+        config_path = _seed(tmp_path, seed)
 
         w = _writer(tmp_path)
         w.merge_mordred_sections({"mordred_network": {"default_path": "vpn"}})
 
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
+        data = _load_yaml(config_path)
         assert data["plugins"]["mordred_network"]["default_path"] == "vpn"
         assert data["plugins"]["my_other_plugin"]["custom"] == "value"
 
@@ -608,17 +612,12 @@ plugins:
 plugins:
   mordred_network: "string-instead-of-mapping"
 """
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(config_path, seed, encoding="utf-8")
+        config_path = _seed(tmp_path, seed)
 
         w = _writer(tmp_path)
         w.merge_mordred_sections({"mordred_network": {"default_path": "tor"}})
 
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
+        data = _load_yaml(config_path)
         assert data["plugins"]["mordred_network"] == {"default_path": "tor"}
 
 
@@ -655,15 +654,11 @@ class TestNetworkAnswersToConfigYamlSection:
     alongside snapshot fields."""
 
     def test_to_config_yaml_section_shape(self) -> None:
-        from mordred_hermes.wizard.network_cli import NetworkAnswers
-
-        na = NetworkAnswers(
+        na = _network_answers(
             default_network_path="vpn",
             tor_binary_path="/opt/tor/bin/tor",
             tor_socks_port=19050,
-            mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
             mullvad_relay_country="jp",
-            mullvad_killswitch=True,
         )
         section = na.to_config_yaml_section()
         assert section == {
@@ -686,24 +681,9 @@ class TestPolicyWriterWritesNetworkSection:
     changes (Task #1 contract)."""
 
     def test_write_upserts_network_section_when_answers_provided(self, tmp_path: Path) -> None:
-        from mordred_hermes.wizard.network_cli import NetworkAnswers
-
         w = _writer(tmp_path)
-        snap = PolicySnapshot(policy="strict")
-        na = NetworkAnswers(
-            default_network_path="tor",
-            tor_binary_path="/usr/bin/tor",
-            tor_socks_port=9050,
-            mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
-            mullvad_relay_country="auto",
-            mullvad_killswitch=True,
-        )
-        w.write(snap, network_answers=na)
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with (tmp_path / "config.yaml").open(encoding="utf-8") as f:
-            data = yaml.load(f)
+        w.write(PolicySnapshot(policy="strict"), network_answers=_network_answers())
+        data = _load_yaml(tmp_path / "config.yaml")
         section = data["plugins"]["mordred_network"]
         assert section["default_path"] == "tor"
         assert section["mullvad_killswitch"] is True
@@ -724,33 +704,19 @@ class TestPolicyWriterWritesNetworkSection:
         """When a prior network section exists (e.g., from a previous
         configure run that the user partially edited), the wizard must
         merge -- not clobber -- per the Task #1 contract."""
-        from mordred_hermes.wizard.network_cli import NetworkAnswers
-
-        config_path = tmp_path / "config.yaml"
         seed = """\
 plugins:
   mordred_network:
     default_path: tor
     custom_user_field: keep-me
 """
-        seed_private_text(config_path, seed, encoding="utf-8")
+        config_path = _seed(tmp_path, seed)
 
         w = _writer(tmp_path)
-        na = NetworkAnswers(
-            default_network_path="vpn",
-            tor_binary_path="/usr/bin/tor",
-            tor_socks_port=9050,
-            mullvad_account_id_env="MORDRED_MULLVAD_ACCOUNT",
-            mullvad_relay_country="auto",
-            mullvad_killswitch=False,
-        )
+        na = _network_answers(default_network_path="vpn", mullvad_killswitch=False)
         w.write(PolicySnapshot(policy="strict"), network_answers=na)
 
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
+        data = _load_yaml(config_path)
         section = data["plugins"]["mordred_network"]
         assert section["default_path"] == "vpn"
         assert section["custom_user_field"] == "keep-me", "merge must preserve unknown user fields"
@@ -764,51 +730,51 @@ class TestCorruptedPluginsScalarRecovery:
     the corrupted section as ``{}`` and rebuild it.
     """
 
-    def test_merge_recovers_from_plugins_scalar(self, tmp_path: Path) -> None:
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(config_path, "plugins: a-string\n", encoding="utf-8")
+    @pytest.mark.parametrize(
+        ("seed", "method", "section", "body", "field"),
+        [
+            # Must not crash with AttributeError.
+            pytest.param(
+                "plugins: a-string\n",
+                "merge_mordred_sections",
+                "mordred_network",
+                {"default_path": "tor"},
+                "default_path",
+                id="merge-string",
+            ),
+            # Must not crash with TypeError on int subscript.
+            pytest.param(
+                "plugins: 42\n",
+                "upsert_mordred_sections",
+                "mordred_privacy_check",
+                {"policy": "lenient", "allow_cloud_llm": False, "cloud_provider_allowlist": []},
+                "policy",
+                id="upsert-integer",
+            ),
+            pytest.param(
+                "plugins:\n  - item1\n  - item2\n",
+                "merge_mordred_sections",
+                "mordred_network",
+                {"default_path": "vpn"},
+                "default_path",
+                id="merge-list",
+            ),
+        ],
+    )
+    def test_recovers_from_corrupted_plugins(
+        self,
+        tmp_path: Path,
+        seed: str,
+        method: str,
+        section: str,
+        body: dict[str, object],
+        field: str,
+    ) -> None:
+        config_path = _seed(tmp_path, seed)
 
-        w = _writer(tmp_path)
-        # Must not crash with AttributeError.
-        w.merge_mordred_sections({"mordred_network": {"default_path": "tor"}})
+        getattr(_writer(tmp_path), method)({section: body})
 
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-        assert data["plugins"]["mordred_network"]["default_path"] == "tor"
-
-    def test_upsert_recovers_from_plugins_scalar(self, tmp_path: Path) -> None:
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(config_path, "plugins: 42\n", encoding="utf-8")
-
-        w = _writer(tmp_path)
-        # Must not crash with TypeError on int subscript.
-        w.upsert_mordred_sections(
-            {"mordred_privacy_check": {"policy": "lenient", "allow_cloud_llm": False, "cloud_provider_allowlist": []}}
-        )
-
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-        assert data["plugins"]["mordred_privacy_check"]["policy"] == "lenient"
-
-    def test_merge_recovers_from_plugins_list(self, tmp_path: Path) -> None:
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(config_path, "plugins:\n  - item1\n  - item2\n", encoding="utf-8")
-
-        w = _writer(tmp_path)
-        w.merge_mordred_sections({"mordred_network": {"default_path": "vpn"}})
-
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
-        assert data["plugins"]["mordred_network"]["default_path"] == "vpn"
+        assert _load_yaml(config_path)["plugins"][section][field] == body[field]
 
 
 class TestUpsertMordredSectionsStillReplaces:
@@ -828,17 +794,12 @@ plugins:
     tor_binary_path: /usr/bin/tor
     tor_socks_port: 9050
 """
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(config_path, seed, encoding="utf-8")
+        config_path = _seed(tmp_path, seed)
 
         w = _writer(tmp_path)
         w.upsert_mordred_sections({"mordred_network": {"default_path": "clearnet"}})
 
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with config_path.open(encoding="utf-8") as f:
-            data = yaml.load(f)
+        data = _load_yaml(config_path)
         section = data["plugins"]["mordred_network"]
         assert section == {"default_path": "clearnet"}, "whole-replace must drop unspecified sub-fields"
 
@@ -899,7 +860,7 @@ class TestWriteCompose:
         old_mode: str,
         new_mode: str,
     ) -> None:
-        from mordred_hermes import _policy_io
+        from mordred_hermes._core import _policy_io
         from mordred_hermes.privacy_check import _runtime as privacy_runtime
 
         w = _writer(tmp_path)
@@ -1003,11 +964,7 @@ class TestHasConfigYamlSectionProtocol:
         w = _writer(tmp_path)
         w.write(PolicySnapshot(policy="strict"), network_answers=_MinimalNetworkAnswers())
 
-        from ruamel.yaml import YAML
-
-        yaml = YAML(typ="safe", pure=True)
-        with (tmp_path / "config.yaml").open(encoding="utf-8") as f:
-            data = yaml.load(f)
+        data = _load_yaml(tmp_path / "config.yaml")
         assert data["plugins"]["mordred_network"]["default_path"] == "tor"
         assert data["plugins"]["mordred_network"]["tor_socks_port"] == 9050
 
@@ -1183,17 +1140,11 @@ class TestSinglePluginIdentity:
         w = _writer(tmp_path)
         w.write(PolicySnapshot(policy="lenient"))
 
-        from ruamel.yaml import YAML
-
-        with (tmp_path / "config.yaml").open(encoding="utf-8") as f:
-            data = YAML(typ="safe", pure=True).load(f)
+        data = _load_yaml(tmp_path / "config.yaml")
         assert data["plugins"]["enabled"] == ["mordred"]
 
     def test_write_migrates_legacy_names(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(
-            config_path,
-            """\
+        seed = """\
 # operator comment
 plugins:
   enabled:
@@ -1203,24 +1154,20 @@ plugins:
   disabled:
     - mordred_keyvault
     - unrelated
-""",
-            encoding="utf-8",
-        )
+"""
+        config_path = _seed(tmp_path, seed)
         w = _writer(tmp_path)
         with caplog.at_level("WARNING", logger="mordred.wizard.policy_writer"):
             w.upsert_mordred_sections({"mordred_privacy_check": {"policy": "lenient", "allow_cloud_llm": False}})
 
-        from ruamel.yaml import YAML
-
         text = config_path.read_text(encoding="utf-8")
-        data = YAML(typ="safe", pure=True).load(text)
+        data = _load_yaml(config_path)
         assert "# operator comment" in text
         assert data["plugins"]["enabled"] == ["other_plugin", "mordred"]
         assert data["plugins"]["disabled"] == ["unrelated"]
         assert "can no longer be disabled separately" in caplog.text
 
     def test_migrate_plugin_identity_only_touches_the_lists(self, tmp_path: Path) -> None:
-        config_path = tmp_path / "config.yaml"
         seed = """\
 model:
   provider: local  # keep
@@ -1231,7 +1178,7 @@ plugins:
   mordred_network:
     default_path: tor
 """
-        seed_private_text(config_path, seed, encoding="utf-8")
+        config_path = _seed(tmp_path, seed)
         w = _writer(tmp_path)
 
         migration = w.migrate_plugin_identity()
@@ -1254,8 +1201,7 @@ plugins:
         assert not (tmp_path / "config.yaml").exists()
 
     def test_explicitly_disabled_mordred_is_respected_and_reported(self, tmp_path: Path) -> None:
-        config_path = tmp_path / "config.yaml"
-        seed_private_text(config_path, "plugins:\n  enabled: [mordred]\n  disabled: [mordred]\n", encoding="utf-8")
+        config_path = _seed(tmp_path, "plugins:\n  enabled: [mordred]\n  disabled: [mordred]\n")
 
         migration = _writer(tmp_path).migrate_plugin_identity()
 

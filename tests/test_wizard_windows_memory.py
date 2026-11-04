@@ -138,9 +138,21 @@ def test_ceremony_enrolls_only_the_requested_roles(win, capsys):
     assert generated(env) == 2
 
 
-def test_ceremony_cli_parses_role_flags(win, capsys):
-    assert cli.main(["keyvault", "native", "init", "--role", "audit"]) == 0
-    assert role_current(win, "audit") is not None and memory_lease(win) is None
+def test_ceremony_cli_parses_role_flags(monkeypatch, tmp_path):
+    # Enrollment and role isolation have real-custody coverage immediately above.
+    # This case owns parsing, selected-home forwarding and exit propagation.
+    selected_home = tmp_path / "selected-home"
+    monkeypatch.setenv("HERMES_HOME", str(selected_home))
+    seen = []
+
+    def enroll_selected(*, home, roles):
+        seen.append((home, roles))
+        return 7
+
+    monkeypatch.setattr(keyvault_windows_cli, "native_init", enroll_selected)
+    assert cli.main(["keyvault", "native", "init", "--role", "audit"]) == 7
+    assert seen == [(selected_home, ["audit"])]
+    assert not selected_home.exists()
 
 
 def test_ceremony_refuses_a_copied_profile_without_generating(win, capsys):
@@ -457,23 +469,25 @@ def test_purge_refuses_at_the_gate_without_journal(seeded, monkeypatch, capsys):
     assert not (env.home / "mordred" / "windows-memory.pending.json").exists()
 
 
-def test_proof_python_routes_through_the_launcher(win, monkeypatch):
-    from mordred_hermes import _windows_runtime
+def test_proof_python_routes_through_the_launcher(monkeypatch, tmp_path):
+    from mordred_hermes._core import _windows_runtime
     from mordred_hermes.keyvault._windows_proof import WindowsRuntimeProofError
     from mordred_hermes.wizard import _uninstall_hermes_env, _windows_memory
 
-    launcher = win.home / "bin" / "hermes.exe"
+    home = tmp_path / "home"
+    launcher = home / "bin" / "hermes.exe"
+    monkeypatch.setenv("MORDRED_HERMES_PYTHON", str(home / "override.exe"))
     monkeypatch.setattr(_uninstall_hermes_env, "find_hermes_launcher", lambda home: launcher)
-    assert _windows_memory.proof_python(win.home) is None, "MORDRED_HERMES_PYTHON stays authoritative"
+    assert _windows_memory.proof_python(home) is None, "MORDRED_HERMES_PYTHON stays authoritative"
     monkeypatch.delenv("MORDRED_HERMES_PYTHON")
     selected = Path("C:/hermes/python.exe")
     monkeypatch.setattr(_windows_runtime, "resolve_windows_python", lambda home, found: selected)
-    assert _windows_memory.proof_python(win.home) == selected
+    assert _windows_memory.proof_python(home) == selected
     monkeypatch.setattr(_windows_runtime, "resolve_windows_python", lambda home, found: None)
     with pytest.raises(WindowsRuntimeProofError, match=r"\(interpreter-invalid\)"):
-        _windows_memory.proof_python(win.home)
+        _windows_memory.proof_python(home)
     monkeypatch.setattr(_uninstall_hermes_env, "find_hermes_launcher", lambda home: None)
-    assert _windows_memory.proof_python(win.home) is None
+    assert _windows_memory.proof_python(home) is None
 
 
 _WRITE_SPIES: tuple[tuple[object, str], ...] = (
@@ -577,3 +591,77 @@ def test_windows_enable_all_override_keeps_installed_runtime_proof(seeded, monke
     assert_all_sealed(seeded)
     assert generated(seeded) == 1
     fresh_process_read(seeded)
+
+
+def test_existing_memory_with_database_dependencies_is_observation_only(win, monkeypatch):
+    env = win
+    assert keyvault_windows_cli.native_init(home=env.home, roles=["memory"]) == 0
+    original = memory_lease(env)
+    (env.home / "state.db").write_bytes(b"retained database")
+    before = snapshot(env)
+    calls = list(env.backend.calls)
+    from mordred_hermes.keyvault import _database_mutation
+
+    def mutation_refused(**kwargs):
+        pytest.fail("already-enrolled observation entered the database mutation broker")
+
+    monkeypatch.setattr(_database_mutation, "database_key_mutation", mutation_refused)
+    assert keyvault_windows_cli._enroll_one(env.home, "memory") == (original, False)
+    assert keyvault_windows_cli.native_init(home=env.home, roles=["memory"]) == 0
+    assert snapshot(env) == before
+    assert env.backend.calls == calls
+
+
+@pytest.mark.parametrize("independent", ["audit", "telegram"])
+def test_existing_memory_with_database_dependencies_allows_mixed_independent_enrollment(win, independent):
+    env = win
+    assert keyvault_windows_cli.native_init(home=env.home, roles=["memory"]) == 0
+    memory = memory_lease(env)
+    wrapped = (env.home / "mordred" / "memory-key.wrapped").read_bytes()
+    (env.home / "state.db").write_bytes(b"retained database")
+    count = generated(env)
+    results = keyvault_windows_cli.enroll_roles(env.home, ("memory", independent))
+    assert results is not None
+    assert [(result.role, result.created) for result in results] == [("memory", False), (independent, True)]
+    assert results[0].generation == memory.generation
+    assert generated(env) == count + 1
+    assert role_current(env, independent) is not None
+    assert memory_lease(env) == memory
+    assert (env.home / "mordred" / "memory-key.wrapped").read_bytes() == wrapped
+
+
+def test_absent_memory_with_database_dependencies_still_refuses_before_creation(win):
+    env = win
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+
+    (env.home / "state.db").write_bytes(b"retained database")
+    with pytest.raises(DatabaseRefused):
+        keyvault_windows_cli._enroll_one(env.home, "memory")
+    assert generated(env) == 0
+    assert memory_lease(env) is None
+    assert not (env.home / "mordred" / "windows-memory.pending.json").exists()
+
+
+def test_memory_creation_rechecks_role_after_acquiring_database_lease(win, monkeypatch):
+    env = win
+    from contextlib import contextmanager
+
+    from mordred_hermes._core._custody_order import active_custody_scopes
+    from mordred_hermes.keyvault import _database_mutation
+
+    mutate = _database_mutation.database_key_mutation
+    winner = []
+
+    @contextmanager
+    def enrollment_wins(**kwargs):
+        assert not active_custody_scopes(), "database broker was entered under the observation custody scope"
+        with mutate(**kwargs) as database_lease:
+            with env.custody.windows_custody_session(env.home, create=True, backend=env.backend) as owner:
+                owner.enroll_memory(database_lease=database_lease)
+                winner.append(owner.lease("memory"))
+            yield database_lease
+
+    monkeypatch.setattr(_database_mutation, "database_key_mutation", enrollment_wins)
+    assert keyvault_windows_cli._enroll_one(env.home, "memory") == (winner[0], False)
+    assert generated(env) == 1
+    assert memory_lease(env) == winner[0]

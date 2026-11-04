@@ -1,0 +1,40 @@
+Message-ID: <rfc1@example.org>
+Date: Sat, 10 Oct 2026 10:00:00 +0900
+From: Hanako Suzuki <hanako@example.org>
+To: =?utf-8?b?5L2Q44CF5pyoIOiRtQ==?= <owner@example.com>
+Subject: Fwd: Contract draft
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer-boundary"
+
+--outer-boundary
+Content-Type: text/plain; charset=UTF-8
+
+Forwarding as attachment. CANARY-RFC-OUTER
+
+--outer-boundary
+Content-Type: message/rfc822
+Content-Disposition: attachment; filename="CANARY-RFC-FILENAME.eml"
+
+Message-ID: <inner1@example.net>
+Date: Fri, 02 Oct 2026 17:45:00 +0900
+From: Ichiro Sato <ichiro@example.net>
+To: Hanako Suzuki <hanako@example.org>
+Subject: Contract draft
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+
+Inner message body. CANARY-RFC-INNER
+
+--outer-boundary
+Content-Type: image/png
+Content-Disposition: attachment; filename="CANARY-RFC-IMAGE.png"
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgpDQU5BUlktUkZDLVBORw==
+--outer-boundary
+Content-Type: application/pdf
+Content-Disposition: attachment; filename="CANARY-RFC-DOC.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQgQ0FOQVJZLVJGQy1QREY=
+--outer-boundary--

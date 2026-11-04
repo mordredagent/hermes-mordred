@@ -54,7 +54,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
-from .._bounded_json import JSONDepthError, _BoundedJSONDecoder
+from .._core._bounded_json import JSONDepthError, _BoundedJSONDecoder
 from .kek import MasterKey
 
 MAGIC: Final = "MVMF"

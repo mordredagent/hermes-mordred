@@ -52,7 +52,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-from .._file_lock import private_flock
+from .._core._file_lock import private_flock
 from .._private_fs import FileIdentity
 from ..keyvault._storage import atomic_write, safe_read
 from . import _windows_storage as _storage
@@ -245,7 +245,7 @@ def _tolerated_storage_failure(what: str) -> Iterator[None]:
 
 
 def _ext_dir() -> Path:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     d = hermes_home() / "extension"
     if _storage.enabled():
@@ -364,7 +364,7 @@ def _state_lock() -> Iterator[None]:
 
     The descriptor lifecycle (private ``O_NOFOLLOW`` open, mode-0600 assertion
     on the opened inode, ``flock`` / unlock / close ordering) is
-    :func:`mordred_hermes._file_lock.private_flock`; ``_ext_dir()`` still owns
+    :func:`mordred_hermes._core._file_lock.private_flock`; ``_ext_dir()`` still owns
     creating and validating the parent directory, and the raise in
     :func:`_reject_unsafe_state_lock` still happens in this module so its
     exact one-argument :exc:`OSError` is unchanged.
@@ -856,7 +856,7 @@ def load_channel_keys() -> dict[str, bytes]:
     for cid, kb in (data.get("channel_keys") or {}).items():
         try:
             out[cid] = b64u_decode(kb)
-        except Exception:
+        except Exception:  # noqa: S112 - undecodable channel keys are skipped by design
             continue
     return out
 

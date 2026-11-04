@@ -25,6 +25,9 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``, now the ``mordred`` plugi
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — show the Mordred plugin and its components
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
+- ``activity {status,use,tools,correct,backup,restore,retention}`` — browser activity
+  history administration
+- ``mail {import,status,setup,fetch,forget}``    — mail import (mbox / .eml) and IMAP sync into ``mordred.db``
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ from . import _term
 # ``cli._setup_subparser`` (Hermes registration in ``wizard/__init__.py``) and
 # ``cli._handle_*`` (tests) keep resolving here. See ``__all__``.
 from ._cli_parsers import (
+    _add_activity,
     _add_audit,
     _add_configure,
     _add_desktop,
@@ -48,6 +52,7 @@ from ._cli_parsers import (
     _add_extension,
     _add_install,
     _add_keyvault,
+    _add_mail,
     _add_network,
     _add_plugins,
     _add_policy,
@@ -58,6 +63,7 @@ from ._cli_parsers import (
     _add_update,
     _add_upgrade,
     _add_vault,
+    _handle_activity,
     _handle_audit_decrypt,
     _handle_audit_grep,
     _handle_audit_purge,
@@ -80,6 +86,7 @@ from ._cli_parsers import (
     _handle_keyvault_recover,
     _handle_keyvault_reset,
     _handle_keyvault_verify_digest,
+    _handle_mail,
     _handle_network_init,
     _handle_network_status,
     _handle_network_use,
@@ -111,6 +118,7 @@ from ._defaults import is_missing_keyvault_stack
 from ._prompt_io import NonInteractiveAbort
 
 __all__ = [
+    "_add_activity",
     "_add_audit",
     "_add_configure",
     "_add_desktop",
@@ -119,6 +127,7 @@ __all__ = [
     "_add_extension",
     "_add_install",
     "_add_keyvault",
+    "_add_mail",
     "_add_network",
     "_add_plugins",
     "_add_policy",
@@ -129,6 +138,7 @@ __all__ = [
     "_add_update",
     "_add_upgrade",
     "_add_vault",
+    "_handle_activity",
     "_handle_audit_decrypt",
     "_handle_audit_grep",
     "_handle_audit_purge",
@@ -151,6 +161,7 @@ __all__ = [
     "_handle_keyvault_recover",
     "_handle_keyvault_reset",
     "_handle_keyvault_verify_digest",
+    "_handle_mail",
     "_handle_network_init",
     "_handle_network_status",
     "_handle_network_use",

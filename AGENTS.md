@@ -9,10 +9,11 @@ Standalone package repository for **hermes-mordred**, a plugin suite for
 [hermes-agent](https://pypi.org/project/hermes-agent/). It ships ONE entry-point
 plugin, `mordred` (`src/mordred_hermes/plugin.py`), whose `register()` wires the
 components in `src/mordred_hermes/` in a fixed order: `keyvault`, `llm_guard`,
-`network`, `privacy_check`, `e2e` (`extension/gateway_plugin.py`), `wizard`.
+`network`, `privacy_check`, `dbcrypt`, `e2e` (`extension/gateway_plugin.py`),
+`activity`, `wizard`.
 The pre-0.2.0a0 per-component plugin names (`mordred_network`, ...) survive
 only as `plugins.mordred_*` config section names and are migrated out of
-`plugins.enabled` / `plugins.disabled` (`_plugin_identity.py`). It is **not** a fork of Hermes upstream — never send
+`plugins.enabled` / `plugins.disabled` (`_core/_plugin_identity.py`). It is **not** a fork of Hermes upstream — never send
 PRs upstream (zero-PR commitment, `docs/dev/UPSTREAM.md`).
 
 ## Setup and everyday commands
@@ -23,12 +24,19 @@ uv run pytest -q                          # unit suite (integration marker exclu
 uv run ruff check src tests scripts
 uv run ruff format --check src tests scripts
 uv run mypy --strict src tools scripts/keyvault_offline_digest.py
+uv run lint-imports                       # import layering contracts ([tool.importlinter] in pyproject.toml)
 shellcheck scripts/*.sh native/*/build.sh # blocking in CI; brew/apt install shellcheck
 uv run pytest --cov=src/mordred_hermes    # coverage; CI floor is 80%
 ```
 
 Full guide: `docs/dev/setup.md`. Always go through `uv run` / `.venv/bin/…`;
 bare `pytest` or `hermes-mordred` may hit a different environment via PATH.
+
+Documentation-only push/PR events skip CI for `docs/**/*.md` and root
+`README.md`, `AGENTS.md`, `CLAUDE.md`, `notes.md`. Version files, executable
+examples, runtime Markdown and mixed code/doc changes still trigger CI. Manual
+dispatch remains available; see `docs/dev/CI.md`. For documentation-only edits,
+run `uv run pytest -q tests/test_docs_links.py` locally as needed.
 
 For ordinary edits, start with `uv run python tools/run_critical_tests.py` and
 the changed modules (`uv run pytest -q tests/test_<affected>.py`). Use `--list`
@@ -38,9 +46,10 @@ integration/code freeze, rather than repeatedly for reports or documentation.
 Security-sensitive changes still require the complete containing test modules
 and the relevant explicit live-gated paths. Draft PR CI runs critical feedback
 on Ubuntu Python 3.12 and mapped macOS/Windows workers. Ready PRs and accepted-
-baseline `dev` pushes use conservative changed-scope CI (normally 3–5 jobs).
+baseline `dev` pushes use conservative changed-scope CI (normally 3–6 jobs).
 Sensitive/unknown changes, `main`, manual dispatch and `ci:full` use final CI:
-Linux 3.11/3.13, macOS 3.11 and one Windows 3.11 worker, with all validation packs.
+Linux 3.11/3.13, a parallel Linux floor worker, macOS 3.11 and four Windows 3.11
+workers, with all validation packs.
 See `docs/dev/CI.md` for exact evidence and rerun rules.
 
 ## Critical gotchas
@@ -63,11 +72,13 @@ See `docs/dev/CI.md` for exact evidence and rerun rules.
 - **Port 7788 belongs to the production extension gateway.** For local runs use
   `.venv/bin/hermes-mordred extension serve --port 7799`; check holders with
   `lsof -nP -iTCP:7788 -sTCP:LISTEN`.
+- **The activity store never opens without SQLCipher;** tests pass an explicit
+  opener — never add a plaintext path.
 - **Live-gated tests require explicit execution.** Secure Enclave and live-LLM
   suites have no CI automation. The Mullvad suite has a manual-only GitHub
   Actions workflow (`integration-vpn.yml`); it never runs on pushes or PRs.
   Run the relevant gated path after changing it and record the result in
-  `docs/dev/CI.md` §Manual live-device validation log.
+  `docs/dev/VALIDATION_LOG.md` (the Manual live-device validation log).
 
 ## Git and PR conventions
 

@@ -38,10 +38,10 @@ class TestRegister:
 
         policy = _write_policy(tmp_path, "off")
         config = _write_config(tmp_path, "clearnet")
-        monkeypatch.setattr(network, "DEFAULT_POLICY_JSON_PATH", policy)
-        monkeypatch.setattr(network, "DEFAULT_CONFIG_PATH", config)
-        monkeypatch.setattr(network, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
-        network._build_audit_writer.cache_clear()
+        monkeypatch.setattr(network._registration, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(network._registration, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(network._registration, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        network._registration._build_audit_writer.cache_clear()
 
     def test_register_wires_integrity_and_network_hooks(self) -> None:
         from mordred_hermes.network import register
@@ -118,7 +118,7 @@ class TestRegister:
         config = RuntimeConfig(policy_mode="strict", default_path="tor")
 
         with pytest.raises(MordredPathBringupFailed, match="execute_code child routing"):
-            network._register_proxy_env_passthrough(
+            network._registration._register_proxy_env_passthrough(
                 config=config,
                 audit=audit,
                 registrar=lambda _names: None,
@@ -143,8 +143,8 @@ class TestRegister:
         result = ctx.hooks[-1][1](tool_name="web_fetch")
 
         assert result == {"action": "block", "message": "sentinel"}
-        assert received["config_path"] == network.DEFAULT_CONFIG_PATH
-        assert received["policy_json_path"] == network.DEFAULT_POLICY_JSON_PATH
+        assert received["config_path"] == network._registration.DEFAULT_CONFIG_PATH
+        assert received["policy_json_path"] == network._registration.DEFAULT_POLICY_JSON_PATH
 
     def test_register_is_idempotent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import mordred_hermes.network as network
@@ -171,10 +171,10 @@ class TestRegister:
         def _build_runtime(**_kwargs: Any) -> _ReusableRuntime:
             nonlocal construction_calls
             construction_calls += 1
-            runtime.activation_config_fingerprint = network.route_config_fingerprint(_kwargs["config"])
+            runtime.activation_config_fingerprint = network._registration.route_config_fingerprint(_kwargs["config"])
             return runtime
 
-        monkeypatch.setattr(network, "Runtime", _build_runtime)
+        monkeypatch.setattr(network._registration, "Runtime", _build_runtime)
         first_ctx = _FakeCtx()
         second_ctx = _FakeCtx()
         network.register(first_ctx)
@@ -193,13 +193,13 @@ class TestRegister:
         import mordred_hermes.network as network
 
         callbacks: list[Callable[[], None]] = []
-        monkeypatch.setattr(network.atexit, "register", callbacks.append)
-        monkeypatch.setattr(network, "_PROCESS_SHUTDOWN_REGISTERED", False)
+        monkeypatch.setattr(network._registration.atexit, "register", callbacks.append)
+        monkeypatch.setattr(network._registration, "_PROCESS_SHUTDOWN_REGISTERED", False)
 
         network.register(_FakeCtx())
         network.register(_FakeCtx())
 
-        assert callbacks == [network._stop_runtime_at_process_exit]
+        assert callbacks == [network._registration._stop_runtime_at_process_exit]
 
     def test_process_shutdown_cleanup_stops_current_runtime(self) -> None:
         import mordred_hermes.network as network
@@ -209,7 +209,7 @@ class TestRegister:
         rt.use("tor")
         api.set_runtime(rt)
 
-        network._stop_runtime_at_process_exit()
+        network._registration._stop_runtime_at_process_exit()
 
         assert rt.stop_called is True
 
@@ -227,10 +227,10 @@ class TestRegisterProcessRouteActivation:
 
         policy = _write_policy(tmp_path, policy_mode)
         config = _write_config(tmp_path, path)
-        monkeypatch.setattr(network, "DEFAULT_POLICY_JSON_PATH", policy)
-        monkeypatch.setattr(network, "DEFAULT_CONFIG_PATH", config)
-        monkeypatch.setattr(network, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
-        network._build_audit_writer.cache_clear()
+        monkeypatch.setattr(network._registration, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(network._registration, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(network._registration, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        network._registration._build_audit_writer.cache_clear()
 
     def test_register_activates_and_freezes_route_before_provider_construction(
         self,
@@ -272,7 +272,7 @@ class TestRegisterProcessRouteActivation:
                 events.append("freeze")
 
         runtime = _RegisterRuntime()
-        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+        monkeypatch.setattr(network._registration, "Runtime", lambda **_kwargs: runtime)
 
         class _OrderingCtx(_FakeCtx):
             def register_hook(self, hook_name: str, callback: Callable[..., Any]) -> None:
@@ -304,7 +304,7 @@ class TestRegisterProcessRouteActivation:
         self._seed(tmp_path, monkeypatch)
         runtime = _FakeRuntime()
         runtime.use_raises = BringupFailed("tor bootstrap failed")
-        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+        monkeypatch.setattr(network._registration, "Runtime", lambda **_kwargs: runtime)
         ctx = _FakeCtx()
 
         with pytest.raises(MordredPathBringupFailed, match="before provider client construction"):
@@ -338,7 +338,7 @@ class TestRegisterProcessRouteActivation:
                 super().freeze_process_route(expected_path=expected_path)
 
         runtime = _UnexpectedFailureRuntime()
-        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+        monkeypatch.setattr(network._registration, "Runtime", lambda **_kwargs: runtime)
         ctx = _FakeCtx()
 
         with pytest.raises(MordredPathBringupFailed, match="before provider client construction"):
@@ -360,7 +360,7 @@ class TestRegisterProcessRouteActivation:
         def _constructor_boom(**_kwargs: Any) -> None:
             raise RuntimeError("synthetic constructor failure")
 
-        monkeypatch.setattr(network, "Runtime", _constructor_boom)
+        monkeypatch.setattr(network._registration, "Runtime", _constructor_boom)
         ctx = _FakeCtx()
 
         with pytest.raises(MordredPathBringupFailed, match="before provider client construction"):
@@ -388,7 +388,7 @@ class TestRegisterProcessRouteActivation:
                 raise OSError("synthetic cleanup failure")
 
         runtime = _CleanupFailureRuntime()
-        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+        monkeypatch.setattr(network._registration, "Runtime", lambda **_kwargs: runtime)
         ctx = _FakeCtx()
 
         with pytest.raises(MordredPathBringupFailed, match="synthetic post-bring-up failure"):
@@ -410,7 +410,7 @@ class TestRegisterProcessRouteActivation:
         def _audit_boom(_path: Path) -> None:
             raise RuntimeError("synthetic audit factory failure")
 
-        monkeypatch.setattr(network, "_build_audit_writer", _audit_boom)
+        monkeypatch.setattr(network._registration, "_build_audit_writer", _audit_boom)
         ctx = _FakeCtx()
 
         with pytest.raises(MordredPathBringupFailed, match="before audit initialization"):
@@ -428,10 +428,10 @@ class TestRegisterProcessRouteActivation:
 
         self._seed(tmp_path, monkeypatch)
         runtime = _FakeRuntime()
-        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
-        monkeypatch.setattr(network, "_PROCESS_SHUTDOWN_REGISTERED", False)
+        monkeypatch.setattr(network._registration, "Runtime", lambda **_kwargs: runtime)
+        monkeypatch.setattr(network._registration, "_PROCESS_SHUTDOWN_REGISTERED", False)
         monkeypatch.setattr(
-            network.atexit,
+            network._registration.atexit,
             "register",
             lambda _callback: (_ for _ in ()).throw(RuntimeError("synthetic atexit failure")),
         )
@@ -454,12 +454,12 @@ class TestRegisterProcessRouteActivation:
 
         self._seed(tmp_path, monkeypatch)
         runtime = _FakeRuntime()
-        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+        monkeypatch.setattr(network._registration, "Runtime", lambda **_kwargs: runtime)
 
         def _import_boom() -> None:
             raise RuntimeError("synthetic integrity-hook import failure")
 
-        monkeypatch.setattr(network, "_load_integrity_hook", _import_boom)
+        monkeypatch.setattr(network._registration, "_load_integrity_hook", _import_boom)
         ctx = _FakeCtx()
 
         with pytest.raises(MordredPathBringupFailed, match="mandatory network hooks"):
@@ -480,7 +480,7 @@ class TestRegisterProcessRouteActivation:
 
         self._seed(tmp_path, monkeypatch)
         runtime = _FakeRuntime()
-        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+        monkeypatch.setattr(network._registration, "Runtime", lambda **_kwargs: runtime)
 
         class _FailingCtx(_FakeCtx):
             def register_hook(self, hook_name: str, callback: Callable[..., Any]) -> None:
@@ -504,16 +504,16 @@ class TestRegisterProcessRouteActivation:
         import mordred_hermes.network as network
 
         self._seed(tmp_path, monkeypatch)
-        current_config = network._load_runtime_config(
-            policy_json_path=network.DEFAULT_POLICY_JSON_PATH,
-            config_path=network.DEFAULT_CONFIG_PATH,
+        current_config = network._registration._load_runtime_config(
+            policy_json_path=network._registration.DEFAULT_POLICY_JSON_PATH,
+            config_path=network._registration.DEFAULT_CONFIG_PATH,
         )
         runtime = _FakeRuntime()
         runtime._active_path = "tor"
         runtime._ready = True
         runtime.process_route_frozen = True
         runtime.frozen_requested_path = "tor"
-        runtime.frozen_route_config = network.route_config_fingerprint(current_config)
+        runtime.frozen_route_config = network._registration.route_config_fingerprint(current_config)
         network.api.set_runtime(runtime)
 
         class _FailingCtx(_FakeCtx):
@@ -545,7 +545,7 @@ class TestRegisterProcessRouteActivation:
                 super().activate_and_freeze(path)
 
         runtime = _BlockingRuntime()
-        monkeypatch.setattr(network, "Runtime", lambda **_kwargs: runtime)
+        monkeypatch.setattr(network._registration, "Runtime", lambda **_kwargs: runtime)
 
         def _register() -> None:
             try:
@@ -586,11 +586,11 @@ class TestRegisterProcessRouteActivation:
         runtime._active_path = "tor"
         runtime._ready = True
         runtime.process_route_frozen = True
-        current_config = network._load_runtime_config(
-            policy_json_path=network.DEFAULT_POLICY_JSON_PATH,
-            config_path=network.DEFAULT_CONFIG_PATH,
+        current_config = network._registration._load_runtime_config(
+            policy_json_path=network._registration.DEFAULT_POLICY_JSON_PATH,
+            config_path=network._registration.DEFAULT_CONFIG_PATH,
         )
-        runtime.frozen_route_config = network.route_config_fingerprint(current_config)
+        runtime.frozen_route_config = network._registration.route_config_fingerprint(current_config)
         if invalid_state == "not_ready":
             runtime._ready = False
         elif invalid_state == "invalid_path":
@@ -612,7 +612,7 @@ class TestRegisterProcessRouteActivation:
         def _must_not_construct(**_kwargs: Any) -> None:
             raise AssertionError("re-registration must not construct a replacement runtime")
 
-        monkeypatch.setattr(network, "Runtime", _must_not_construct)
+        monkeypatch.setattr(network._registration, "Runtime", _must_not_construct)
         ctx = _FakeCtx()
 
         with pytest.raises(MordredPathBringupFailed, match="during plugin re-registration"):
@@ -641,16 +641,16 @@ class TestRegisterProcessRouteActivation:
         import mordred_hermes.network as network
 
         self._seed(tmp_path, monkeypatch, path=path)
-        initial_config = network._load_runtime_config(
-            policy_json_path=network.DEFAULT_POLICY_JSON_PATH,
-            config_path=network.DEFAULT_CONFIG_PATH,
+        initial_config = network._registration._load_runtime_config(
+            policy_json_path=network._registration.DEFAULT_POLICY_JSON_PATH,
+            config_path=network._registration.DEFAULT_CONFIG_PATH,
         )
         runtime = _FakeRuntime()
         runtime._active_path = path
         runtime._ready = True
         runtime.process_route_frozen = True
         runtime.frozen_requested_path = path
-        runtime.frozen_route_config = network.route_config_fingerprint(initial_config)
+        runtime.frozen_route_config = network._registration.route_config_fingerprint(initial_config)
         network.api.set_runtime(runtime)
 
         if config_change == "tor_binary":
@@ -687,17 +687,17 @@ class TestRegisterProcessRouteActivation:
         runtime._ready = True
         runtime.process_route_frozen = True
         runtime.frozen_requested_path = "tor"
-        current_config = network._load_runtime_config(
-            policy_json_path=network.DEFAULT_POLICY_JSON_PATH,
-            config_path=network.DEFAULT_CONFIG_PATH,
+        current_config = network._registration._load_runtime_config(
+            policy_json_path=network._registration.DEFAULT_POLICY_JSON_PATH,
+            config_path=network._registration.DEFAULT_CONFIG_PATH,
         )
-        runtime.frozen_route_config = network.route_config_fingerprint(current_config)
+        runtime.frozen_route_config = network._registration.route_config_fingerprint(current_config)
         network.api.set_runtime(runtime)
 
         def _must_not_construct(**_kwargs: Any) -> None:
             raise AssertionError("healthy fallback must reuse its existing runtime")
 
-        monkeypatch.setattr(network, "Runtime", _must_not_construct)
+        monkeypatch.setattr(network._registration, "Runtime", _must_not_construct)
         ctx = _FakeCtx()
 
         network.register(ctx)

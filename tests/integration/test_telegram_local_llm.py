@@ -44,6 +44,7 @@ def test_live_saved_local_model_probe_and_telegram_ask(tmp_path, monkeypatch, ca
         memory_guard=lambda: None,
     )
     monkeypatch.setattr(hermes_tools, "_service", lambda: svc)
+    monkeypatch.setattr(hermes_tools, "_reader_mode_ready", lambda _session_id: True)
 
     def ask():
         return json.loads(
@@ -75,3 +76,6 @@ def test_live_saved_local_model_probe_and_telegram_ask(tmp_path, monkeypatch, ca
     assert "error" not in result and result["answer"].strip()
     assert result["model"] == model
     assert result["search"]["messages_sent_to_privacy_llm"] == 1
+    # Soft: a real model may or may not cite; any card it earns is the one part it was shown.
+    assert isinstance(result["evidence"], list) and isinstance(result["unverified_ids"], list)
+    assert {card["id"] for card in result["evidence"]} <= {"tg:-5:1#a"}

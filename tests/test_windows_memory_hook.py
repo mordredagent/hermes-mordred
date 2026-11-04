@@ -357,7 +357,7 @@ def _optional(path):
 
 def emulate_windows(mp):
     """Child-process copy of the ``fs``/``memory``/``windows`` fixture patches."""
-    from mordred_hermes import _config_io as cio
+    from mordred_hermes._core import _config_io as cio
     from mordred_hermes.keyvault import _memory_storage as storage
     from mordred_hermes.keyvault import _windows_custody as custody
     from tests._keyvault_fakes import FakeBackend

@@ -27,7 +27,7 @@ from collections.abc import Callable
 from types import FrameType
 from typing import TYPE_CHECKING, Any
 
-from .. import _term
+from .._core import _term
 
 if TYPE_CHECKING:
     from .api import ExtensionAPIServer
@@ -52,11 +52,14 @@ def _load_vault_managed_environment() -> int:
     The standalone launcher does not run ``mordred_keyvault.register()``.  A
     manifest pre-check keeps an extension-only install free of macOS Keychain
     dependencies when no vault exists, while any on-disk vault state takes the
-    normal fail-closed runtime path.
+    normal fail-closed runtime path. An ambient memory key is evicted before that
+    pre-check, so a no-vault server does not keep it until plugin discovery.
     """
 
     from ..keyvault._identity import default_vault_root
+    from ..keyvault._memory_key_holder import evict_ambient_memory_key
 
+    evict_ambient_memory_key()
     if not any(default_vault_root().glob("manifest.*.mvmf")):
         return 0
     from ..keyvault._runtime_env import install_vault_env_decrypt
@@ -88,6 +91,35 @@ def _resolve_chat_handler() -> Any:
         # missing-runtime install.
         logging.getLogger(__name__).warning("gateway chat handler unavailable, falling back to stub: %s", exc)
         return None
+
+
+def _resolve_activity_receiver() -> Any:
+    """The activity receiver for this profile, or ``None`` (every batch is refused).
+
+    Imported lazily. A receiver that cannot be built (unreadable home, import
+    or configuration failure) is logged and every ``activity_batch`` then
+    answers ``activity_refused: store_unavailable``; the extension keeps
+    serving. The receiver re-evaluates config and the protection gate per
+    batch, so nothing here decides whether recording is allowed.
+    """
+    try:
+        from .._core._home import hermes_home
+        from ..activity.ingest import build_receiver
+    except ImportError as exc:
+        logging.getLogger(__name__).debug("activity receiver unavailable (%s)", type(exc).__name__)
+        return None
+    try:
+        return build_receiver(hermes_home())
+    except Exception as exc:
+        logging.getLogger(__name__).warning("activity receiver unavailable (%s)", type(exc).__name__)
+        return None
+
+
+def _resolve_activity_max_batch_bytes() -> int:
+    from .._core._home import hermes_home
+    from .activity_api import resolve_max_batch_bytes
+
+    return resolve_max_batch_bytes(hermes_home())
 
 
 def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
@@ -160,7 +192,13 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
         "chat handler: %s",
         "gateway agent (Hermes runtime found)" if chat_handler else "stub (Hermes runtime not importable)",
     )
-    server = ExtensionAPIServer(host=host, port=port, chat_handler=chat_handler)
+    server = ExtensionAPIServer(
+        host=host,
+        port=port,
+        chat_handler=chat_handler,
+        activity_receiver=_resolve_activity_receiver(),
+        activity_max_batch_bytes=_resolve_activity_max_batch_bytes(),
+    )
     color = _term.should_color(sys.stdout)
     return _run_forever(server, host, port, color)
 

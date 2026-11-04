@@ -11,11 +11,18 @@ module's :func:`register` wires every component in a fixed order:
                         auxiliary-client guards, session / request enforcement.
 3. ``network``       — the process-wide Tor / VPN / clearnet route and hooks.
 4. ``privacy_check`` — tool-call policy and the session-start integrity gate.
-5. ``e2e``           — encrypted gateway dispatch, outbound re-encryption and
+5. ``dbcrypt``       — the database-encryption monitor and status line.
+6. ``e2e``           — encrypted gateway dispatch, outbound re-encryption and
                         the read-only Telegram tools.
-6. ``wizard``        — the ``hermes mordred`` CLI subcommand.
+7. ``activity``      — browser activity history: capture runs in the
+                        extension server's receiver; ``register`` adds the
+                        history hooks (``transform_tool_result``,
+                        ``pre_llm_call``), the two lookup tools and the
+                        ``browser-history`` skill, all gated per call by
+                        ``plugins.mordred_activity``.
+8. ``wizard``        — the ``hermes mordred`` CLI subcommand.
 
-Components 1-4 and 6 keep the relative order they had as separate plugins
+Components 1-4 and 8 keep the relative order they had as separate plugins
 (Hermes loaded those alphabetically: keyvault, llm_guard, network,
 privacy_check, wizard). ``e2e`` used to load first only because its old name
 sorted first; it now loads after the runtime guards it relies on.
@@ -43,7 +50,7 @@ import threading
 from collections.abc import Callable
 from typing import Any, Final
 
-from ._plugin_identity import PLUGIN_NAME
+from ._core._plugin_identity import PLUGIN_NAME
 
 __all__ = [
     "COMPONENTS",
@@ -64,12 +71,15 @@ COMPONENTS: Final[tuple[tuple[str, str], ...]] = (
     ("privacy_check", "mordred_hermes.privacy_check"),
     ("dbcrypt", "mordred_hermes.dbcrypt"),
     ("e2e", "mordred_hermes.extension.gateway_plugin"),
+    ("activity", "mordred_hermes.activity"),
     ("wizard", "mordred_hermes.wizard"),
 )
 
 #: Minimum hook surface each component promises. The integrity gate checks it
 #: per component (recorded here) and, as a union, against Hermes's own ledger
-#: for the ``mordred`` plugin. The wizard is CLI-only.
+#: for the ``mordred`` plugin. The wizard is CLI-only; ``activity``'s history
+#: hooks are optional (they fail open and act only when the feature is on), so
+#: their absence is not an integrity failure.
 COMPONENT_REQUIRED_HOOKS: Final[dict[str, frozenset[str]]] = {
     "keyvault": frozenset({"on_session_start", "on_session_end"}),
     "llm_guard": frozenset({"on_session_start", "pre_api_request"}),
@@ -77,6 +87,7 @@ COMPONENT_REQUIRED_HOOKS: Final[dict[str, frozenset[str]]] = {
     "privacy_check": frozenset({"on_session_start", "pre_tool_call"}),
     "dbcrypt": frozenset({"on_session_start", "pre_llm_call"}),
     "e2e": frozenset({"on_session_start", "pre_gateway_dispatch"}),
+    "activity": frozenset(),
     "wizard": frozenset(),
 }
 

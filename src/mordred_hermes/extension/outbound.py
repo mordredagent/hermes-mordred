@@ -17,6 +17,9 @@ mandatory-E2E platform. The second rule covers every send that has no inbound
 thread context to inherit — cron output, proactive notifications, agent-initiated
 messages — which otherwise left in cleartext into a ciphertext-only channel.
 Mordred's own needs-key notice is the sole exception (``e2e.control_notice_send``).
+
+This covers the live adapter's ``send`` only. Hermes's standalone senders
+(``standalone_sender_fn``) bypass it; see the accepted limitations in SPEC.md.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ _patched: set[str] = set()
 
 _LOCKED_NOTICE = "🔒 (暗号化できないため本文を送信できませんでした)"
 _CONTEXT_UNAVAILABLE = "mordred_encrypt_context_unavailable"
+_SEND_FAILED = "mordred_encrypt_send_failed"
 
 
 def _SendResult() -> Any:
@@ -129,46 +133,46 @@ def _wrap_slack(cls: Any) -> None:
 # --- Discord ---------------------------------------------------------------
 
 
-async def _discord_encrypted_send(self: Any, chat_id: str, content: str, thread_id: str | None, ids: list[str]) -> Any:
+async def _discord_encrypted_send(self: Any, channel: Any, content: str, thread_id: str | None, ids: list[str]) -> Any:
     SendResult = _SendResult()
-    tid = thread_id or chat_id
-    channel = self._client.get_channel(int(tid))
-    if not channel:
-        channel = await self._client.fetch_channel(int(tid))
-    if not channel:
-        return SendResult(success=False, error=f"Channel {tid} not found")
-
-    # Include the parent channel id in the key lookup (threads inherit the key).
-    parent = None
-    try:
-        _p = getattr(channel, "parent_id", None) or getattr(getattr(channel, "parent", None), "id", None)
-        if _p:
-            parent = str(_p)
-    except Exception:
-        parent = None
-    lookup = [x for x in {*ids, parent or ""} if x]
+    tid = ids[0]
 
     kid = None
-    for cid in lookup:
-        kid = e2e.outbound_key_id("discord", cid, thread_id)
-        if kid:
-            break
+    try:
+        for cid in ids:
+            kid = e2e.outbound_key_id("discord", cid, thread_id)
+            # A missing kid with bindings means ambiguity, not permission to
+            # inherit a different key. Only an unbound candidate may fall back.
+            if kid or e2e.bound_channel_key_ids("discord", cid):
+                break
+    except Exception:
+        return SendResult(success=False, error="mordred_encrypt_unavailable")
     key = e2e.reply_key(kid)
     if key is None:
         return SendResult(success=False, error="mordred_encrypt_unavailable")
 
     mids: list[str] = []
-    for chunk in e2e.encrypt_reply(
-        key,
-        content,
-        self.MAX_MESSAGE_LENGTH,
-        e2e.DISCORD_MENTION_PREFIX_RE,
-        platform="discord",
-        chat_id=str(tid),
-        thread_root=thread_id,
-    ):
-        msg = await channel.send(chunk)
-        mids.append(str(msg.id))
+    try:
+        for chunk in e2e.encrypt_reply(
+            key,
+            content,
+            self.MAX_MESSAGE_LENGTH,
+            e2e.DISCORD_MENTION_PREFIX_RE,
+            platform="discord",
+            chat_id=str(tid),
+            thread_root=thread_id,
+        ):
+            msg = await channel.send(chunk)
+            mids.append(str(msg.id))
+    except Exception as exc:
+        # Gateway callers do not catch raw send errors (discord.HTTPException, a
+        # forum channel with no ``send``). Chunks already posted stay posted, and
+        # this wrapper does not fall back to plaintext. Hermes callers outside the
+        # adapter can: cron retries a failed result through the standalone sender,
+        # which is unwrapped (see TODO.md). Log only the type: exception text is
+        # platform-controlled and may echo the payload.
+        logger.warning("mordred_e2e: Discord encrypted send failed after %d chunks: %s", len(mids), type(exc).__name__)
+        return SendResult(success=False, error=_SEND_FAILED, raw_response={"message_ids": mids})
     return SendResult(success=True, message_id=mids[0] if mids else None, raw_response={"message_ids": mids})
 
 
@@ -182,11 +186,20 @@ def _wrap_discord(cls: Any) -> None:
             try:
                 raw_thread_id = (metadata or {}).get("thread_id")
                 thread_id = str(raw_thread_id) if raw_thread_id not in (None, "") else None
-                # Only the ids this call carries. A Discord thread inherits its
-                # parent's key, but the parent is resolved from the live client
-                # inside _discord_encrypted_send, so a proactive send addressed
-                # to a bare thread id can still miss the channel-binding rule.
-                ids = [x for x in {str(chat_id), str(thread_id or "")} if x]
+                tid = thread_id or str(chat_id)
+                # This must precede the plaintext path: a parent binding is only
+                # discoverable from the live channel, so an unresolved destination
+                # cannot be treated as unbound. Every send pays for it, and on a
+                # cache miss orig_send fetches the channel a second time.
+                channel = self._client.get_channel(int(tid))
+                if channel is None:
+                    channel = await self._client.fetch_channel(int(tid))
+                if channel is None:
+                    raise ValueError("Discord destination unavailable")
+                parent = getattr(channel, "parent_id", None) or getattr(getattr(channel, "parent", None), "id", None)
+                # Destination first, then the supplied channel and inherited key.
+                # Parent discovery must not change the reply context or v3 AAD.
+                ids = list(dict.fromkeys(str(x) for x in (tid, chat_id, parent) if x is not None and x != ""))
                 encrypted = any(e2e.outbound_must_encrypt("discord", x, thread_id) for x in ids)
             except Exception as exc:
                 # As with Slack, an indeterminate encryption context is a send
@@ -195,7 +208,7 @@ def _wrap_discord(cls: Any) -> None:
                 SendResult = _SendResult()
                 return SendResult(success=False, error=_CONTEXT_UNAVAILABLE)
             if encrypted:  # fail-closed
-                return await _discord_encrypted_send(self, chat_id, content, thread_id, ids)
+                return await _discord_encrypted_send(self, channel, content, thread_id, ids)
         return await orig_send(self, chat_id, content, reply_to, metadata)
 
     send.__mordred_wrapped__ = True  # type: ignore[attr-defined]

@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from mordred_hermes.extension.egress import EgressRoute
-from mordred_hermes.extension.telegram import ask, hermes_tools, secrets, service, store, tee
+from mordred_hermes.extension.telegram import ask, hermes_tools, history, secrets, service, store
 from mordred_hermes.wizard import telegram_cli
 
 
@@ -37,6 +37,12 @@ def _archive(tmp_path) -> tuple[store.ArchiveStore, store.ArchiveIndex]:
     return archive, index
 
 
+def _select(archive, index, request, aliases, *, budget_tokens):
+    """The service's path: canonical records from the archive, then the selection."""
+    records = history.load_ask_records(archive, index, request)
+    return ask.select_context(records, request, aliases, budget_tokens=budget_tokens)
+
+
 def test_local_day_bounds_are_inclusive_local_days():
     since, until = ask.local_day_bounds("2026-09-08", "2026-09-15")
     assert since == _ts("2026-09-08", 0) and until == _ts("2026-09-16", 0)
@@ -50,7 +56,7 @@ def test_period_questions_use_every_message_in_the_period_regardless_of_words(tm
     archive, index = _archive(tmp_path)
     since, until = ask.local_day_bounds("2026-09-08", "2026-09-15")
     request = ask.AskRequest(question="どんなメッセージが来てますか", since=since, until=until)
-    sel = ask.select_context(archive, index, request, ask.Aliases(enabled=False), budget_tokens=10_000)
+    sel = _select(archive, index, request, ask.Aliases(enabled=False), budget_tokens=10_000)
     texts = "\n".join(sel.lines)
     assert "hello there" in texts and "late on the 15th" in texts
     assert "old unrelated" not in texts and "after the range" not in texts
@@ -60,7 +66,7 @@ def test_prompt_states_today_coverage_and_period(tmp_path):
     archive, index = _archive(tmp_path)
     since, until = ask.local_day_bounds("2026-09-08", "2026-09-15")
     request = ask.AskRequest(question="q", since=since, until=until)
-    sel = ask.select_context(archive, index, request, ask.Aliases(), budget_tokens=10_000)
+    sel = _select(archive, index, request, ask.Aliases(), budget_tokens=10_000)
     now = dt.datetime(2026, 9, 28, 10, tzinfo=dt.UTC)
     user = ask.build_messages("q", sel, request=request, last_sync=index.last_sync, now=now)[1]["content"]
     assert user.startswith("Today: 2026-09-28")
@@ -166,6 +172,7 @@ def test_hermes_tool_passes_dates_and_reports_coverage(monkeypatch):
             yield "ok"
 
     monkeypatch.setattr(hermes_tools, "_service", lambda: _Svc())
+    monkeypatch.setattr(hermes_tools, "_reader_mode_ready", lambda _session_id: True)
     monkeypatch.setattr(hermes_tools, "_coverage", lambda: {"archive_updated": "x", "sync_running": False, "hint": ""})
     agent = SimpleNamespace(model="m", base_url="http://127.0.0.1:1/v1")
     out = json.loads(
@@ -190,7 +197,7 @@ def test_archive_busy_reflects_the_sync_lock(tmp_path):
 
 
 def test_sync_scope_is_saved_and_used(tmp_path):
-    vault = tee.TeeSecretStore(tmp_path / "tg", backend_factory=lambda: None, audit_sink=lambda _e: None)
+    vault = _metadata_store(tmp_path)
     assert vault.sync_scope() == {}
     vault.save_sync_scope({"include_channels": False, "include_archived": False, "limit_per_dialog": 500})
     svc = service.TelegramService(secret_store=vault, archive_root=tmp_path / "tg")
@@ -425,7 +432,7 @@ def test_full_channel_lookup_is_allow_listed():
 
 
 def test_group_size_scope_defaults_and_opt_in(tmp_path):
-    vault = tee.TeeSecretStore(tmp_path / "tg", backend_factory=lambda: None, audit_sink=lambda _e: None)
+    vault = _metadata_store(tmp_path)
     svc = service.TelegramService(secret_store=vault, archive_root=tmp_path / "tg")
     assert svc.sync_options().max_group_size == 100  # nothing saved: large groups skipped
     assert svc.sync_options({"max_group_size": 0}).max_group_size is None  # --include-large-groups
@@ -437,16 +444,14 @@ def test_group_size_scope_defaults_and_opt_in(tmp_path):
 
 def test_selection_reports_mode_and_candidates(tmp_path):
     archive, index = _archive(tmp_path)
-    sel = ask.select_context(archive, index, ask.AskRequest(question="hello"), ask.Aliases(), budget_tokens=10_000)
+    sel = _select(archive, index, ask.AskRequest(question="hello"), ask.Aliases(), budget_tokens=10_000)
     assert sel.mode == "keyword" and sel.chats_searched == 1
     since, until = ask.local_day_bounds("2026-09-08", "2026-09-15")
-    sel = ask.select_context(
+    sel = _select(
         archive, index, ask.AskRequest(question="q", since=since, until=until), ask.Aliases(), budget_tokens=10_000
     )
     assert (sel.mode, sel.candidates, sel.message_count) == ("period", 2, 2)
-    sel = ask.select_context(
-        archive, index, ask.AskRequest(question="q", dialog_ids=(1,)), ask.Aliases(), budget_tokens=40
-    )
+    sel = _select(archive, index, ask.AskRequest(question="q", dialog_ids=(1,)), ask.Aliases(), budget_tokens=40)
     assert sel.mode == "chats" and sel.truncated and sel.candidates == 4
 
 
@@ -526,3 +531,9 @@ def test_interrupted_window_sync_resumes_without_refetching(tmp_path, monkeypatc
     asyncio.run(tg.sync_archive(fake, archive, options=opts, clock=lambda: now.timestamp()))
     assert seen == [3, 4, 5]  # resumed after 2: nothing fetched twice
     assert [m.id for m in archive.load_messages(1)] == [1, 2, 3, 4, 5]
+
+
+def _metadata_store(home):
+    from .test_telegram_tee import _tee_store
+
+    return _tee_store(home)[0]

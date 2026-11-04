@@ -7,7 +7,7 @@ whole story: the sealing itself is done at runtime by
 lifecycle — the three pieces that make it real and reversible:
 
 1. ``HERMES_MEMORY_KEY`` in the vault ``.env`` (protected at rest by the device
-   key, injected into the environment by the ``.env`` shim at startup),
+   key, loaded into process memory by the ``.env`` shim at startup),
 2. the opt-in marker ``<home>/mordred/memory-vault.marker`` that arms the hook,
    plus the opt-out marker that expresses the reversible *paused* state, and
 3. the memory files themselves, migrated in both directions.
@@ -42,9 +42,13 @@ from __future__ import annotations
 import io
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
+from .._core._database_lifecycle import current_thread_exclusive_leases
 from ..keyvault._memory_hook import _write_private, memory_marker_path, memory_optout_marker_path
+from ..keyvault._uninstall_authority import UninstallAuthorization, check_authorization
 from ..keyvault.memory_crypto import MAGIC
 from . import _term, _windows_memory
 from ._runtime_gate import runtime_gate
@@ -54,6 +58,8 @@ from .vault_memory_key import _MEMORY_KEY_ENV
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from .._private_fs._types import FileIdentity, FileMetadata
+    from ..keyvault._database_authority import CheckedDatabaseDomain
     from ..keyvault._runtime_probe import GatewayRuntime
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.wrap import NativeBackend
@@ -236,7 +242,7 @@ def _enable_gate_reason(*, home: Path, root: Path, platform: str) -> str | None:
         return f"memory encryption is unsupported on {platform}."
     if not _env_target_ready(home=home, root=root):
         return (
-            "memory encryption rides on the env target (the key is injected by the .env shim) — "
+            "memory encryption rides on the env target (the key is loaded by the .env shim) — "
             "run `hermes-mordred encryption enable env` first."
         )
     return None
@@ -379,7 +385,7 @@ def _warn_pending_approvals(home: Path) -> None:
     ``memory.write_approval`` parks pending writes outside the memory files the
     hook wraps, so they are not sealed until they are applied.
     """
-    from .._yaml_io import load_yaml_mapping
+    from .._core._yaml_io import load_yaml_mapping
 
     memory = load_yaml_mapping(home / _CONFIG_NAME).get("memory")
     if isinstance(memory, dict) and memory.get("write_approval") is True:
@@ -478,7 +484,7 @@ def _memory_key_from_vault(
     """The effective ``HERMES_MEMORY_KEY`` from the vault ``.env``, or ``None``.
 
     Reads through the hot path (device key, no passphrase) — the same value the
-    runtime shim injects, so it is by construction the key the files were sealed
+    runtime shim loads, so it is by construction the key the files were sealed
     with. ``None`` covers every "cannot get a usable key" case; the caller turns
     that into one refusal.
     """
@@ -604,18 +610,42 @@ def disable(
     store: AnchorStore | None = None,
     flow_session: FlowSession | None = None,
     platform: str | None = None,
+    uninstall: UninstallAuthorization | None = None,
 ) -> int:
-    from ..keyvault._memory_key import MemoryKeyError, memory_key_lock, memory_key_path
-
     if _windows_memory.routed(platform):
         return _windows_memory.disable(home=home)
-    if sys.platform == "linux" or memory_key_path(home).exists() or memory_key_path(home).is_symlink():
-        try:
-            with memory_key_lock(home):
-                return _disable(home=home, root=root, backend=backend, store=store, flow_session=flow_session)
-        except MemoryKeyError:
-            return _refuse("disable", "TPM memory lifecycle lock unavailable; existing state preserved")
-    return _disable(home=home, root=root, backend=backend, store=store, flow_session=flow_session)
+    from ..keyvault._memory_key import memory_key_lock, memory_key_path
+
+    try:
+        with _disable_database_guard(home, uninstall=uninstall):
+            if sys.platform == "linux" or memory_key_path(home).exists() or memory_key_path(home).is_symlink():
+                with memory_key_lock(home):
+                    return _disable(home=home, root=root, backend=backend, store=store, flow_session=flow_session)
+            return _disable(home=home, root=root, backend=backend, store=store, flow_session=flow_session)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return _refuse("disable", f"memory/database lifecycle refused: {exc}; existing state preserved")
+
+
+@contextmanager
+def _disable_database_guard(home: Path, *, uninstall: UninstallAuthorization | None = None) -> Iterator[None]:
+    """Root disable precedes custody; reversible child disable keeps its key."""
+    from ..keyvault._database_authority import resolve_database_domain
+    from ..keyvault._database_mutation import database_key_mutation
+
+    domain = resolve_database_domain(home)
+    if uninstall is not None:
+        leases = [lease for lease in current_thread_exclusive_leases() if lease.root == domain.identities[0]]
+        if not leases:
+            raise RuntimeError("uninstall restoration requires preceding database exclusion")
+        check_authorization(uninstall, root=domain.root, lease=leases[0], purpose="restore")
+        yield
+    elif domain.root == home.absolute():
+        with database_key_mutation(root=domain.root, generation=None):
+            yield
+    else:
+        # resolve_database_domain checked the actual root/profile relation.
+        # No root authority changes in reversible child memory disable.
+        yield
 
 
 def _disable(
@@ -693,7 +723,31 @@ def _disable(
     return 0
 
 
+def _warn_external_backups() -> None:
+    _term.emit_warn(
+        "Deleting or replacing the native source may make external/offline encrypted backups "
+        "unrecoverable; their absence is not proven."
+    )
+
+
 def purge(
+    *,
+    home: Path,
+    root: Path,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+    platform: str | None = None,
+) -> int:
+    from ..keyvault._database_mutation import database_key_mutation
+
+    try:
+        with database_key_mutation(root=home, generation=None):
+            return _purge(home=home, root=root, backend=backend, store=store, platform=platform)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return _refuse("purge", f"memory/database lifecycle refused: {exc}; existing source retained")
+
+
+def _purge(  # noqa: C901, PLR0912 - platform lifecycle branches retain explicit stop points
     *,
     home: Path,
     root: Path,
@@ -709,47 +763,63 @@ def purge(
     refuses the purge too. Returns 0 on success, 1 on that refusal or a vault
     open / re-enroll failure.
     """
+    from .._core._database_contracts import DatabaseRefused
+    from ..keyvault._database_mutation import database_key_mutation
     from ..keyvault._memory_key import MemoryKeyError, delete_linux_memory_key, memory_key_lock, memory_key_path
 
     if _windows_memory.routed(platform):
         return _windows_memory.purge(home=home)
     if memory_key_path(home).exists() or memory_key_path(home).is_symlink() or sys.platform == "linux":
         try:
-            with memory_key_lock(home):
+            with database_key_mutation(root=home, generation=None) as database_lease, memory_key_lock(home):
                 rc = disable(home=home, root=root, backend=backend, store=store)
                 if rc != 0 or _sealed_memory_files(home):
                     return _refuse("purge", "sealed memory remains; stop running gateways before retrying")
-                delete_linux_memory_key(home=home, backend=backend)
+                if memory_key_path(home).exists() or memory_key_path(home).is_symlink():
+                    _warn_external_backups()
+                delete_linux_memory_key(home=home, backend=backend, database_lease=database_lease)
                 memory_marker_path(home).unlink(missing_ok=True)
                 memory_optout_marker_path(home).unlink(missing_ok=True)
             print("TPM memory key purged. Old encrypted backups are no longer recoverable.")
             return 0
-        except MemoryKeyError:
+        except (MemoryKeyError, DatabaseRefused):
             return _refuse("purge", "TPM memory key could not be removed")
 
     from ..keyvault import anchor, vault
     from . import vault_cli
+    from ._flow_session import FlowSession
+    from ._vault_entries import _source_change_lease
 
-    rc = disable(home=home, root=root, backend=backend, store=store)
-    if rc != 0:
-        _term.emit_error(
-            "encryption purge memory: refusing to strip the key while sealed memory files remain (see above) — "
-            "a purged key cannot decrypt them."
-        )
-        return rc
-
-    if _vault_present(root):
-        opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store)
-        if opened is None:
-            return 1
-        with opened:
-            try:
+    try:
+        with FlowSession() as flow:
+            if _vault_present(root):
+                opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store, flow_session=flow)
+                if opened is None:
+                    return 1
+                plaintext = None
+                source_changed = False
                 if ".env" in opened.list_files():
-                    stripped = _strip_memory_key(opened.read_file(".env").decode("utf-8"))
-                    opened.enroll_file(".env", stripped.encode("utf-8"))
-            except (vault.VaultError, anchor.AnchorError, OSError, UnicodeDecodeError) as exc:
-                _term.emit_error(f"cannot strip {_MEMORY_KEY_ENV} from the vault .env: {exc}")
-                return 1
+                    previous = opened.read_file(".env")
+                    plaintext = _strip_memory_key(previous.decode("utf-8")).encode("utf-8")
+                    source_changed = plaintext != previous
+                with _source_change_lease(root, opened, ".env", plaintext) as lease:
+                    rc = disable(home=home, root=root, backend=backend, store=store, flow_session=flow)
+                    if rc != 0:
+                        _term.emit_error(
+                            "encryption purge memory: refusing to strip the key while sealed memory files remain"
+                        )
+                        return rc
+                    if plaintext is not None:
+                        if source_changed:
+                            _warn_external_backups()
+                        opened.enroll_file(".env", plaintext, database_lease=lease)
+            else:
+                rc = disable(home=home, root=root, backend=backend, store=store, flow_session=flow)
+                if rc != 0:
+                    return rc
+    except (DatabaseRefused, vault.VaultError, anchor.AnchorError, OSError, UnicodeDecodeError) as exc:
+        _term.emit_error(f"cannot strip {_MEMORY_KEY_ENV} from the vault .env: {exc}")
+        return 1
 
     memory_marker_path(home).unlink(missing_ok=True)
     memory_optout_marker_path(home).unlink(missing_ok=True)
@@ -760,8 +830,40 @@ def purge(
     return 0
 
 
+def _linux_memory_source(home: Path) -> tuple[CheckedDatabaseDomain, FileIdentity, FileMetadata, bytes]:
+    """Observe the existing physical profile and wrapped source, never enroll."""
+    from .._private_fs import open_private_directory
+    from ..keyvault import wrap
+    from ..keyvault._database_authority import resolve_database_domain
+    from ..keyvault._memory_key import MemoryKeyError, memory_key_id, memory_key_path
+
+    domain = resolve_database_domain(home)
+    path = memory_key_path(home)
+    with open_private_directory(path.parent) as directory:
+        parent = directory.directory_identity()
+        before = directory.stat(path.name)
+        wrapped = directory.read_bytes(path.name, max_bytes=wrap.HEADER_LEN)
+        wrap._parse_header(wrapped, memory_key_id(home))
+        if directory.stat(path.name) != before or resolve_database_domain(home) != domain:
+            raise MemoryKeyError("memory source changed during observation")
+    return domain, parent, before, wrapped
+
+
 def _enable_linux(*, home: Path, backend: NativeBackend | None, force_runtime_unverified: bool) -> int:
-    from ..keyvault._memory_key import MemoryKeyError, ensure_linux_memory_key, memory_key_lock, memory_key_path
+    from contextlib import ExitStack
+
+    from .._core._database_contracts import DatabaseRefused
+    from ..keyvault._database_authority import resolve_database_domain
+    from ..keyvault._database_mutation import database_key_mutation
+    from ..keyvault._exceptions import WrapError
+    from ..keyvault._memory_key import (
+        MemoryKeyError,
+        ensure_linux_memory_key,
+        load_linux_memory_key,
+        memory_key_lock,
+        memory_key_path,
+    )
+    from ..keyvault._memory_key_holder import memory_key_value
     from ..keyvault._runtime_probe import runtime_memory_key_available
     from ..keyvault.memory_crypto import MemoryCryptoError, decode_key
 
@@ -771,28 +873,50 @@ def _enable_linux(*, home: Path, backend: NativeBackend | None, force_runtime_un
         "Disable encryption while the TPM is usable to restore plaintext first."
     )
     try:
-        with memory_key_lock(home):
+        with ExitStack() as stack:
             path = memory_key_path(home)
+            database_lease = None
+            creating = not (path.exists() or path.is_symlink())
+            if creating:
+                home.mkdir(mode=0o700, parents=True, exist_ok=True)
+                database_lease = stack.enter_context(database_key_mutation(root=home, generation=None))
+            stack.enter_context(memory_key_lock(home))
             # Ambient input is only for initial adoption, never an existing TPM key.
-            value = None if path.exists() or path.is_symlink() else os.environ.get(_MEMORY_KEY_ENV)
+            value = None if path.exists() or path.is_symlink() else memory_key_value(os.environ)
             adopted = decode_key(value) if value else None
-            key = ensure_linux_memory_key(home=home, adopted_key=adopted, backend=backend)
-            # The generic capability gate already ran before provisioning. This second
-            # gate proves unwrapping in the installed Hermes and identified gateways.
-            gate = runtime_gate(
-                home=home,
-                platform="linux",
-                supported_platforms=("darwin", "linux"),
-                runtime_probe=None,
-                default_probe=runtime_memory_key_available,
-                force_runtime_unverified=force_runtime_unverified,
-                target="TPM agent memory",
-                mechanism="The Hermes runtime must access this profile's TPM memory key.\n",
-                rerun_tail="Install this build in that runtime, restore TPM access and retry.\n",
-            )
-            if gate:
-                return gate
+            ensure_linux_memory_key(home=home, adopted_key=adopted, backend=backend, database_lease=database_lease)
+            source = _linux_memory_source(home)
+            del adopted, value
+        # Real Hermes startup acquires root SH. Creation EX and custody must
+        # both end before this subprocess, including for a fresh plain root.
+        gate = runtime_gate(
+            home=home,
+            platform="linux",
+            supported_platforms=("darwin", "linux"),
+            runtime_probe=None,
+            default_probe=runtime_memory_key_available,
+            force_runtime_unverified=force_runtime_unverified,
+            target="TPM agent memory",
+            mechanism="The Hermes runtime must access this profile's TPM memory key.\n",
+            rerun_tail="Install this build in that runtime, restore TPM access and retry.\n",
+        )
+        if gate:
+            return gate
+        if resolve_database_domain(home) != source[0]:
+            raise MemoryKeyError("memory profile changed during runtime proof")
+        with ExitStack() as stack:
+            # Fresh-source finalization retains DB-before-custody admission.
+            # Existing sources keep their previous re-enable semantics under SH.
+            if creating:
+                stack.enter_context(database_key_mutation(root=home, generation=None))
+            stack.enter_context(memory_key_lock(home))
+            if _linux_memory_source(home) != source:
+                raise MemoryKeyError("memory source changed during runtime proof")
+            # Never ensure/regenerate here or reuse the pre-proof plaintext key.
+            key = load_linux_memory_key(home=home, backend=backend)
+            if _linux_memory_source(home) != source:
+                raise MemoryKeyError("memory source changed during final validation")
             _arm(home)
             return _finish_enable(home=home, key=key)
-    except (MemoryKeyError, MemoryCryptoError):
+    except (MemoryKeyError, MemoryCryptoError, DatabaseRefused, OSError, WrapError):
         return _refuse("enable", "TPM memory key unavailable or invalid; existing memory and markers are preserved")

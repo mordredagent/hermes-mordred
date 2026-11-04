@@ -1,7 +1,7 @@
 """Root pytest conftest: make the suite self-isolating against the developer's
 real Hermes home.
 
-``src/mordred_hermes/_home.py`` resolves ``HERMES_BASE`` **at import time**
+``src/mordred_hermes/_core/_home.py`` resolves ``HERMES_BASE`` **at import time**
 (``HERMES_BASE: Final = hermes_home()``), and several plugins derive their
 ``DEFAULT_*`` path constants from that frozen value. That means the very first
 import of ``mordred_hermes`` (or any of its plugins) anywhere in the process —
@@ -33,14 +33,42 @@ import atexit
 import os
 import shutil
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from tests._keyvault_receipts import RegisterFakeBackend
 
 if "HERMES_HOME" not in os.environ:
     _home = tempfile.mkdtemp(prefix="mordred-tests-home-")
     os.environ["HERMES_HOME"] = _home
     atexit.register(shutil.rmtree, _home, ignore_errors=True)
+
+
+@pytest.fixture
+def fake_native_creation_receipts(monkeypatch: pytest.MonkeyPatch) -> RegisterFakeBackend:
+    """Explicit legacy-test opt-in; native backends retain production receipts."""
+    from tests._keyvault_receipts import install_fake_creation_receipts
+
+    return install_fake_creation_receipts(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _memory_key_holder_isolation() -> Iterator[None]:
+    """Each test starts and ends with an empty holder and no ambient memory key.
+
+    Imported here, not at module scope: see the module docstring.
+    """
+    from mordred_hermes.keyvault import _memory_key_holder
+
+    _memory_key_holder._reset_for_tests()
+    os.environ.pop(_memory_key_holder.MEMORY_KEY_ENV, None)
+    yield
+    _memory_key_holder._reset_for_tests()
+    os.environ.pop(_memory_key_holder.MEMORY_KEY_ENV, None)
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:

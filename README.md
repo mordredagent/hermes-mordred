@@ -30,7 +30,9 @@ The package registers one Hermes plugin, `mordred` (a single
 | `llm_guard` | Strict-mode local-LLM enforcement |
 | `network` | Tor, VPN, and clearnet path management |
 | `privacy_check` | Skill-metadata policy enforcement and audit logging |
+| `dbcrypt` | SQLCipher encryption of Hermes's SQLite databases (macOS) |
 | `e2e` | Encrypted Slack and Discord gateway commands and replies |
+| `activity` | Encrypted record of browser activity for Hermes (preview) |
 | `wizard` | The `hermes-mordred` CLI |
 
 Hermes (and Hermes Desktop) lists it as one plugin, `mordred`; enabling or
@@ -54,9 +56,11 @@ settings sections in `config.yaml` keep their names.
   `encryption enable all`, and standalone commands; Private Telegram has its
   dedicated flow. Linux setup/all skip env/config file-vault enrollment. Windows
   support is reported per capability.
-- Hermes database encryption (`state.db` and the other SQLite stores) is
-  macOS-only and requires the separate `databases encrypt` command after memory
-  setup. Linux TPM and Windows CNG memory encryption do not encrypt databases.
+- Hermes database encryption (`state.db` and the other SQLite stores) is admitted
+  on macOS, Linux and Windows Server (Windows workstation editions are refused at
+  runtime) and requires the separate `databases encrypt` command after memory
+  setup. Linux TPM and Windows CNG memory encryption do not encrypt databases by
+  themselves.
 
 ## Install (users, from PyPI)
 
@@ -103,6 +107,20 @@ The complete command reference and security ceremonies live in the
 Once Hermes 0.19.0+ is configured and the plugins are enabled,
 `hermes mordred <command>` exposes the same command tree. On older Hermes
 versions, or before the first `configure`, keep using `hermes-mordred`.
+
+### Record browser work (preview)
+
+Mordred records Hermes's own browser actions (and batches from the paired
+browser extension) in an encrypted store
+(`<home>/plugin-data/mordred/mordred.db`; requires macOS database
+encryption, off by default under `plugins.mordred_activity`). Your explicit
+corrections are kept as events next to the actions they concern. Hermes uses
+this history directly: a site's earlier work is added to browser results,
+relevant tasks and corrections to the turn, and two lookup tools answer
+questions about earlier browser work (`activity use on|off` switches this);
+nothing is written to memory or skills. Commands:
+`hermes-mordred activity status|use|tools|correct|backup|restore|retention`
+([usage](docs/user/USAGE.md)).
 
 ### Verify discovery
 

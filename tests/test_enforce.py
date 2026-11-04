@@ -78,6 +78,39 @@ def _write_policy_json(
     return path
 
 
+def _cloud_cfg(tmp_path: Path, *allowlist: str) -> Path:
+    """Strict policy that grants cloud LLM use to exactly ``allowlist``."""
+    return _write_policy_json(tmp_path, policy="strict", allow_cloud_llm=True, cloud_provider_allowlist=allowlist)
+
+
+def _session(
+    cfg: Path,
+    provider: str | None,
+    audit: Any,
+    *,
+    policy_mode: str = "strict",
+    health_probe: Callable[[str], None] = _noop_probe,
+) -> None:
+    enforce.check_session_provider(
+        policy_mode=policy_mode,
+        policy_json_path=cfg,
+        active_provider=provider,
+        audit=audit,
+        health_probe=health_probe,
+    )
+
+
+def _runtime(cfg: Path, provider: str | None, audit: Any, *, policy_mode: str = "strict", **kwargs: Any) -> None:
+    """``kwargs`` stay absent unless a test passes them, so defaults remain the callee's."""
+    enforce.check_runtime_provider(
+        policy_mode=policy_mode,
+        policy_json_path=cfg,
+        active_provider=provider,
+        audit=audit,
+        **kwargs,
+    )
+
+
 def _clear_sdk_base_url_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove every provider-SDK endpoint override from the test environment.
 
@@ -97,77 +130,44 @@ def _check_strict_local_endpoint(
     health_probe: Callable[[str], None],
 ) -> None:
     """Exercise the policy.json or runtime-base-url local endpoint path."""
-    policy_endpoint = endpoint
-    cfg = _write_policy_json(tmp_path, policy="strict", local_llm_endpoint=policy_endpoint)
+    cfg = _write_policy_json(tmp_path, policy="strict", local_llm_endpoint=endpoint)
     if source == "policy":
-        enforce.check_session_provider(
-            policy_mode="strict",
-            policy_json_path=cfg,
-            active_provider="mordred-local",
-            audit=audit,
-            health_probe=health_probe,
-        )
+        _session(cfg, "mordred-local", audit, health_probe=health_probe)
         return
-    enforce.check_runtime_provider(
-        policy_mode="strict",
-        policy_json_path=cfg,
-        active_provider="mordred-local",
-        audit=audit,
-        health_probe=health_probe,
-        runtime_base_url=endpoint,
-    )
+    _runtime(cfg, "mordred-local", audit, health_probe=health_probe, runtime_base_url=endpoint)
 
 
 # --------------------------------------------------------------------------- #
-# off mode — silent no-op                                                     #
+# off / lenient modes — silent no-op                                          #
 # --------------------------------------------------------------------------- #
 
 
-class TestOffMode:
+class TestNonStrictModes:
     @pytest.mark.parametrize(
-        "active_provider",
-        [None],
+        ("check", "policy_mode", "provider"),
+        [
+            pytest.param(_session, "off", None, id="session-off"),
+            pytest.param(_session, "lenient", "anthropic", id="session-lenient"),
+            pytest.param(_runtime, "off", "anthropic", id="runtime-off"),
+            pytest.param(_runtime, "lenient", "anthropic", id="runtime-lenient"),
+        ],
     )
-    def test_off_is_noop(self, tmp_path: Path, active_provider: str | None) -> None:
-        cfg = _write_policy_json(tmp_path, policy="off")
-        audit = _FakeAuditWriter()
-
-        enforce.check_session_provider(
-            policy_mode="off",
-            policy_json_path=cfg,
-            active_provider=active_provider,
-            audit=audit,
-            health_probe=_noop_probe,
-        )
-
-        assert audit.entries == [], "off mode must not write to audit"
-
-
-# --------------------------------------------------------------------------- #
-# lenient mode — silent no-op                                                 #
-# --------------------------------------------------------------------------- #
-
-
-class TestLenientMode:
-    def test_lenient_is_silent(self, tmp_path: Path) -> None:
+    def test_is_silent_noop(
+        self,
+        tmp_path: Path,
+        check: Callable[..., None],
+        policy_mode: str,
+        provider: str | None,
+    ) -> None:
         """v1 emits nothing under lenient — future versions may emit an
         allow-with-reason; revisit then.
         """
-        cfg = _write_policy_json(tmp_path, policy="lenient")
+        cfg = _write_policy_json(tmp_path, policy=policy_mode)
         audit = _FakeAuditWriter()
-        enforce.check_session_provider(
-            policy_mode="lenient",
-            policy_json_path=cfg,
-            active_provider="anthropic",
-            audit=audit,
-            health_probe=_noop_probe,
-        )
-        assert audit.entries == []
 
+        check(cfg, provider, audit, policy_mode=policy_mode)
 
-# --------------------------------------------------------------------------- #
-# strict + cloud allowlisted (with allow_cloud_llm=True) — passthrough        #
-# --------------------------------------------------------------------------- #
+        assert audit.entries == [], f"{policy_mode} mode must not write to audit"
 
 
 # --------------------------------------------------------------------------- #
@@ -177,22 +177,11 @@ class TestLenientMode:
 
 class TestStrictCloudRefused:
     def test_strict_provider_not_in_allowlist_raises(self, tmp_path: Path) -> None:
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            allow_cloud_llm=True,
-            cloud_provider_allowlist=("anthropic",),  # NOT openai
-        )
+        cfg = _cloud_cfg(tmp_path, "anthropic")  # NOT openai
         audit = _FakeAuditWriter()
 
         with pytest.raises(MordredSessionRefused, match="openai"):
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider="openai",
-                audit=audit,
-                health_probe=_noop_probe,
-            )
+            _session(cfg, "openai", audit)
 
     def test_strict_allow_cloud_llm_false_vetoes_allowlist(self, tmp_path: Path) -> None:
         """``allow_cloud_llm: false`` must veto allowlist membership.
@@ -200,21 +189,12 @@ class TestStrictCloudRefused:
         Allowlist membership and the global cloud-LLM switch are both required.
         """
         cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            allow_cloud_llm=False,
-            cloud_provider_allowlist=("anthropic",),
+            tmp_path, policy="strict", allow_cloud_llm=False, cloud_provider_allowlist=("anthropic",)
         )
         audit = _FakeAuditWriter()
 
         with pytest.raises(MordredSessionRefused, match="allow_cloud_llm"):
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider="anthropic",
-                audit=audit,
-                health_probe=_noop_probe,
-            )
+            _session(cfg, "anthropic", audit)
 
     def test_refusal_escapes_except_exception(self, tmp_path: Path) -> None:
         """Codex H2: ``MordredSessionRefused`` is ``BaseException``-derived
@@ -225,13 +205,7 @@ class TestStrictCloudRefused:
 
         try:
             try:
-                enforce.check_session_provider(
-                    policy_mode="strict",
-                    policy_json_path=cfg,
-                    active_provider="anthropic",
-                    audit=audit,
-                    health_probe=_noop_probe,
-                )
+                _session(cfg, "anthropic", audit)
             except Exception:
                 pytest.fail("MordredSessionRefused must not be caught by `except Exception`")
         except MordredSessionRefused:
@@ -256,40 +230,15 @@ def _reset_enforce_state() -> Any:
 
 
 class TestStrictDegraded:
-    def test_strict_active_provider_none_raises(self, tmp_path: Path) -> None:
-        cfg = _write_policy_json(tmp_path, policy="strict")
-        audit = _FakeAuditWriter()
-
-        with pytest.raises(MordredSessionRefused, match="could not be resolved"):
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider=None,
-                audit=audit,
-                health_probe=_noop_probe,
-            )
-
     def test_reset_state_re_arms_one_shot(self, tmp_path: Path) -> None:
         cfg = _write_policy_json(tmp_path, policy="strict")
         audit = _FakeAuditWriter()
 
-        with pytest.raises(MordredSessionRefused):
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider=None,
-                audit=audit,
-                health_probe=_noop_probe,
-            )
+        with pytest.raises(MordredSessionRefused, match="could not be resolved"):
+            _session(cfg, None, audit)
         enforce._reset_state()
         with pytest.raises(MordredSessionRefused):
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider=None,
-                audit=audit,
-                health_probe=_noop_probe,
-            )
+            _session(cfg, None, audit)
         n = sum(1 for e in audit.entries if e["reason"] == "mordred.degraded.no_resolved_provider")
         assert n == 2
 
@@ -315,13 +264,7 @@ class TestStrictLocal:
             health.probe(endpoint=endpoint, transport=httpx.MockTransport(redirect))
 
         with pytest.raises(MordredSessionRefused) as excinfo:
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider="mordred-local",
-                audit=audit,
-                health_probe=probe,
-            )
+            _session(cfg, "mordred-local", audit, health_probe=probe)
 
         assert isinstance(excinfo.value.__cause__, MordredLocalUnreachable)
         assert requests == ["http://127.0.0.1:1234/v1/models"]
@@ -350,13 +293,7 @@ class TestStrictLocal:
         audit = _FakeAuditWriter()
 
         with pytest.raises(MordredSessionRefused) as excinfo:
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider="mordred-local",
-                audit=audit,
-                health_probe=_failing_probe,
-            )
+            _session(cfg, "mordred-local", audit, health_probe=_failing_probe)
         assert isinstance(excinfo.value.__cause__, MordredLocalUnreachable)
         assert "health probe failed" in str(excinfo.value.__cause__)
 
@@ -369,24 +306,11 @@ class TestStrictLocal:
 
     def test_strict_local_uses_configured_endpoint(self, tmp_path: Path) -> None:
         """The injected probe receives the endpoint from policy.json."""
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            local_llm_endpoint="http://127.0.0.1:9999/v1",
-        )
+        cfg = _write_policy_json(tmp_path, policy="strict", local_llm_endpoint="http://127.0.0.1:9999/v1")
         seen: list[str] = []
 
-        def _record(endpoint: str) -> None:
-            seen.append(endpoint)
-
         audit = _FakeAuditWriter()
-        enforce.check_session_provider(
-            policy_mode="strict",
-            policy_json_path=cfg,
-            active_provider="mordred-local",
-            audit=audit,
-            health_probe=_record,
-        )
+        _session(cfg, "mordred-local", audit, health_probe=seen.append)
         assert seen == ["http://127.0.0.1:9999/v1"]
 
     @pytest.mark.parametrize("source", ["policy", "runtime"])
@@ -537,25 +461,21 @@ class TestStrictLocal:
         policy_mode: str,
         runtime: bool,
     ) -> None:
-        cfg = _write_policy_json(
-            tmp_path,
-            policy=policy_mode,
-            local_llm_endpoint="https://collector.example/v1",
-        )
+        cfg = _write_policy_json(tmp_path, policy=policy_mode, local_llm_endpoint="https://collector.example/v1")
         probed: list[str] = []
         audit = _FakeAuditWriter()
-        kwargs = {
-            "policy_mode": policy_mode,
-            "policy_json_path": cfg,
-            "active_provider": "mordred-local",
-            "audit": audit,
-            "health_probe": probed.append,
-        }
 
         if runtime:
-            enforce.check_runtime_provider(**kwargs, runtime_base_url="https://collector.example/v1")
+            _runtime(
+                cfg,
+                "mordred-local",
+                audit,
+                policy_mode=policy_mode,
+                health_probe=probed.append,
+                runtime_base_url="https://collector.example/v1",
+            )
         else:
-            enforce.check_session_provider(**kwargs)
+            _session(cfg, "mordred-local", audit, policy_mode=policy_mode, health_probe=probed.append)
 
         assert probed == []
         assert audit.entries == []
@@ -575,13 +495,7 @@ class TestPolicyJsonFallbacks:
         audit = _FakeAuditWriter()
 
         with pytest.raises(MordredSessionRefused):
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=missing,
-                active_provider="anthropic",
-                audit=audit,
-                health_probe=_noop_probe,
-            )
+            _session(missing, "anthropic", audit)
 
     def test_malformed_policy_json_uses_safe_defaults(self, tmp_path: Path) -> None:
         path = tmp_path / "policy.json"
@@ -589,132 +503,43 @@ class TestPolicyJsonFallbacks:
         audit = _FakeAuditWriter()
 
         with pytest.raises(MordredSessionRefused):
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=path,
-                active_provider="anthropic",
-                audit=audit,
-                health_probe=_noop_probe,
-            )
+            _session(path, "anthropic", audit)
 
-    def test_allow_cloud_llm_string_treated_as_false(self, tmp_path: Path) -> None:
-        """Codex review P2: ``bool("false")`` is ``True`` in Python.
-
-        If a hand-edit or migration tool writes ``allow_cloud_llm: "false"``,
-        strict mode must still refuse cloud traffic — only an actual JSON
-        boolean ``true`` counts as ``True`` (failure-closed coercion).
-        """
+    @pytest.mark.parametrize(
+        ("allow_cloud_llm", "allowlist", "match"),
+        [
+            # Codex review P2: ``bool("false")`` is ``True`` in Python. A hand-edit
+            # or migration tool writing the string must still refuse cloud traffic.
+            pytest.param("false", ["anthropic"], "allow_cloud_llm", id="allow_cloud_llm-string-false"),
+            # We don't try to parse user intent: anything that isn't a JSON ``true``
+            # is ``false``. Users who want cloud access rerun the wizard.
+            pytest.param("true", ["anthropic"], None, id="allow_cloud_llm-string-true"),
+            pytest.param(1, ["anthropic"], None, id="allow_cloud_llm-integer"),
+            # A hand-edited non-list allowlist is treated as empty.
+            pytest.param(True, "anthropic", None, id="allowlist-non-list"),
+        ],
+    )
+    def test_malformed_cloud_settings_fail_closed(
+        self,
+        tmp_path: Path,
+        allow_cloud_llm: object,
+        allowlist: object,
+        match: str | None,
+    ) -> None:
         path = tmp_path / "policy.json"
-        path.write_text(
-            json.dumps(
-                {
-                    "policy": "strict",
-                    "allow_cloud_llm": "false",  # string, not bool
-                    "cloud_provider_allowlist": ["anthropic"],
-                }
-            ),
-            encoding="utf-8",
-        )
+        body = {"policy": "strict", "allow_cloud_llm": allow_cloud_llm, "cloud_provider_allowlist": allowlist}
+        path.write_text(json.dumps(body), encoding="utf-8")
         audit = _FakeAuditWriter()
 
-        with pytest.raises(MordredSessionRefused, match="allow_cloud_llm"):
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=path,
-                active_provider="anthropic",
-                audit=audit,
-                health_probe=_noop_probe,
-            )
-
-    def test_allow_cloud_llm_string_true_also_treated_as_false(self, tmp_path: Path) -> None:
-        """Mirror of the above: ``"true"`` (string) also must fail closed.
-
-        We don't try to be clever about parsing user intent — anything that
-        isn't a JSON ``true`` is treated as ``false``. Users who want cloud
-        access rerun the wizard.
-        """
-        path = tmp_path / "policy.json"
-        path.write_text(
-            json.dumps(
-                {
-                    "policy": "strict",
-                    "allow_cloud_llm": "true",  # string, not bool
-                    "cloud_provider_allowlist": ["anthropic"],
-                }
-            ),
-            encoding="utf-8",
-        )
-        audit = _FakeAuditWriter()
-
-        with pytest.raises(MordredSessionRefused):
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=path,
-                active_provider="anthropic",
-                audit=audit,
-                health_probe=_noop_probe,
-            )
-
-    def test_allow_cloud_llm_integer_treated_as_false(self, tmp_path: Path) -> None:
-        """Only a real JSON ``true`` counts — ``1`` (int) is not a bool here."""
-        path = tmp_path / "policy.json"
-        path.write_text(
-            json.dumps(
-                {
-                    "policy": "strict",
-                    "allow_cloud_llm": 1,
-                    "cloud_provider_allowlist": ["anthropic"],
-                }
-            ),
-            encoding="utf-8",
-        )
-        audit = _FakeAuditWriter()
-
-        with pytest.raises(MordredSessionRefused):
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=path,
-                active_provider="anthropic",
-                audit=audit,
-                health_probe=_noop_probe,
-            )
-
-    def test_non_list_allowlist_is_treated_as_empty(self, tmp_path: Path) -> None:
-        """If the user hand-edited cloud_provider_allowlist to a non-list,
-        be defensive and treat it as empty (failure-closed).
-        """
-        path = tmp_path / "policy.json"
-        path.write_text(
-            json.dumps(
-                {
-                    "policy": "strict",
-                    "allow_cloud_llm": True,
-                    "cloud_provider_allowlist": "anthropic",  # str not list
-                }
-            ),
-            encoding="utf-8",
-        )
-        audit = _FakeAuditWriter()
-
-        with pytest.raises(MordredSessionRefused):
-            enforce.check_session_provider(
-                policy_mode="strict",
-                policy_json_path=path,
-                active_provider="anthropic",
-                audit=audit,
-                health_probe=_noop_probe,
-            )
+        with pytest.raises(MordredSessionRefused, match=match):
+            _session(path, "anthropic", audit)
 
     def test_allowlist_empty_string_entries_still_drop_out(self, tmp_path: Path) -> None:
         """A stray comma in the wizard's CSV (``"anthropic,"``) parses to an
         empty-string list entry; canonicalizing must not let it widen the
         allowlist into matching e.g. an unresolved/empty active_provider.
         """
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            cloud_provider_allowlist=("anthropic", "", "   "),
-        )
+        cfg = _write_policy_json(tmp_path, policy="strict", cloud_provider_allowlist=("anthropic", "", "   "))
 
         settings = enforce._read_policy_settings(cfg)
 
@@ -730,16 +555,12 @@ class TestPolicyJsonFallbacks:
         allowlist. ``_read_policy_settings`` must drop ``"custom"`` from the
         resulting allowlist rather than admit it as a real provider grant.
         """
-        from mordred_hermes._provider_identity import canonicalize_provider
+        from mordred_hermes._core._provider_identity import canonicalize_provider
 
         assert canonicalize_provider("ollama") == "custom"  # basis for this test
         assert canonicalize_provider("claude") == "anthropic"  # existing alias behaviour unaffected
 
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            cloud_provider_allowlist=("ollama",),
-        )
+        cfg = _write_policy_json(tmp_path, policy="strict", cloud_provider_allowlist=("ollama",))
 
         settings = enforce._read_policy_settings(cfg)
 
@@ -771,28 +592,6 @@ class TestCheckRuntimeProvider:
        would duplicate the on_session_start record.
     """
 
-    def test_off_is_noop(self, tmp_path: Path) -> None:
-        cfg = _write_policy_json(tmp_path, policy="off")
-        audit = _FakeAuditWriter()
-        enforce.check_runtime_provider(
-            policy_mode="off",
-            policy_json_path=cfg,
-            active_provider="anthropic",
-            audit=audit,
-        )
-        assert audit.entries == []
-
-    def test_lenient_is_noop(self, tmp_path: Path) -> None:
-        cfg = _write_policy_json(tmp_path, policy="lenient")
-        audit = _FakeAuditWriter()
-        enforce.check_runtime_provider(
-            policy_mode="lenient",
-            policy_json_path=cfg,
-            active_provider="anthropic",
-            audit=audit,
-        )
-        assert audit.entries == []
-
     def test_strict_local_probes_and_allows_silently(self, tmp_path: Path) -> None:
         """Codex review P2 round 4: ``on_session_start`` may not have
         probed (e.g. disk said ``openai`` but runtime is
@@ -804,65 +603,33 @@ class TestCheckRuntimeProvider:
         audit = _FakeAuditWriter()
         probed: list[str] = []
 
-        def _record(endpoint: str) -> None:
-            probed.append(endpoint)
-
-        enforce.check_runtime_provider(
-            policy_mode="strict",
-            policy_json_path=cfg,
-            active_provider="mordred-local",
-            audit=audit,
-            health_probe=_record,
-        )
+        _runtime(cfg, "mordred-local", audit, health_probe=probed.append)
         assert probed == ["http://localhost:1234/v1"]
         assert audit.entries == []
 
-    def test_strict_local_refuses_runtime_base_url_different_from_policy_pin(
-        self,
-        tmp_path: Path,
-    ) -> None:
+    def test_strict_local_refuses_runtime_base_url_different_from_policy_pin(self, tmp_path: Path) -> None:
         """A different loopback service is still a different destination."""
         # policy.json points at port 1234, but the runtime resolved to 8000.
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            local_llm_endpoint="http://localhost:1234/v1",
-        )
+        cfg = _write_policy_json(tmp_path, policy="strict", local_llm_endpoint="http://localhost:1234/v1")
         audit = _FakeAuditWriter()
         probed: list[str] = []
 
-        def _record(endpoint: str) -> None:
-            probed.append(endpoint)
-
         with pytest.raises(MordredSessionRefused, match="differs from the configured"):
-            enforce.check_runtime_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider="mordred-local",
-                audit=audit,
-                health_probe=_record,
-                runtime_base_url="http://localhost:8000/v1",
+            _runtime(
+                cfg, "mordred-local", audit, health_probe=probed.append, runtime_base_url="http://localhost:8000/v1"
             )
 
         assert probed == []
         assert audit.entries[0]["reason"] == "policy.strict.session_refused"
 
-    def test_strict_local_runtime_allows_client_trailing_slash_normalization(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            local_llm_endpoint="http://localhost:1234/v1",
-        )
+    def test_strict_local_runtime_allows_client_trailing_slash_normalization(self, tmp_path: Path) -> None:
+        cfg = _write_policy_json(tmp_path, policy="strict", local_llm_endpoint="http://localhost:1234/v1")
         probed: list[str] = []
 
-        enforce.check_runtime_provider(
-            policy_mode="strict",
-            policy_json_path=cfg,
-            active_provider="mordred-local",
-            audit=_FakeAuditWriter(),
+        _runtime(
+            cfg,
+            "mordred-local",
+            _FakeAuditWriter(),
             health_probe=probed.append,
             runtime_base_url="http://localhost:1234/v1/",
         )
@@ -875,25 +642,11 @@ class TestCheckRuntimeProvider:
         changes), fall back to the policy.json mirror so we don't
         silently skip the probe.
         """
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            local_llm_endpoint="http://localhost:1234/v1",
-        )
+        cfg = _write_policy_json(tmp_path, policy="strict", local_llm_endpoint="http://localhost:1234/v1")
         audit = _FakeAuditWriter()
         probed: list[str] = []
 
-        def _record(endpoint: str) -> None:
-            probed.append(endpoint)
-
-        enforce.check_runtime_provider(
-            policy_mode="strict",
-            policy_json_path=cfg,
-            active_provider="mordred-local",
-            audit=audit,
-            health_probe=_record,
-            runtime_base_url=None,
-        )
+        _runtime(cfg, "mordred-local", audit, health_probe=probed.append, runtime_base_url=None)
         assert probed == ["http://localhost:1234/v1"]
 
     def test_strict_local_refuses_on_probe_failure(self, tmp_path: Path) -> None:
@@ -906,13 +659,7 @@ class TestCheckRuntimeProvider:
         audit = _FakeAuditWriter()
 
         with pytest.raises(MordredSessionRefused) as excinfo:
-            enforce.check_runtime_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider="mordred-local",
-                audit=audit,
-                health_probe=_failing_probe,
-            )
+            _runtime(cfg, "mordred-local", audit, health_probe=_failing_probe)
         assert isinstance(excinfo.value.__cause__, MordredLocalUnreachable)
         assert len(audit.entries) == 1
         assert audit.entries[0]["reason"] == "policy.strict.session_refused"
@@ -930,36 +677,13 @@ class TestCheckRuntimeProvider:
             raise MordredLocalUnreachable("request to http://localhost:1234/path-secret?api_key=query-secret failed")
 
         with pytest.raises(MordredSessionRefused) as excinfo:
-            enforce.check_runtime_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider="mordred-local",
-                audit=audit,
-                health_probe=leaking_probe,
-                runtime_base_url="http://localhost:1234/v1",
+            _runtime(
+                cfg, "mordred-local", audit, health_probe=leaking_probe, runtime_base_url="http://localhost:1234/v1"
             )
 
         rendered = json.dumps(audit.entries) + str(excinfo.value) + str(excinfo.value.__cause__) + caplog.text
         assert "path-secret" not in rendered
         assert "query-secret" not in rendered
-
-    def test_strict_allowlisted_cloud_allows_silently(self, tmp_path: Path) -> None:
-        """Allowlisted cloud + allow_cloud_llm=True → silent allow."""
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            allow_cloud_llm=True,
-            cloud_provider_allowlist=("anthropic",),
-        )
-        audit = _FakeAuditWriter()
-        enforce.check_runtime_provider(
-            policy_mode="strict",
-            policy_json_path=cfg,
-            active_provider="anthropic",
-            audit=audit,
-            runtime_base_url="https://api.anthropic.com",
-        )
-        assert audit.entries == []
 
     @pytest.mark.parametrize("runtime_base_url", [None, "", "   "])
     def test_strict_allowlisted_cloud_allows_provider_sdk_default_endpoint(
@@ -975,20 +699,9 @@ class TestCheckRuntimeProvider:
         would refuse every request of the most ordinary strict configuration.
         """
         _clear_sdk_base_url_env(monkeypatch)
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            allow_cloud_llm=True,
-            cloud_provider_allowlist=("anthropic",),
-        )
+        cfg = _cloud_cfg(tmp_path, "anthropic")
         audit = _FakeAuditWriter()
-        enforce.check_runtime_provider(
-            policy_mode="strict",
-            policy_json_path=cfg,
-            active_provider="anthropic",
-            audit=audit,
-            runtime_base_url=runtime_base_url,
-        )
+        _runtime(cfg, "anthropic", audit, runtime_base_url=runtime_base_url)
         assert audit.entries == []
 
     @pytest.mark.parametrize("provider", ["bedrock", "vertex", "azure-foundry"])
@@ -1000,42 +713,14 @@ class TestCheckRuntimeProvider:
     ) -> None:
         """Region/tenant/project-scoped providers have no owned default endpoint."""
         _clear_sdk_base_url_env(monkeypatch)
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            allow_cloud_llm=True,
-            cloud_provider_allowlist=(provider,),
-        )
+        cfg = _cloud_cfg(tmp_path, provider)
         audit = _FakeAuditWriter()
 
         with pytest.raises(MordredSessionRefused, match="no single provider-owned default endpoint"):
-            enforce.check_runtime_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider=provider,
-                audit=audit,
-                runtime_base_url=None,
-            )
+            _runtime(cfg, provider, audit, runtime_base_url=None)
 
         assert audit.entries[0]["reason"] == "policy.strict.cloud_endpoint_mismatch"
         assert audit.entries[0]["base_url_overridden"] is False
-
-    def test_strict_bedrock_allows_its_regional_endpoint(self, tmp_path: Path) -> None:
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            allow_cloud_llm=True,
-            cloud_provider_allowlist=("bedrock",),
-        )
-        audit = _FakeAuditWriter()
-        enforce.check_runtime_provider(
-            policy_mode="strict",
-            policy_json_path=cfg,
-            active_provider="bedrock",
-            audit=audit,
-            runtime_base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
-        )
-        assert audit.entries == []
 
     def test_cloud_endpoint_host_table_keys_are_canonical(self) -> None:
         """An alias key is unreachable and would leak a non-canonical identity."""
@@ -1047,22 +732,11 @@ class TestCheckRuntimeProvider:
         assert enforce.infer_cloud_provider("https://api.minimax.io/v1") == "minimax"
 
     def test_strict_allowlisted_cloud_refuses_runtime_base_url_override(self, tmp_path: Path) -> None:
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            allow_cloud_llm=True,
-            cloud_provider_allowlist=("openai",),
-        )
+        cfg = _cloud_cfg(tmp_path, "openai")
         audit = _FakeAuditWriter()
 
         with pytest.raises(MordredSessionRefused, match="not a provider-owned endpoint"):
-            enforce.check_runtime_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider="openai",
-                audit=audit,
-                runtime_base_url="https://collector.example/v1",
-            )
+            _runtime(cfg, "openai", audit, runtime_base_url="https://collector.example/v1")
 
         assert audit.entries[0]["reason"] == "policy.strict.cloud_endpoint_mismatch"
         assert audit.entries[0]["runtime_base_url"] == "https://collector.example"
@@ -1072,23 +746,12 @@ class TestCheckRuntimeProvider:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            allow_cloud_llm=True,
-            cloud_provider_allowlist=("openai",),
-        )
+        cfg = _cloud_cfg(tmp_path, "openai")
         audit = _FakeAuditWriter()
         secret_url = "https://audit-user:password-secret@api.openai.com/v1?api_key=query-secret#fragment-secret"
 
         with pytest.raises(MordredSessionRefused) as excinfo:
-            enforce.check_runtime_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider="openai",
-                audit=audit,
-                runtime_base_url=secret_url,
-            )
+            _runtime(cfg, "openai", audit, runtime_base_url=secret_url)
 
         rendered = json.dumps(audit.entries) + str(excinfo.value) + caplog.text
         for secret in (
@@ -1125,23 +788,12 @@ class TestCheckRuntimeProvider:
         traffic leaves for the override. The absent-endpoint path must therefore
         bind against the ambient value, not wave the request through.
         """
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            allow_cloud_llm=True,
-            cloud_provider_allowlist=("anthropic",),
-        )
+        cfg = _cloud_cfg(tmp_path, "anthropic")
         monkeypatch.setenv(env_var, "https://collector.example/v1")
         audit = _FakeAuditWriter()
 
         with pytest.raises(MordredSessionRefused, match="not a provider-owned endpoint"):
-            enforce.check_runtime_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider="anthropic",
-                audit=audit,
-                runtime_base_url=None,
-            )
+            _runtime(cfg, "anthropic", audit, runtime_base_url=None)
 
         assert audit.entries[0]["reason"] == "policy.strict.cloud_endpoint_mismatch"
         assert audit.entries[0]["runtime_base_url"] == "https://collector.example"
@@ -1152,27 +804,13 @@ class TestCheckRuntimeProvider:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            allow_cloud_llm=True,
-            cloud_provider_allowlist=("anthropic",),
-        )
+        cfg = _cloud_cfg(tmp_path, "anthropic")
         monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
         audit = _FakeAuditWriter()
-        enforce.check_runtime_provider(
-            policy_mode="strict",
-            policy_json_path=cfg,
-            active_provider="anthropic",
-            audit=audit,
-            runtime_base_url=None,
-        )
+        _runtime(cfg, "anthropic", audit, runtime_base_url=None)
         assert audit.entries == []
 
-    def test_ambient_override_enumerates_installed_sdk_variables(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_ambient_override_enumerates_installed_sdk_variables(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for name in enforce._SDK_BASE_URL_ENV_VARS:
             monkeypatch.delenv(name, raising=False)
         assert enforce.ambient_base_url_override() is None
@@ -1189,13 +827,7 @@ class TestCheckRuntimeProvider:
         audit = _FakeAuditWriter()
 
         with pytest.raises(MordredSessionRefused):
-            enforce.check_runtime_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider="openai",
-                audit=audit,
-                runtime_base_url="https://api.openai.com/v1",
-            )
+            _runtime(cfg, "openai", audit, runtime_base_url="https://api.openai.com/v1")
 
         reasons = [e["reason"] for e in audit.entries]
         assert "policy.strict.cloud_not_allowlisted" in reasons
@@ -1217,12 +849,7 @@ class TestCheckRuntimeProvider:
         audit = _FakeAuditWriter()
 
         with pytest.raises(MordredSessionRefused):
-            enforce.check_runtime_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider=None,
-                audit=audit,
-            )
+            _runtime(cfg, None, audit)
 
         reasons = [e["reason"] for e in audit.entries]
         assert "mordred.degraded.no_resolved_provider" in reasons
@@ -1247,13 +874,7 @@ class TestCheckRuntimeProvider:
 
         # Refusal MUST still escape even though every audit write blows up.
         with pytest.raises(MordredSessionRefused):
-            enforce.check_runtime_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider="openai",
-                audit=audit,
-                runtime_base_url="https://api.openai.com/v1",
-            )
+            _runtime(cfg, "openai", audit, runtime_base_url="https://api.openai.com/v1")
 
     def test_strict_allowlist_is_case_insensitive(self, tmp_path: Path) -> None:
         """Codex review P2 round 5: allowlist entries from policy.json may
@@ -1262,12 +883,7 @@ class TestCheckRuntimeProvider:
         before lookup, so the allowlist must be normalized the same way
         — otherwise valid configurations are silently refused.
         """
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            allow_cloud_llm=True,
-            cloud_provider_allowlist=("OpenAI", "  Anthropic  "),
-        )
+        cfg = _cloud_cfg(tmp_path, "OpenAI", "  Anthropic  ")
         audit = _FakeAuditWriter()
 
         # Both lookups must succeed despite the casing/whitespace mismatch.
@@ -1275,13 +891,7 @@ class TestCheckRuntimeProvider:
             ("openai", "https://api.openai.com/v1"),
             ("anthropic", "https://api.anthropic.com"),
         ):
-            enforce.check_runtime_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider=provider,
-                audit=audit,
-                runtime_base_url=endpoint,
-            )
+            _runtime(cfg, provider, audit, runtime_base_url=endpoint)
 
         # Allow paths stay silent in runtime check.
         assert audit.entries == []
@@ -1303,12 +913,7 @@ class TestCheckRuntimeProvider:
         fix (canonicalizing allowlist entries the same way) this test fails
         with ``MordredSessionRefused``.
         """
-        cfg = _write_policy_json(
-            tmp_path,
-            policy="strict",
-            allow_cloud_llm=True,
-            cloud_provider_allowlist=("claude", "google", "aws"),
-        )
+        cfg = _cloud_cfg(tmp_path, "claude", "google", "aws")
         audit = _FakeAuditWriter()
 
         # "claude" / "google" / "aws" are aliases; the runtime provider id
@@ -1319,13 +924,7 @@ class TestCheckRuntimeProvider:
             ("gemini", "https://generativelanguage.googleapis.com/v1beta"),
             ("bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com"),
         ):
-            enforce.check_runtime_provider(
-                policy_mode="strict",
-                policy_json_path=cfg,
-                active_provider=provider,
-                audit=audit,
-                runtime_base_url=endpoint,
-            )
+            _runtime(cfg, provider, audit, runtime_base_url=endpoint)
 
         # Allow paths stay silent in runtime check.
         assert audit.entries == []
@@ -1335,15 +934,14 @@ class TestCheckRuntimeProvider:
         [
             ("openai-api", "openai", "https://api.openai.com/v1"),
             ("kimi-for-coding", "kimi-coding", "https://api.kimi.com/coding"),
-            (
-                "tencent-tokenhub",
-                "tencent-tokenhub",
-                "https://tokenhub.tencentmaas.com/v1",
-            ),
+            ("tencent-tokenhub", "tencent-tokenhub", "https://tokenhub.tencentmaas.com/v1"),
             ("solar", "upstage", "https://api.upstage.ai/v1"),
             ("stepfun", "stepfun", "https://api.stepfun.com/v1"),
             ("xai-oauth", "xai", "https://api.x.ai/v1"),
             ("minimax-oauth", "minimax", "https://api.minimax.io/anthropic"),
+            # Allowlisted provider on its own endpoint: allowed, and silent.
+            ("anthropic", "anthropic", "https://api.anthropic.com"),
+            ("bedrock", "bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com"),
         ],
     )
     def test_hermes_019_registry_ids_match_stable_policy_identities(
@@ -1353,20 +951,10 @@ class TestCheckRuntimeProvider:
         policy_provider: str,
         endpoint: str,
     ) -> None:
-        cfg = _write_policy_json(
-            tmp_path,
-            allow_cloud_llm=True,
-            cloud_provider_allowlist=(policy_provider,),
-        )
+        cfg = _cloud_cfg(tmp_path, policy_provider)
         audit = _FakeAuditWriter()
 
-        enforce.check_runtime_provider(
-            policy_mode="strict",
-            policy_json_path=cfg,
-            active_provider=runtime_provider,
-            audit=audit,
-            runtime_base_url=endpoint,
-        )
+        _runtime(cfg, runtime_provider, audit, runtime_base_url=endpoint)
 
         assert audit.entries == []
 
@@ -1383,11 +971,7 @@ class TestCheckRuntimeProvider:
             ("opencode-zen", "https://opencode.ai/zen/v1"),
         ],
     )
-    def test_shape_bound_cloud_service_endpoints_are_accepted(
-        self,
-        provider: str,
-        endpoint: str,
-    ) -> None:
+    def test_shape_bound_cloud_service_endpoints_are_accepted(self, provider: str, endpoint: str) -> None:
         assert enforce.cloud_endpoint_matches_provider(provider, endpoint)
 
     @pytest.mark.parametrize(
@@ -1406,11 +990,7 @@ class TestCheckRuntimeProvider:
             ("opencode-zen", "https://opencode.ai/zen/go/v1"),
         ],
     )
-    def test_unrelated_cloud_service_hosts_do_not_inherit_provider_grant(
-        self,
-        provider: str,
-        endpoint: str,
-    ) -> None:
+    def test_unrelated_cloud_service_hosts_do_not_inherit_provider_grant(self, provider: str, endpoint: str) -> None:
         assert not enforce.cloud_endpoint_matches_provider(provider, endpoint)
 
     def test_endpoint_table_has_no_broad_vendor_suffixes(self) -> None:

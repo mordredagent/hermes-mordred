@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes import _self_update as core
+from mordred_hermes._core import _self_update as core
 from mordred_hermes.wizard import update_cli
 
 REPO = Path(__file__).resolve().parent.parent
@@ -228,7 +228,7 @@ from pathlib import Path
 if sys.platform != "win32":
     import resource
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-from mordred_hermes import _self_update as core
+from mordred_hermes._core import _self_update as core
 assert Path(core.__file__).resolve() == Path(sys.argv[3])
 sys.setrecursionlimit(100000)
 payload = "[" * 100000 + "]" * 100000
@@ -621,9 +621,11 @@ class TestUpdateView:
         monkeypatch.setattr(core, "_platform", lambda: "linux")
 
     def test_foreign_source_refuses_and_offers_no_restart(self) -> None:
-        from mordred_hermes.desktop import api
+        from mordred_hermes.desktop import _maintenance_routes
 
-        view = api._update_view(None, current=_installed(version="0.2.0a1", foreign_source="/elsewhere"))
+        view = _maintenance_routes._update_view(
+            None, current=_installed(version="0.2.0a1", foreign_source="/elsewhere")
+        )
         assert view["restart_required"] is False
         assert view["foreign_source"] == "/elsewhere"
         assert view["supported"] is False
@@ -631,17 +633,17 @@ class TestUpdateView:
 
     def test_version_difference_requires_restart_without_foreign_source(self) -> None:
         from mordred_hermes import __version__
-        from mordred_hermes.desktop import api
+        from mordred_hermes.desktop import _maintenance_routes
 
         other = "0.0.1a0" if __version__ != "0.0.1a0" else "0.0.2a0"
-        view = api._update_view(None, current=_installed(version=other, foreign_source=None))
+        view = _maintenance_routes._update_view(None, current=_installed(version=other, foreign_source=None))
         assert view["restart_required"] is True and view["foreign_source"] is None
         assert view["supported"] is True
 
     def test_unreadable_metadata_has_no_foreign_source(self) -> None:
-        from mordred_hermes.desktop import api
+        from mordred_hermes.desktop import _maintenance_routes
 
-        view = api._update_view(None, current=None)
+        view = _maintenance_routes._update_view(None, current=None)
         assert view["foreign_source"] is None and view["restart_required"] is False
 
 

@@ -1,0 +1,2 @@
+# Raw mail fixtures: keep bytes exactly (mixed LF/CRLF, ISO-2022-JP escapes).
+* -text

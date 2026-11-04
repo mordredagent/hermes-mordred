@@ -10,18 +10,23 @@ import argparse
 import errno
 import os
 import signal
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.exceptions import InvalidTag
 
 from mordred_hermes.keyvault import _bip39, _native_key_id, _storage, api, backup, ethereum
 from mordred_hermes.keyvault import pow as keyvault_pow
+from mordred_hermes.keyvault._exceptions import WrapError
 from mordred_hermes.wizard import configure, keyvault_cli, keyvault_export_cli
 from mordred_hermes.wizard._prompt_io import NonInteractiveAbort, _RefusingPromptIO
 from mordred_hermes.wizard.cli import _setup_subparser, dispatch, main
 from tests._keyvault_fakes import FakeBackend
+
+pytestmark = pytest.mark.usefixtures("fake_native_creation_receipts")
 
 SEED = _bip39.entropy_to_mnemonic(bytes(range(32)))
 OTHER_VALID_SEED = _bip39.entropy_to_mnemonic(bytes(reversed(range(32))))
@@ -1089,273 +1094,181 @@ class TestKeyvaultStateGuards:
         rc = _export(home=home, backend=FakeBackend(), output=output, prompts=prompts)
         return rc, output, prompts
 
-    def test_reset_in_progress_points_at_finishing_reset(
+    @pytest.mark.parametrize(
+        ("operation", "error", "guidance"),
+        [
+            pytest.param(
+                "assert_keyvault_active",
+                _storage.KeyvaultResetInProgressError("reset journal present"),
+                "reset is incomplete",
+                id="reset-in-progress",
+            ),
+            pytest.param(
+                "load_meta",
+                _storage.KeyvaultCorruptError("meta.json is not valid JSON"),
+                "metadata is corrupt",
+                id="corrupt-meta",
+            ),
+            pytest.param(
+                "load_meta",
+                PermissionError(errno.EACCES, "permission denied"),
+                "owner-only permissions",
+                id="unreadable-meta",
+            ),
+        ],
+    )
+    def test_state_error_is_actionable_before_prompt(
         self,
         isolated_home: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
+        operation: str,
+        error: Exception,
+        guidance: str,
     ) -> None:
         _initialize_source(isolated_home, FakeBackend(), store_seed=True)
 
-        def in_reset(root: Path) -> None:
+        def fail(root: Path) -> Any:
             del root
-            raise _storage.KeyvaultResetInProgressError("reset journal present")
+            raise error
 
-        monkeypatch.setattr(keyvault_export_cli._storage, "assert_keyvault_active", in_reset)
-
-        rc, output, prompts = self._refuse(isolated_home, tmp_path, "reset-in-progress")
+        monkeypatch.setattr(keyvault_export_cli._storage, operation, fail)
+        rc, output, prompts = self._refuse(isolated_home, tmp_path, "state-error")
 
         assert (rc, prompts.calls, output.exists()) == (1, [], False)
-        assert "reset is incomplete" in capsys.readouterr().err
+        assert guidance in capsys.readouterr().err
 
-    def test_corrupt_meta_points_at_a_verified_backup(
+    @pytest.mark.parametrize(
+        ("meta_factory", "guidance", "forbidden"),
+        [
+            pytest.param(
+                lambda key_id: {
+                    "version": 1,
+                    "keys": {},
+                    _native_key_id.PENDING_NATIVE_KEY_FIELD: {"key_id": key_id, "native_key_id": "x"},
+                },
+                ("provisioning is incomplete",),
+                (),
+                id="pending-native-key",
+            ),
+            pytest.param(
+                lambda _key_id: {"version": 1, "keys": {}},
+                ("keyvault init",),
+                ("reset",),
+                id="zero-keys",
+            ),
+            pytest.param(
+                lambda _key_id: {
+                    "version": 1,
+                    "keys": {"aa" * 8: {"key_id": "one"}, "bb" * 8: {"key_id": "two"}},
+                },
+                ("exactly one initialized Keyvault key", "this Keyvault has 2", "export_backup("),
+                ("reset",),
+                id="multiple-keys",
+            ),
+            pytest.param(
+                lambda _key_id: {"version": 1, "keys": {"aa" * 8: "not-a-mapping"}},
+                ("invalid key row",),
+                (),
+                id="invalid-row-value",
+            ),
+            pytest.param(
+                lambda _key_id: {"version": 1, "keys": {7: {"key_id": "one"}}},
+                ("invalid key row",),
+                (),
+                id="invalid-row-key",
+            ),
+            pytest.param(
+                lambda _key_id: {"version": 1, "keys": {"aa" * 8: {"key_id": ""}}},
+                ("invalid key id",),
+                (),
+                id="invalid-key-id",
+            ),
+            pytest.param(
+                lambda key_id: {"version": 1, "keys": {"00" * 16: {"key_id": key_id}}},
+                ("does not match its key id",),
+                (),
+                id="key-hash-mismatch",
+            ),
+        ],
+    )
+    def test_metadata_rejected_before_prompt(
         self,
         isolated_home: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        _initialize_source(isolated_home, FakeBackend(), store_seed=True)
-
-        def corrupt(root: Path) -> dict[str, Any]:
-            del root
-            raise _storage.KeyvaultCorruptError("meta.json is not valid JSON")
-
-        monkeypatch.setattr(keyvault_export_cli._storage, "load_meta", corrupt)
-
-        rc, output, prompts = self._refuse(isolated_home, tmp_path, "corrupt-meta")
-
-        assert (rc, prompts.calls, output.exists()) == (1, [], False)
-        assert "metadata is corrupt" in capsys.readouterr().err
-
-    def test_unreadable_metadata_points_at_permissions(
-        self,
-        isolated_home: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        _initialize_source(isolated_home, FakeBackend(), store_seed=True)
-
-        def unreadable(root: Path) -> dict[str, Any]:
-            del root
-            raise PermissionError(errno.EACCES, "permission denied")
-
-        monkeypatch.setattr(keyvault_export_cli._storage, "load_meta", unreadable)
-
-        rc, output, prompts = self._refuse(isolated_home, tmp_path, "unreadable-meta")
-
-        assert (rc, prompts.calls, output.exists()) == (1, [], False)
-        assert "owner-only permissions" in capsys.readouterr().err
-
-    def test_pending_native_key_points_at_reset(
-        self,
-        isolated_home: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
+        meta_factory: Callable[[str], dict[str, Any]],
+        guidance: tuple[str, ...],
+        forbidden: tuple[str, ...],
     ) -> None:
         key_id, _envelope, _entries = _initialize_source(isolated_home, FakeBackend(), store_seed=True)
-        _patch_meta(
-            monkeypatch,
-            {
-                "version": 1,
-                "keys": {},
-                _native_key_id.PENDING_NATIVE_KEY_FIELD: {"key_id": key_id, "native_key_id": "x"},
-            },
-        )
+        _patch_meta(monkeypatch, meta_factory(key_id))
 
-        rc, output, prompts = self._refuse(isolated_home, tmp_path, "pending-native-key")
-
-        assert (rc, prompts.calls, output.exists()) == (1, [], False)
-        assert "provisioning is incomplete" in capsys.readouterr().err
-
-    def test_zero_keys_gives_the_uninitialized_guidance(
-        self,
-        isolated_home: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        _initialize_source(isolated_home, FakeBackend(), store_seed=True)
-        _patch_meta(monkeypatch, {"version": 1, "keys": {}})
-
-        rc, output, prompts = self._refuse(isolated_home, tmp_path, "zero-keys")
+        rc, output, prompts = self._refuse(isolated_home, tmp_path, "metadata-rejection")
 
         assert (rc, prompts.calls, output.exists()) == (1, [], False)
         err = capsys.readouterr().err
-        assert "keyvault init" in err
-        assert "reset" not in err.lower()
-
-    def test_multiple_keys_names_the_api_instead_of_recommending_reset(
-        self,
-        isolated_home: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        _initialize_source(isolated_home, FakeBackend(), store_seed=True)
-        _patch_meta(
-            monkeypatch,
-            {"version": 1, "keys": {"aa" * 8: {"key_id": "one"}, "bb" * 8: {"key_id": "two"}}},
-        )
-
-        rc, output, prompts = self._refuse(isolated_home, tmp_path, "multi-key")
-
-        assert (rc, prompts.calls, output.exists()) == (1, [], False)
-        err = capsys.readouterr().err
-        assert "exactly one initialized Keyvault key" in err
-        assert "this Keyvault has 2" in err
-        assert "export_backup(" in err
-        assert "reset" not in err.lower()
-
-    def test_invalid_key_row_shapes_are_rejected(
-        self,
-        isolated_home: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        _initialize_source(isolated_home, FakeBackend(), store_seed=True)
-
-        for index, keys in enumerate(({"aa" * 8: "not-a-mapping"}, {7: {"key_id": "one"}})):
-            _patch_meta(monkeypatch, {"version": 1, "keys": keys})
-
-            rc, output, prompts = self._refuse(isolated_home, tmp_path, f"invalid-row-{index}")
-
-            assert (rc, prompts.calls, output.exists()) == (1, [], False)
-            assert "invalid key row" in capsys.readouterr().err
-
-    def test_invalid_key_id_is_rejected(
-        self,
-        isolated_home: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        _initialize_source(isolated_home, FakeBackend(), store_seed=True)
-        _patch_meta(monkeypatch, {"version": 1, "keys": {"aa" * 8: {"key_id": ""}}})
-
-        rc, output, prompts = self._refuse(isolated_home, tmp_path, "invalid-key-id")
-
-        assert (rc, prompts.calls, output.exists()) == (1, [], False)
-        assert "invalid key id" in capsys.readouterr().err
-
-    def test_key_hash_mismatch_is_rejected(
-        self,
-        isolated_home: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        key_id, _envelope, _entries = _initialize_source(isolated_home, FakeBackend(), store_seed=True)
-        _patch_meta(monkeypatch, {"version": 1, "keys": {"00" * 16: {"key_id": key_id}}})
-
-        rc, output, prompts = self._refuse(isolated_home, tmp_path, "hash-mismatch")
-
-        assert (rc, prompts.calls, output.exists()) == (1, [], False)
-        assert "does not match its key id" in capsys.readouterr().err
+        for text in guidance:
+            assert text in err
+        for text in forbidden:
+            assert text not in err.lower()
 
 
 class TestBackupBlobErrorMap:
     """Known `api.export_backup` failures keep their specific, redacted guidance."""
 
-    def _export_raising(
+    @pytest.mark.parametrize(
+        ("error", "guidance", "redacted"),
+        [
+            pytest.param(InvalidTag(), "failed authentication", None, id="invalid-tag"),
+            pytest.param(
+                backup.BackupCorrupt("truncated envelope"),
+                "verify-digest",
+                "truncated envelope",
+                id="backup-corrupt",
+            ),
+            pytest.param(
+                WrapError("enclave declined"),
+                "authorize the device key",
+                "enclave declined",
+                id="wrap-error",
+            ),
+            pytest.param(
+                ValueError(PASSPHRASE),
+                "could not verify the Keyvault recovery material",
+                PASSPHRASE,
+                id="value-error",
+            ),
+        ],
+    )
+    def test_backup_error_is_actionable_and_redacted(
         self,
-        home: Path,
+        isolated_home: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        exc: Exception,
-        name: str,
-    ) -> tuple[int, Path]:
+        capsys: pytest.CaptureFixture[str],
+        error: Exception,
+        guidance: str,
+        redacted: str | None,
+    ) -> None:
         backend = FakeBackend()
-        _initialize_source(home, backend, store_seed=True)
-        output = tmp_path / f"{name}.mrkv"
+        _initialize_source(isolated_home, backend, store_seed=True)
+        output = tmp_path / "backup-error.mrkv"
 
         def explode(*args: object, **kwargs: object) -> bytes:
             del args, kwargs
-            raise exc
+            raise error
 
         monkeypatch.setattr(api, "export_backup", explode)
-        rc = _export(home=home, backend=backend, output=output, prompts=RecordingPromptIO([PASSPHRASE]))
-        return rc, output
-
-    def test_invalid_tag_reports_failed_authentication(
-        self,
-        isolated_home: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        from cryptography.exceptions import InvalidTag
-
-        rc, output = self._export_raising(isolated_home, tmp_path, monkeypatch, InvalidTag(), "invalid-tag")
-
-        assert (rc, output.exists()) == (1, False)
-        assert "failed authentication" in capsys.readouterr().err
-
-    def test_backup_corrupt_points_at_verify_digest(
-        self,
-        isolated_home: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        rc, output = self._export_raising(
-            isolated_home,
-            tmp_path,
-            monkeypatch,
-            backup.BackupCorrupt("truncated envelope"),
-            "backup-corrupt",
-        )
+        rc = _export(home=isolated_home, backend=backend, output=output, prompts=RecordingPromptIO([PASSPHRASE]))
 
         assert (rc, output.exists()) == (1, False)
         err = capsys.readouterr().err
-        assert "verify-digest" in err
-        assert "truncated envelope" not in err
-
-    def test_wrap_error_points_at_the_device_key(
-        self,
-        isolated_home: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        from mordred_hermes.keyvault._exceptions import WrapError
-
-        rc, output = self._export_raising(
-            isolated_home,
-            tmp_path,
-            monkeypatch,
-            WrapError("enclave declined"),
-            "wrap-error",
-        )
-
-        assert (rc, output.exists()) == (1, False)
-        err = capsys.readouterr().err
-        assert "authorize the device key" in err
-        assert "enclave declined" not in err
-
-    def test_value_error_points_at_the_recovery_material(
-        self,
-        isolated_home: Path,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        rc, output = self._export_raising(
-            isolated_home,
-            tmp_path,
-            monkeypatch,
-            ValueError(PASSPHRASE),
-            "value-error",
-        )
-
-        assert (rc, output.exists()) == (1, False)
-        err = capsys.readouterr().err
-        assert "could not verify the Keyvault recovery material" in err
-        assert PASSPHRASE not in err
+        assert guidance in err
+        if redacted is not None:
+            assert redacted not in err
 
 
 class TestPublishedOutputProbe:

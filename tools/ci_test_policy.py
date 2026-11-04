@@ -72,7 +72,7 @@ def _verified_merge_sha(tested_sha: str, base_sha: object, head_sha: object, roo
         return None
     try:
         checkout = subprocess.run(
-            ["git", "--no-replace-objects", "rev-parse", "--verify", "HEAD"],
+            ["git", "--no-replace-objects", "rev-parse", "--verify", "HEAD"],  # noqa: S607 - PATH lookup of a system tool is intended
             cwd=root,
             capture_output=True,
             check=True,
@@ -80,8 +80,8 @@ def _verified_merge_sha(tested_sha: str, base_sha: object, head_sha: object, roo
         ).stdout.strip()
         if checkout != tested_sha.encode("ascii"):
             return None
-        commit = subprocess.run(
-            ["git", "--no-replace-objects", "cat-file", "commit", tested_sha],
+        commit = subprocess.run(  # noqa: S603 - list argv, no shell
+            ["git", "--no-replace-objects", "cat-file", "commit", tested_sha],  # noqa: S607 - PATH lookup of a system tool is intended
             cwd=root,
             capture_output=True,
             check=True,
@@ -225,7 +225,7 @@ def build_policy(
     )
     tier = "none" if not windows else "routine" if final and routine_eligible else "full"
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": mode,
         "repository": context.get("GITHUB_REPOSITORY", ""),
         "workflow_path": ".github/workflows/ci.yml",
@@ -247,7 +247,7 @@ def build_policy(
         else ["main", *(() if critical else scope.windows_packs)]
         if windows
         else [],
-        "windows_shards": [1, 2] if final else [1] if windows else [],
+        "windows_shards": [1, 2, 3, 4] if final else [1] if windows else [],
         "windows_test_tier": tier,
         "windows_exclusions_sha256": exclusions_digest("full" if tier == "none" else tier),
         "windows_modules": list(native_modules()) if final else [] if critical else list(scope.windows_modules),

@@ -20,8 +20,12 @@ Current contract:
 | `on_session_start` | `session_id` | Network activation and shared startup integrity |
 | `on_session_end` | none | Network cleanup and keyvault resealing |
 | `pre_tool_call` | `tool_name` | Privacy and network generic tool guards |
+| `post_tool_call` | `tool_name`, `args`, `result`, `session_id`, `task_id`, `tool_call_id` (`turn_id` and `status` only when present; hermes-agent 0.13.0 passes neither) | Recording Hermes's own browser calls (activity) |
 | `pre_api_request` | `provider`, `base_url` | LLM and network egress policy |
 | `pre_gateway_dispatch` | `event`, `gateway` | Mandatory gateway E2E |
+| `pre_llm_call` | `user_message`, `session_id`, `platform` (`task_id` and `turn_id` only when present; hermes-agent 0.13.0 passes neither) | Turn-start browser history and the turn record for capture and chat corrections (activity); dbcrypt's per-turn database check reads nothing |
+| `post_llm_call` | `session_id` (`task_id` and `turn_id` only when present; hermes-agent 0.13.0 passes neither) | The end of a turn: Hermes's capture writes the turn's held task start or correction (activity) |
+| `transform_tool_result` | `tool_name`, `args`, `result`, `session_id`, `task_id` | Browser history block in navigation results (activity) |
 
 Callbacks may accept additional keyword arguments for compatibility, but policy
 must not silently start depending on a new field until the JSON contract and
@@ -35,8 +39,8 @@ argument that Mordred can rely on.
 
 Mordred is one plugin, `mordred` (`mordred_hermes.plugin`). Its `register()`
 registers the integrity callback first, then the components in a fixed order
-(keyvault, llm_guard, network, privacy_check, e2e, wizard), so component
-callbacks run in that order within each hook. A callback registered by more
+(keyvault, llm_guard, network, privacy_check, dbcrypt, e2e, activity, wizard),
+so component callbacks run in that order within each hook. A callback registered by more
 than one component (the shared `check_plugin_integrity`) is registered once.
 The `.pth` runtime bootstrap additionally keeps a mandatory integrity bridge at
 the front of `on_session_start`. Network startup still uses explicit readiness
@@ -89,9 +93,40 @@ tests explicitly adopt it.
 
 ## 5. `pre_llm_call` payload and override return shape
 
-Mordred does not register `pre_llm_call`. Its return channel is unsuitable for
-rewriting the resolved provider, so policy is split across boundaries that
-observe the real client/request:
+Two components register `pre_llm_call`, in wiring order: `dbcrypt` (the
+per-turn database-encryption check; it reads no field, returns a warning
+context under lenient policy and raises `DatabaseEncryptionRefused`, a
+`BaseException`, under strict policy) and `activity`, twice: the turn-start
+browser history, then the capture's turn record (`activity/capture_hermes.py`).
+Verified against the installed Hermes 0.19.0
+(`agent/turn_context.py`): the hook fires once per user turn with
+`session_id`, `task_id`, `turn_id`, `user_message`, `conversation_history`,
+`is_first_turn`, `model`, `platform` and `sender_id` (plus
+`telemetry_schema_version` from the plugin manager). Each callback may return
+`{"context": str}` or a non-empty string; Hermes spills a piece above its
+spill threshold (10,000 characters by default) to a file, joins the pieces
+with a blank line in registration order, and appends them after the user's
+text in the API copy of the user message only (`api_content`, persisted in
+`state.db`; the stored `content` stays clean). A turn whose user content is
+not a string (multimodal) gets no plugin context. `PluginManager.invoke_hook`
+catches `Exception` per callback, so an ordinary exception only drops that
+callback's context; a `BaseException` aborts the turn. The history callback
+reads `user_message`, `session_id` and, when present, `task_id` (hermes-agent
+0.13.0 does not pass it), catches every `Exception`
+and returns `None` or `{"context": block}` (SPEC §"History for Hermes"). The
+capture callback reads `user_message`, `session_id`, `platform` (Hermes passes
+the agent's platform or `""`; only a turn whose platform is in
+`history_human_platforms`, by default `cli`, `tui` and `desktop`, is a
+person's message) and, when present, `task_id` and
+`turn_id` (0.13.0 passes neither; each call then starts a local turn), records a
+`correct:` message (or its Japanese equivalent) as a correction, catches every `Exception` and
+always returns `None`. Verified against the hermes-agent 0.13.0 floor
+(`run_agent.py`): its single dispatch site passes `session_id`,
+`user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`
+and `sender_id`.
+
+The return channel is unsuitable for rewriting the resolved provider, so
+policy is split across boundaries that observe the real client/request:
 
 1. Session-start checks catch invalid disk configuration and prohibited agent
    harnesses early.
@@ -105,6 +140,62 @@ observe the real client/request:
 Strict mode is refuse-only at these boundaries; it does not promise to replace
 a cloud provider with `mordred-local` automatically. Any future auto-swap needs
 a pre-client-construction integration point or an optional vendored layer.
+
+### 5.1 `transform_tool_result` payload and return shape
+
+The activity component registers `transform_tool_result`. Verified against the
+installed Hermes 0.19.0 (`model_tools.handle_function_call`): it fires after
+every registry tool call, after the observational `post_tool_call`, with
+`tool_name`, `args`, `result` (the tool's result string), `task_id`,
+`session_id`, `tool_call_id`, `turn_id`, `api_request_id`, `duration_ms`,
+`status`, `error_type` and `error_message`. The first callback returning a
+`str` replaces the result (later string returns are ignored, so callbacks do
+not chain); non-string returns and exceptions leave it unchanged. The result
+is then wrapped as untrusted data for `browser_*`, `mcp_*`, `web_extract` and
+`web_search` (`agent/tool_dispatch_helpers.make_tool_result_message`). The
+activity callback reads `tool_name`, `args`, `result`, `session_id` and
+`task_id`; for a successful `browser_navigate` (or a `browser_snapshot` /
+`browser_back` on a new host) it returns the same JSON object with one added
+field, `mordred_browser_history`, and otherwise `None`.
+
+### 5.2 `post_tool_call` payload
+
+The activity component registers `post_tool_call` to record Hermes's own
+browser calls (`activity/capture_hermes.py`, SPEC §"History for Hermes").
+Verified against the installed Hermes 0.19.0: every call site goes through
+`model_tools._emit_post_tool_call_hook` (registry tools, agent-loop tools in
+`agent/agent_runtime_helpers.py`, terminal outcomes in
+`agent/tool_executor.py`), whose single `invoke_hook` passes `tool_name`,
+`args`, `result`, `task_id`, `session_id`, `tool_call_id`, `turn_id`,
+`api_request_id`, `duration_ms`, `status` (`ok`, `error`, `blocked`,
+`cancelled`, `timeout`), `error_type`, `error_message` and
+`middleware_trace`; it also fires for a call a `pre_tool_call` hook blocked
+(`status` `blocked`), before `transform_tool_result`, and ignores the return
+value. The hermes-agent 0.13.0 floor has one dispatch site
+(`model_tools.handle_function_call`) passing `tool_name`, `args`, `result`,
+`task_id`, `session_id`, `tool_call_id` and `duration_ms` only, and fires
+nothing for a blocked call. The contract therefore lists `tool_name`, `args`,
+`result`, `session_id`, `task_id` and `tool_call_id`; `turn_id` and `status`
+are read only when present (without `status` the outcome comes from the
+result's `success` / `error`). The callback ignores every tool not named
+`browser_*`, catches every `Exception` and returns `None`.
+
+### 5.3 `post_llm_call` payload
+
+The activity component registers `post_llm_call` as the end of a turn: Hermes's
+capture writes the turn's task start or correction, which it holds until then
+so that a value typed into a secret field later in the turn is scrubbed from it
+(`activity/capture_hermes.py`, SPEC §"History for Hermes"). Verified against
+the installed Hermes 0.19.0 (`agent/turn_finalizer.py`): fired once per turn
+after the tool-calling loop, only when there is a final response and the turn
+was not interrupted, with `session_id`, `task_id`, `turn_id`, `user_message`,
+`assistant_response`, `conversation_history`, `model` and `platform`. The
+hermes-agent 0.13.0 floor (`run_agent.py`) fires it under the same condition
+without `task_id` and `turn_id`. The contract therefore lists `session_id`;
+`task_id` and `turn_id` are read only when present (a `turn_id` naming another
+turn than the held text's leaves it for that turn). A turn that gets no
+`post_llm_call` has its text written by the session's next `pre_llm_call`. The
+callback catches every `Exception` and returns `None`.
 
 ## 6. `pre_gateway_dispatch` payload and return action shape
 
@@ -165,6 +256,58 @@ The historical survey counted upstream spawn sites, but the count is not a
 stable contract. Review only the concrete spawn paths touched by a change and
 verify their explicit `env`, timeout, and cleanup behavior against the current
 Hermes source.
+
+## 9. Reader-mode audit reasons
+
+Status: implemented for reader mode (`privacy_check/_audit_reasons.py`,
+`tools/hook_payload_contract.json`, which now lists `args`, `session_id` and
+`tool_name` for `pre_tool_call`); the handler codes below are returned by the
+reader-tool handlers, the Telegram sync and the mail sync tool
+`mordred_mail_sync` (not a reader tool: it is in the reader allowlist and never
+taints). Mordred still reads only `tool_name` from `pre_tool_call`; reader mode
+additionally uses the `session_id` that Hermes passes to tool handlers and
+hooks. A missing `session_id` is a refusal, not a guess.
+
+Reader-mode refusals are `rule` values (`_audit_reasons.py::EgressRule`) carried
+under the existing reason `policy.egress.tool_blocked`, like every other
+`egress.*` rule; `policy.egress.reader_mode` is the one new `ReasonCode` and is
+written once per session when reader mode is entered (counts only, no args).
+
+| Code | Kind | Emitted when | Effect |
+|---|---|---|---|
+| `policy.egress.reader_mode` | reason | a reader tool was allowed and the durable record was written; the session is now in reader mode | audit entry only |
+| `egress.reader_unrecorded` | rule | a reader tool is about to run but the durable session record could not be written | tool call blocked |
+| `egress.reader_no_session` | rule | a reader tool is called without a usable `session_id` | tool call blocked |
+| `egress.reader_locked` | rule | a reader session calls a tool outside the reader allowlist (writes, exec, messaging, scheduling, delegation, payments, MCP, unknown tools) at any privacy level, including `off` | tool call blocked |
+| `egress.reader_web` | rule | a reader session calls a web search or URL-loading tool | approval prompt at every level; blocklisted domains stay refused |
+| `reader_mode_unavailable` | handler code | a reader-tool handler cannot confirm `egress.reader_mode_established(session_id)`, which answers from this process's set only: no `session_id`, the privacy_check component disabled, or a call path that skips `pre_tool_call` | handler refuses before validating arguments or opening a store; no data returned |
+| `invalid_request` | handler code | `mordred_history_search` (and `telegram_ask`) arguments are malformed: a non-string or over-long `query`, `chat_ids` that is not a list of at most 20 chat ids, a non-integer `limit`, a non-boolean `pseudonymize`, an empty question; or `mordred_mail_sync` gets anything but an optional integer `max_messages` from 1 to 2000 (another key, a boolean, a float, a string) | handler returns the code; nothing is read or fetched |
+| `invalid_date` | handler code | `start_date` or `end_date` is not a `YYYY-MM-DD` string or the range is invalid | handler returns the code; nothing is read |
+| `invalid_evidence_id` | handler code | `around_evidence_id` is not a well-formed part id (for example `tg:-100123:4567#a`) | handler returns the code; nothing is read |
+| `import_record_invalid` | handler code | a Telegram record failed the import contract while writing to the import store (a `RecordError`) | the sync refuses; the code carries no message content |
+| `import_store_unavailable` | handler code | the `mordred.db` gate or open refused after `telegram migrate-store --commit` | read or sync refuses; no fallback to `.enc` |
+| `account_mismatch` | handler code | `get_me().id` differs from `ArchiveIndex.account_id` during Telegram conversion | conversion and sync refuse |
+| `mail_not_configured` | handler code | `mordred_mail_sync` or `mail fetch` finds no sealed mail credentials | refuses before any unseal; the user runs `hermes-mordred mail setup` |
+| `memory_encryption_required` | handler code | memory encryption is not armed (the Telegram guard) when the mail sync starts | refuses before the store or the credentials are opened |
+| `sync_in_progress` | handler code | another mail fetch, `mail import` or `mail forget` holds `<home>/mordred/mail/.lock` | refuses; nothing is fetched |
+| `imap_auth_failed` | handler code | the IMAP server refused the sealed address and app password | refuses; nothing is written |
+| `imap_unreachable` | handler code | DNS, TCP, SOCKS, TLS (including certificate verification) or the connection failed, or the server hung up | refuses, or stops after the batches already committed (`partial_reason: error`) |
+| `imap_protocol` | handler code | the server's response had an unexpected shape | as `imap_unreachable` |
+| `imap_command_refused` | handler code | the client was asked to send a command outside the read-only allowlist (a bug guard; never expected) | nothing is sent |
+| `egress_unsupported` | handler code | the egress route for the IMAP host is an HTTP or other non-SOCKS5 proxy | refuses before connecting |
+| `run_failed` | handler code | a store write or the quote linker failed during a mail batch | that batch's run is marked failed and its cursor does not move; earlier batches stay committed |
+| `fetch_failed` | handler code | an unexpected error in the mail sync (the class name is not kept) | as `run_failed` |
+
+Handler codes are the `error` value of a tool result (or the content-free code
+of a refused sync); they are not `ReasonCode` or `EgressRule` values and write no
+audit entry of their own. The reasons and rules above are audit values; the
+distinction is kept so `tools/hook_payload_contract.json` and
+`_audit_reasons.py` do not need entries for handler codes.
+
+Audit records for these codes follow the existing rules: bounded fields, no
+message text, no raw session id (the record stores SHA-256 digests), no addresses or chat titles.
+The behavior of the reader allowlist and blocklist is specified in
+[`SPEC.md`](./SPEC.md#imported-message-provenance-2026-10-22).
 
 ## Cross-cutting findings → SPEC.md updates
 

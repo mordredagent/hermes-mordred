@@ -49,7 +49,7 @@ def test_prepared_home_is_checked_and_frozen_before_collection(tmp_path: Path) -
         [
             sys.executable,
             "-c",
-            "import os; from pathlib import Path; from mordred_hermes._home import HERMES_BASE; "
+            "import os; from pathlib import Path; from mordred_hermes._core._home import HERMES_BASE; "
             "from mordred_hermes.llm_guard import local_adapter; "
             "assert HERMES_BASE == Path(os.environ['HERMES_HOME']); "
             "assert local_adapter.DEFAULT_POLICY_JSON_PATH == HERMES_BASE / 'mordred' / 'policy.json'",

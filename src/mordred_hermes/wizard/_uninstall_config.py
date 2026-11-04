@@ -43,10 +43,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .._config_io import DOTENV_LIMIT, CanonicalPaths, canonical_session, read_canonical_snapshot
-from .._plugin_identity import LEGACY_PLUGIN_NAMES, PLUGIN_NAME
-from .._policy_io import policy_mapping_from_snapshot
-from .._yaml_io import yaml_mapping_from_snapshot
+from .._core._config_io import DOTENV_LIMIT, CanonicalPaths, canonical_session, read_canonical_snapshot
+from .._core._plugin_identity import LEGACY_PLUGIN_NAMES, PLUGIN_NAME
+from .._core._policy_io import policy_mapping_from_snapshot
+from .._core._yaml_io import yaml_mapping_from_snapshot
 from .policy_writer import _bounded_utf8, _canonical_paths, _checked_policy_edit, _PrivateWriteOutcome, _windows
 
 __all__ = [

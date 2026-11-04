@@ -156,7 +156,7 @@ def _revoke_or_observe(pairing: Any, code: str) -> tuple[bool, str, str | None]:
         try:
             if bool(revoke(code)):
                 return True, "failed", "cancelled"
-        except Exception:
+        except Exception:  # noqa: S110 - status probe below reports the outcome
             # Cancellation/timeout handling must not turn a backend I/O error
             # into a traceback. The status probe below may still tell us that
             # the pairing committed before revocation took effect.

@@ -35,9 +35,9 @@ from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
 
-from .._log_rotation import audit_rotation_names, rotate_audit, sweep_audit_retention
-from .._log_rotation import today_utc_date as _today_utc_date
-from .._log_rotation import utcnow_iso as _utcnow_iso
+from .._core._log_rotation import audit_rotation_names, rotate_audit, sweep_audit_retention
+from .._core._log_rotation import today_utc_date as _today_utc_date
+from .._core._log_rotation import utcnow_iso as _utcnow_iso
 from .._private_fs import PrivateFSError, open_optional_confidential_directory, open_optional_private_directory
 from ._exceptions import AuditEntryRejected, AuditRefusalReason, AuditWriterRefused
 from .audit import DEFAULT_RETENTION_DAYS, DEFAULT_ROTATE_BYTES, Writer, _serialize
@@ -45,7 +45,7 @@ from .audit import DEFAULT_RETENTION_DAYS, DEFAULT_ROTATE_BYTES, Writer, _serial
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
-    from .._audit_session import AuditSession
+    from .._core._audit_session import AuditSession
     from .._private_fs import FileIdentity, PrivateTransaction
     from ..keyvault._windows_custody import WindowsCustodySession
     from ..keyvault.windows_audit import WindowsEncryptedWriter, _RecordedAudit
@@ -78,7 +78,7 @@ _REFUSED_LOCK = threading.Lock()
 
 
 def _classify_storage(exc: PrivateFSError) -> AuditRefusalReason:
-    from .._config_io import PolicyPendingError
+    from .._core._config_io import PolicyPendingError
 
     if exc.commit_state != "not_committed":
         return "audit-uncertain"
@@ -91,7 +91,7 @@ def _classify_storage(exc: PrivateFSError) -> AuditRefusalReason:
 
 def classify_audit_failure(exc: BaseException) -> AuditRefusalReason:
     """Map a custody/storage/native failure onto the closed refusal vocabulary."""
-    from .._config_io import PolicyPendingError
+    from .._core._config_io import PolicyPendingError
     from ..keyvault._exceptions import WrapError, WrapKeyNotFound
     from ..keyvault._windows_profile import CustodyError
 
@@ -137,7 +137,7 @@ def _entry_bytes(serialize: Callable[[Mapping[str, Any]], bytes], entry: Mapping
 
 def _require_canonical_home(home: Path) -> None:
     """Refuse a relative or ``..``-aliased home as invalid, before custody entry."""
-    from .._config_io import CanonicalPaths
+    from .._core._config_io import CanonicalPaths
 
     try:
         CanonicalPaths(home)
@@ -184,7 +184,7 @@ def _audit_role_enrolled(session: WindowsCustodySession) -> bool:
 
 def _first_line_kind(prefix: bytes) -> str:
     """Classify a decoded first line exactly like C7a ``AuditSession.probe``."""
-    from .._audit_session import _invalid_constant, _unique_object
+    from .._core._audit_session import _invalid_constant, _unique_object
 
     if not prefix:
         return "empty"
@@ -251,7 +251,7 @@ def _check_without_mordred(path: Path, session: WindowsCustodySession, *, histor
     Only the checked-absent default directory has no history; a missing custom
     directory and the home itself refuse, exactly as with a Mordred loan.
     """
-    from .._audit_session import audit_session
+    from .._core._audit_session import audit_session
 
     home = session.canonical.home_directory_identity()
     if home is None and _lexical(path.parent) == _lexical(session.home / _MORDRED_LEAF):

@@ -176,6 +176,6 @@ def _reset_api() -> Any:
 def _skip_process_route_activation(monkeypatch: pytest.MonkeyPatch) -> None:
     """Config-reader tests should not start real Tor/VPN subprocesses."""
     monkeypatch.setattr(
-        "mordred_hermes.network._activate_process_route",
+        "mordred_hermes.network._registration._activate_process_route",
         lambda **_kwargs: None,
     )

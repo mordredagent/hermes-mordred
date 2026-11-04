@@ -9,15 +9,18 @@ internet at the configured level:
 
 =============  ================================================================
 ``lockdown``   No internet from tools. Local tools and Mordred's own Telegram
-               tools (fixed Venice/loopback destination) only.
+               tools (fixed Venice/loopback destination) and browser-history
+               tools (local encrypted store) only.
 ``search``     ``lockdown`` + ``web_search``. No URL fetching,
                browsing, remote APIs, or arbitrary commands.
 ``ask``        (default) Tools work. ``web_search`` and local work run as
                usual; every other call that may reach the internet (URL
                fetch, browser, remote API, a command that uses the network,
                an unknown tool) asks the user first through Hermes's approval
-               prompt, showing where it goes and what it sends. Blocklisted
-               domains and bare IP addresses are refused outright.
+               prompt, showing where it goes and what it sends (typed and
+               other free text only as its length: see "Prompt text").
+               Blocklisted domains and bare IP addresses are refused
+               outright.
 ``blocklist``  Everything except blocklisted domains and tools; URL
                arguments are checked against the domain blocklist.
 ``off``        Mordred does not restrict tools.
@@ -30,12 +33,32 @@ Rules that hold at every restricted level:
   reliably, so under ``lockdown`` and ``search`` only exact first-party
   read-only commands (``hermes-mordred telegram doctor`` ...) may run. A tool
   this module does not know is treated as internet-capable.
-- **Taint.** Once a session has read private data (the Telegram tools), that
+- **Taint.** Once a session has read private data (the Telegram tools, the
+  browser-history lookup tools), that
   session is raised to ``lockdown`` for the rest of its life: a search query
   is an exfiltration channel too. Delegation is refused for a tainted session
   because a child agent would start untainted, and tools that write plaintext
   to disk (files, skills, memory, kanban) are refused so private data stays in
   memory only.
+
+**Reader mode** holds at every level, ``off`` included. Once a session has
+read private history (:data:`READER_TOOLS`: imported messages or the browser
+history), text from that history
+must never trigger an action: only the read-only tools in
+:data:`READER_ALLOWED` keep running (under the level's normal rules), web
+access (:data:`READER_WEB_TOOLS`) always asks the user, and every other tool
+(writes, commands, messaging, scheduling, delegation, payments, MCP tools,
+unknown tools) is refused until a new session. The pre-tool hook records the
+session durably (:mod:`._reader_sessions`) before the first read runs, so a
+restarted Hermes keeps the restriction; a reader tool without a session id,
+or whose record cannot be written, is refused.
+
+``mordred_mail_sync`` (:data:`MAIL_SYNC_TOOL`) is a first-party tool that is
+NOT a reader tool: its only argument is a number and its result is counts, so
+it neither taints nor enters reader mode, it stays allowed in a reader session
+(:data:`READER_ALLOWED`), and its fixed destination (the IMAP server sealed at
+``mail setup``) lets it run under ``lockdown``/``search`` (:data:`FIRST_PARTY_TOOLS`).
+The operator's tool blocklist still applies to it at every level.
 
 Configuration (``config.yaml``)::
 
@@ -49,6 +72,22 @@ Configuration (``config.yaml``)::
 
 A missing section means ``search``; an unreadable or invalid one fails closed
 to ``lockdown``.
+
+Prompt text. Hermes writes an approval prompt, and the denial that quotes it
+when no one can approve, to its plaintext ``logs/agent.log``. So the prompt
+never holds typed or other free text: an argument whose name has a word such
+as ``text``, ``value``, ``password``, ``secret``, ``token``, ``content``,
+``message`` or ``prompt`` (:func:`free_text_argument`; ``browser_type``'s
+``text`` among them) is shown as ``<N characters>``, also inside nested
+objects and lists. Other values are shown with every URL scrubbed of
+credentials (credential parameters, secret-shaped values, userinfo) and every
+secret the free-text redaction finds replaced by ``redacted``, the rules the
+activity receiver applies (:func:`mordred_hermes.activity.contracts.scrub_urls`,
+:func:`~mordred_hermes.activity.contracts.redact_text_secrets`); a command
+that uses the network is shown that way too, since approving it means reading
+it. A denial names the tool, the rule and at most a blocklisted destination or
+a bare IP address, never another argument; audit entries name the tool, rule
+and level only.
 """
 
 from __future__ import annotations
@@ -59,10 +98,12 @@ import json
 import os
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, Literal
 from urllib.parse import urlsplit
+
+from ._audit_reasons import EgressRule
 
 _platform = os.name
 
@@ -101,10 +142,26 @@ LOCAL_TOOLS = frozenset(
         "desktop_project",
     }
 )
-# Mordred's own tools: the destination is fixed in code (Venice or loopback).
-FIRST_PARTY_TOOLS = frozenset({"telegram_ask", "telegram_chats"})
+# Tools that read private history into the session: the Telegram tools, the
+# imported-message search and the browser-history lookup tools (which can
+# return typed text, page text and query strings). Calling one puts the
+# session into reader mode. Mordred's automatic history blocks (the navigation
+# block in a browser result and the turn-start context) are not tool calls and
+# do not enter reader mode: by construction they carry no typed text and no
+# page text (only task and correction text attributed to the user, page titles
+# inside Hermes's untrusted wrapper, routes, outcomes and times; see SPEC
+# "History for Hermes").
+TELEGRAM_TOOLS = frozenset({"telegram_ask", "telegram_chats"})
+BROWSER_HISTORY_TOOLS = frozenset({"mordred_browser_history", "mordred_browser_history_episode"})
+READER_TOOLS = TELEGRAM_TOOLS | frozenset({"mordred_history_search"}) | BROWSER_HISTORY_TOOLS
+# Fetches new mail into the encrypted store; arguments carry no session data
+# and the result carries counts only, so it is not a reader tool.
+MAIL_SYNC_TOOL = "mordred_mail_sync"
+# Mordred's own tools: the destination is fixed in code (Venice, loopback, the
+# local store, or the IMAP server sealed at ``mail setup``).
+FIRST_PARTY_TOOLS = READER_TOOLS | frozenset({MAIL_SYNC_TOOL})
 # Reading any of these puts private data into the session (taint source).
-TAINT_SOURCES = FIRST_PARTY_TOOLS
+TAINT_SOURCES = READER_TOOLS
 SEARCH_TOOLS = frozenset({"web_search"})
 # Tools that write to disk in plaintext. A tainted session may not use them:
 # imported private data must exist in plaintext only in memory.
@@ -124,6 +181,30 @@ URL_ARGS: dict[str, tuple[str, ...]] = {
 }
 # Free-form code: destinations cannot be inspected.
 EXEC_TOOLS = frozenset({"terminal", "execute_code", "browser_console", "browser_exec", "browser_cdp"})
+# Reader mode: tools that only read or plan locally and so may keep running
+# once the session has read imported history.
+READER_ALLOWED = READER_TOOLS | frozenset(
+    {
+        MAIL_SYNC_TOOL,
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_view",
+        "skills_list",
+        "tool_search",
+        "tool_describe",
+        "todo",
+        "todo_list",
+        "clarify",
+    }
+)
+# URL-carrying tools that act rather than fetch (generate, attach, call an agent).
+_URL_ACTION_TOOLS = frozenset({"video_generate", "kanban_attach_url", "a2a_call"})
+# Reader mode: tools that search or load a web address. They always ask the
+# user in a reader session (a query or URL can carry imported text out).
+READER_WEB_TOOLS = (
+    SEARCH_TOOLS | (frozenset(URL_ARGS) - _URL_ACTION_TOOLS) | frozenset({"fetch_url", "fetch", "browser_back"})
+)
 # Hermes's Tool Search bridge: deferred tools (Mordred's Telegram tools among
 # them) are invoked as `tool_call {calls: [{name, arguments}]}`, and the agent
 # loop fires pre_tool_call with the bridge name. Decide on the tools inside.
@@ -174,17 +255,22 @@ class EgressPolicy:
 @dataclass(frozen=True)
 class Decision:
     allow: bool
-    reason: str = ""
+    reason: EgressRule | Literal[""] = ""
     message: str = ""
     taints: bool = False
     #: Ask the user (Hermes's approval prompt) instead of deciding here.
     approve: bool = False
     rule_key: str = ""
+    #: The call runs a reader tool: the caller must durably record the
+    #: session as a reader session before letting it run (allow or approve).
+    reader: bool = False
 
 
 @dataclass
 class _Sessions:
     tainted: set[str] = field(default_factory=set)
+    #: Sessions whose reader mode was durably recorded by this process's hook.
+    reader: set[str] = field(default_factory=set)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -202,6 +288,47 @@ def is_tainted(session_id: str | None) -> bool:
         return False
     with _SESSIONS.lock:
         return session_id in _SESSIONS.tainted
+
+
+def mark_reader(session_id: str) -> None:
+    """Enter reader mode in this process; call only after the durable record."""
+    with _SESSIONS.lock:
+        _SESSIONS.reader.add(session_id)
+        _SESSIONS.tainted.add(session_id)
+
+
+def reader_mode_established(session_id: str | None) -> bool:
+    """Whether this process's pre-tool hook put ``session_id`` into reader mode.
+
+    The check reader-tool handlers make before returning imported text. It
+    answers from the in-process set only, which the hook fills after the
+    durable record succeeded: if the hook did not run in this process (plugin
+    disabled, a call path that skips ``pre_tool_call``), nothing guards the
+    session's later tool calls, so the handler must refuse even when an
+    earlier process left a durable record.
+    """
+    if not session_id:
+        return False
+    with _SESSIONS.lock:
+        return session_id in _SESSIONS.reader
+
+
+def is_reader_session(session_id: str | None, *, home: Path | None = None) -> bool:
+    """Whether the reader guard applies: this process's set or the durable record.
+
+    ``home`` is the Hermes home holding ``mordred/reader_sessions.json``; without
+    it only the in-process set is consulted. An unreadable record raises
+    :class:`._reader_sessions.ReaderRecordError` (callers fail closed).
+    """
+    if not session_id:
+        return False
+    if reader_mode_established(session_id):
+        return True
+    if home is None:
+        return False
+    from . import _reader_sessions
+
+    return _reader_sessions.contains(home, session_id)
 
 
 # -- policy loading -------------------------------------------------------------------
@@ -238,8 +365,8 @@ def load_policy(config_path: Path | None = None) -> EgressPolicy:
 
     POSIX retains the historical mtime cache and lockdown fallback.
     """
-    from .._home import hermes_home
-    from .._yaml_io import load_plugin_section
+    from .._core._home import hermes_home
+    from .._core._yaml_io import load_plugin_section
 
     path = config_path or (hermes_home() / "config.yaml")
     if _platform == "nt":
@@ -340,7 +467,7 @@ def _is_local(tool: str) -> bool:
     return tool.startswith(_LOCAL_PREFIXES) and tool not in _LOCAL_EXCEPTIONS
 
 
-def _block(level: str, reason: str, detail: str) -> Decision:
+def _block(level: str, reason: EgressRule, detail: str) -> Decision:
     return Decision(
         allow=False,
         reason=reason,
@@ -404,15 +531,152 @@ _NETWORK_COMMAND = re.compile(
     re.IGNORECASE,
 )
 _PREVIEW_CHARS = 600
+#: Words of an argument name whose value is typed or free text (module docstring, "Prompt text").
+FREE_TEXT_WORDS = frozenset(
+    {
+        "answer",
+        "auth",
+        "authorization",
+        "body",
+        "caption",
+        "comment",
+        "comments",
+        "content",
+        "contents",
+        "cookie",
+        "cookies",
+        "credential",
+        "credentials",
+        "data",
+        "description",
+        "html",
+        "input",
+        "key",
+        "keys",
+        "markdown",
+        "message",
+        "messages",
+        "msg",
+        "note",
+        "notes",
+        "otp",
+        "passcode",
+        "passphrase",
+        "passwd",
+        "password",
+        "payload",
+        "pin",
+        "prompt",
+        "pwd",
+        "query",
+        "question",
+        "reply",
+        "secret",
+        "secrets",
+        "subject",
+        "summary",
+        "text",
+        "token",
+        "tokens",
+        "value",
+        "values",
+    }
+)
+_NAME_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+_MAX_PREVIEW_DEPTH = 6
+
+
+def free_text_argument(name: str) -> bool:
+    """Whether a tool argument of this name holds typed or free text: one of its words (split at ``_``, ``-``,
+    ``.``, digits and camel case; ``userPassword``, ``api_key``) is in :data:`FREE_TEXT_WORDS`."""
+    return any(word.lower() in FREE_TEXT_WORDS for word in _NAME_WORD.findall(name))
+
+
+_UNPARSEABLE: Final = "an unparseable address"
+
+
+def _prompt_host(url: str) -> str:
+    """The host an approval prompt names for ``url``; never the raw URL, which may carry credentials."""
+    try:
+        host = urlsplit(url if "://" in url else f"https://{url}").hostname
+    except ValueError:
+        host = None
+    return host or _UNPARSEABLE
+
+
+def _url_rule_key(tool: str, urls: list[str]) -> str:
+    """The approval key of a URL call: the parsed hosts, and for an address with no parseable host a
+    digest of that address, so approving one unparseable address never approves another (and the key
+    never holds the address itself)."""
+    parts = sorted(
+        {
+            host
+            if (host := _prompt_host(u)) != _UNPARSEABLE
+            else "unparseable-" + hashlib.sha256(u.encode()).hexdigest()[:12]
+            for u in urls
+        }
+    )
+    return f"mordred.egress:{tool}:{','.join(parts)}"
+
+
+def _unparseable_as_length(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """``args`` with every URL argument whose host cannot be parsed shown by its length only."""
+    names = URL_ARGS.get(tool, ())
+
+    def shown(value: Any) -> Any:
+        if isinstance(value, str) and _prompt_host(value) == _UNPARSEABLE:
+            return _length(value)
+        if isinstance(value, list | tuple):
+            return [shown(item) for item in value]
+        return value
+
+    return {key: (shown(value) if key in names else value) for key, value in args.items()}
+
+
+def _scrubbed(text: str) -> str:
+    """``text`` with URL credentials scrubbed and free-text secrets redacted (the activity receiver's rules)."""
+    from ..activity.contracts import redact_text_secrets, scrub_urls
+
+    return redact_text_secrets(scrub_urls(text))[0]
+
+
+def _length(value: Any) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    return f"<{len(text)} characters>"
+
+
+def _shown(value: Any, *, free: bool, depth: int = 0) -> Any:
+    """``value`` as a prompt may show it: free text as its length, other strings scrubbed (module docstring)."""
+    if isinstance(value, dict):
+        if depth >= _MAX_PREVIEW_DEPTH:
+            return _length(value)
+        return {
+            str(key): _shown(item, free=free or free_text_argument(str(key)), depth=depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        if depth >= _MAX_PREVIEW_DEPTH:
+            return _length(value)
+        return [_shown(item, free=free, depth=depth + 1) for item in value]
+    if value is None or isinstance(value, bool):
+        return value
+    if free:
+        return _length(value)
+    if isinstance(value, str):
+        return _scrubbed(value)
+    return value if isinstance(value, int | float) else _scrubbed(str(value))
 
 
 def _preview(value: Any) -> str:
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    """What a prompt says the call sends: a command scrubbed, arguments by :func:`_shown`; at most
+    :data:`_PREVIEW_CHARS` characters."""
+    shown = _shown(value, free=False)
+    text = shown if isinstance(shown, str) else json.dumps(shown, ensure_ascii=False, default=str)
     return text if len(text) <= _PREVIEW_CHARS else text[:_PREVIEW_CHARS] + " …"
 
 
 def _ask(tool: str, where: str, what: Any, rule_key: str, *, tainted: bool) -> Decision:
-    warning = "This chat has read your private (Telegram) data. " if tainted else ""
+    warning = "This chat has read your private data (Telegram or browser history). " if tainted else ""
     return Decision(
         allow=False,
         approve=True,
@@ -441,8 +705,9 @@ def _decide_ask(tool: str, args: dict[str, Any], policy: EgressPolicy, *, tainte
     if tool == "desktop_preview" and all(_is_local_target(u) for u in urls):
         return Decision(allow=True)
     if urls:
-        hosts = sorted({(urlsplit(u if "://" in u else f"https://{u}").hostname or u) for u in urls})
-        return _ask(tool, ", ".join(hosts), args, f"mordred.egress:{tool}:{','.join(hosts)}", tainted=tainted)
+        hosts = sorted({_prompt_host(u) for u in urls})
+        shown = _unparseable_as_length(tool, args)
+        return _ask(tool, ", ".join(hosts), shown, _url_rule_key(tool, urls), tainted=tainted)
     return _ask(tool, "an external service", args, f"mordred.egress:{tool}", tainted=tainted)
 
 
@@ -499,8 +764,18 @@ def _bridge_entry(item: Any) -> tuple[str, dict[str, Any]] | None:
     return name, arguments
 
 
-def _decide_bridge(args: dict[str, Any], session_id: str | None, policy: EgressPolicy) -> Decision | None:
-    """Decide a ``tool_call`` by its inner calls; ``None`` if it is malformed."""
+def _decide_bridge(
+    args: dict[str, Any], session_id: str | None, policy: EgressPolicy, home: Path | None
+) -> Decision | None:
+    """Decide a ``tool_call`` by its inner calls; ``None`` if it is malformed.
+
+    A refusal of any entry refuses the batch, also after an entry that only
+    asks. Entries that ask are combined into one prompt that lists every one
+    of them (:func:`_combine_approvals`), so approving the batch never runs an
+    entry the user was not shown. A batch that reads imported history runs
+    every entry under the reader guard, so ``[telegram_ask, terminal]`` is
+    refused as a whole.
+    """
     entries = _bridge_entries(args)
     if entries is None:
         # Hermes cannot run a malformed bridge either. Say what is wrong with
@@ -515,43 +790,133 @@ def _decide_bridge(args: dict[str, Any], session_id: str | None, policy: EgressP
                 "Fix the call and try again."
             ),
         )
+    reader_batch = any(name in READER_TOOLS for name, _ in entries)
     taints = False
+    approvals: list[Decision] = []
     for name, arguments in entries:
-        inner = decide(name, arguments, session_id, policy)
-        if not inner.allow:
+        inner = _decide_tool(name, arguments, session_id, policy, home=home, reader_batch=reader_batch)
+        if not inner.allow and not inner.approve:
             return inner
+        if inner.approve:
+            approvals.append(inner)
         taints = taints or inner.taints
-    return Decision(allow=True, taints=taints)
+    if approvals:
+        return replace(_combine_approvals(approvals), taints=taints, reader=reader_batch)
+    return Decision(allow=True, taints=taints, reader=reader_batch)
 
 
-def decide(tool: str, args: dict[str, Any] | None, session_id: str | None, policy: EgressPolicy) -> Decision:
-    """Allow or block one tool call. Pure apart from reading the taint set."""
+def _combine_approvals(approvals: list[Decision]) -> Decision:
+    """One approval prompt for every entry of a ``tool_call`` batch that asks.
+
+    Hermes asks once for the whole bridge call, so the prompt must show each
+    entry that needs approval. The ``rule_key`` covers exactly this set of
+    entries: answering "always" for a batch never pre-approves a different
+    batch or one of its entries on its own.
+    """
+    if len(approvals) == 1:
+        return approvals[0]
+    keys = "\n".join(sorted(decision.rule_key for decision in approvals))
+    digest = hashlib.sha256(keys.encode("utf-8")).hexdigest()[:12]
+    listed = "\n".join(f"{number}. {decision.message}" for number, decision in enumerate(approvals, start=1))
+    return replace(
+        approvals[0],
+        rule_key=f"mordred.egress.batch:{digest}",
+        message=f"Mordred: this tool_call batch has {len(approvals)} calls that need your approval:\n{listed}",
+    )
+
+
+def decide(
+    tool: str,
+    args: dict[str, Any] | None,
+    session_id: str | None,
+    policy: EgressPolicy,
+    *,
+    home: Path | None = None,
+) -> Decision:
+    """Allow or block one tool call.
+
+    Pure apart from reading the taint/reader sets and, when ``home`` is given,
+    the durable reader record (:func:`is_reader_session`).
+    """
     args = args if isinstance(args, dict) else {}
     if tool == BRIDGE_CALL_TOOL:
-        bridged = _decide_bridge(args, session_id, policy)
+        bridged = _decide_bridge(args, session_id, policy, home)
         if bridged is not None:
             return bridged
-    return _decide_tool(tool, args, session_id, policy)
+    return _decide_tool(tool, args, session_id, policy, home=home)
 
 
-def _decide_tool(tool: str, args: dict[str, Any], session_id: str | None, policy: EgressPolicy) -> Decision:
+def _decide_tool(
+    tool: str,
+    args: dict[str, Any],
+    session_id: str | None,
+    policy: EgressPolicy,
+    *,
+    home: Path | None = None,
+    reader_batch: bool = False,
+) -> Decision:
+    level = policy.level
+    # The operator's tool blocklist wins first; at level "off" it still
+    # covers Mordred's own tools (an operator may switch imports off entirely).
+    if tool in policy.blocked_tools and (level != "off" or tool in FIRST_PARTY_TOOLS):
+        return _block(level, "egress.blocked_tool", f"the tool {tool} is blocklisted.")
+    if tool in READER_TOOLS:
+        if session_id is None:
+            return _block(
+                level, "egress.reader_no_session", f"{tool} reads imported history and needs a session identity."
+            )
+        return Decision(allow=True, taints=True, reader=True)
+    web = False
+    if reader_batch or is_reader_session(session_id, home=home):
+        if tool not in READER_ALLOWED and tool not in READER_WEB_TOOLS:
+            return _block(
+                "lockdown",
+                "egress.reader_locked",
+                f"this session has read imported history; {tool} is disabled until a new session.",
+            )
+        web = tool in READER_WEB_TOOLS
+    decision = _decide_level(tool, args, session_id, policy)
+    if web and (decision.allow or decision.approve):
+        # Stricter level rules (a block) win; otherwise the user decides.
+        return _reader_web(tool, args, policy)
+    return decision
+
+
+def _reader_web(tool: str, args: dict[str, Any], policy: EgressPolicy) -> Decision:
+    """Ask before a reader session searches or loads a web address, at every level."""
+    hard = _decide_blocklist(tool, args, policy)
+    if not hard.allow:
+        return hard
+    urls = _urls(tool, args)
+    where = ", ".join(sorted({(urlsplit(u if "://" in u else f"https://{u}").hostname or u) for u in urls}))
+    digest = hashlib.sha256(json.dumps(args, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
+    return Decision(
+        allow=False,
+        approve=True,
+        reason="egress.reader_web",
+        rule_key=f"mordred.egress.reader_web:{tool}:{digest}",
+        message=(
+            "This chat has read imported private history. "
+            f"Mordred: {tool} wants to use the internet ({where or 'a web search'}). It will send: {_preview(args)}"
+        ),
+    )
+
+
+def _decide_level(tool: str, args: dict[str, Any], session_id: str | None, policy: EgressPolicy) -> Decision:
+    """The configured level's rules (reader tools and the reader guard come first)."""
     level = policy.level
     if level == "off":
         return Decision(allow=True)
-    if tool in policy.blocked_tools:
-        return _block(level, "egress.blocked_tool", f"the tool {tool} is blocklisted.")
     tainted = policy.taint and is_tainted(session_id)
     # Under "ask" a tainted session keeps asking (the prompt says the chat has
     # read private data); the stricter levels still lock it down.
     lock = tainted and (level != "ask" or policy.lockdown_after_private_data)
     effective = "lockdown" if lock else level
-    if tool in FIRST_PARTY_TOOLS:
-        return Decision(allow=True, taints=tool in TAINT_SOURCES)
     guard = _session_guard(tool, tainted, effective)
     if guard is not None:
         return guard
-    if _is_local(tool):
-        return Decision(allow=True)
+    if _is_local(tool) or tool in FIRST_PARTY_TOOLS:
+        return Decision(allow=True)  # local, or a destination fixed in code (never a taint source here)
     if tool == "delegate_task":
         return Decision(allow=True)  # child agents' tools pass through this hook too
     if effective == "ask":

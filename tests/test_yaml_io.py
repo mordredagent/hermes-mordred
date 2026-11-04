@@ -1,9 +1,9 @@
 """Unit tests for the shared YAML mapping loader.
 
-Covers every branch of :func:`mordred_hermes._yaml_io.load_yaml_mapping`,
+Covers every branch of :func:`mordred_hermes._core._yaml_io.load_yaml_mapping`,
 including the two failure-handling knobs the migration relies on: the
 parametrized ``catch`` set and the optional ``log`` — plus every branch of
-the :func:`mordred_hermes._yaml_io.load_plugin_section` extraction built on
+the :func:`mordred_hermes._core._yaml_io.load_plugin_section` extraction built on
 top of it.
 """
 
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes._yaml_io import load_plugin_section, load_yaml_mapping
+from mordred_hermes._core._yaml_io import load_plugin_section, load_yaml_mapping
 
 
 def test_missing_file_returns_empty(tmp_path: Path) -> None:

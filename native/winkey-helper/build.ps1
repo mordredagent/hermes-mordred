@@ -20,7 +20,7 @@ try {
     }
     if (-not $InstallDir) {
         # ASCII JSON preserves Unicode paths across Python/PowerShell code pages.
-        $resolve = "import json; from mordred_hermes._home import hermes_home; print(json.dumps(str(hermes_home().joinpath('bin'))))"
+        $resolve = "import json; from mordred_hermes._core._home import hermes_home; print(json.dumps(str(hermes_home().joinpath('bin'))))"
         $resolved = @(& $Python -c $resolve)
         if ($LASTEXITCODE -ne 0 -or $resolved.Count -ne 1) { throw 'Cannot resolve the Hermes home with the selected Python.' }
         $InstallDir = [string]($resolved[0] | ConvertFrom-Json)

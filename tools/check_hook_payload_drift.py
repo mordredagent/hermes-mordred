@@ -3,7 +3,7 @@
 
 This tool statically verifies both halves of Mordred's Hermes hook contract:
 the contract hook names still exist in ``hermes_cli.plugins.VALID_HOOKS``, and
-every core ``invoke_hook("<name>", key=value, ...)`` dispatch site still passes
+every core ``invoke_hook`` / ``ainvoke_hook`` dispatch site still passes
 the payload fields Mordred consumes (``tools/hook_payload_contract.json``).
 It uses pure ``ast`` — nothing is imported or executed — so it works against
 both an installed wheel and an uninstalled upstream checkout.
@@ -15,8 +15,10 @@ Rules:
 - A contract field missing at **any** literal dispatch site is drift — the
   plugins read these via ``kwargs.get`` so they would degrade silently.
 - A site spreading ``**kwargs`` is statically unknowable and is skipped.
-- Imports of ``invoke_hook`` from both ``hermes_cli.plugins`` and
+- Imports of either dispatcher from both ``hermes_cli.plugins`` and
   ``hermes_cli.lifecycle`` are resolved under any local alias.
+- A module-level wrapper forwarding its first argument and untouched
+  ``**kwargs`` to a dispatcher is scanned at its literal call sites too.
 
 Exit status: 0 = no drift, 1 = drift (report on stdout), 2 = usage error.
 
@@ -58,16 +60,16 @@ DEFAULT_EXCLUDES = frozenset(
     }
 )
 
-#: Callee names that count as a hook dispatch. Core uses the plain import and
-#: the ``invoke_hook as _invoke_hook`` alias; attribute calls
-#: (``plugins.invoke_hook``) are matched by attribute name.
-_DISPATCH_NAMES = frozenset({"invoke_hook", "_invoke_hook"})
+#: Core uses sync and async imports and their underscored aliases; attribute
+#: calls (``plugins.ainvoke_hook``) are matched by attribute name.
+_DISPATCH_EXPORTS = frozenset({"invoke_hook", "ainvoke_hook"})
+_DISPATCH_NAMES = _DISPATCH_EXPORTS | frozenset({"_invoke_hook", "_ainvoke_hook"})
 _DISPATCH_MODULES = frozenset({"hermes_cli.plugins", "hermes_cli.lifecycle"})
 
 
 @dataclass(frozen=True)
 class DispatchSite:
-    """One literal ``invoke_hook("<hook>", ...)`` call in the scanned tree."""
+    """One literal sync or async hook dispatch in the scanned tree."""
 
     file: str
     line: int
@@ -75,28 +77,78 @@ class DispatchSite:
     has_dynamic_kwargs: bool
 
 
-def _dispatch_names(tree: ast.AST) -> frozenset[str]:
-    """Resolve supported ``invoke_hook`` imports to their local names."""
-    names = set(_DISPATCH_NAMES)
+def _dispatch_names(tree: ast.AST) -> dict[str, frozenset[str]]:
+    """Resolve dispatcher imports and one-hop, payload-preserving local wrappers."""
+    names: dict[str, frozenset[str]] = dict.fromkeys(_DISPATCH_NAMES, frozenset())
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom) or node.module not in _DISPATCH_MODULES:
             continue
         for imported in node.names:
-            if imported.name == "invoke_hook":
-                names.add(imported.asname or imported.name)
-    return frozenset(names)
+            if imported.name in _DISPATCH_EXPORTS:
+                names[imported.asname or imported.name] = frozenset()
+    direct_names = frozenset(names)
+    for node in ast.iter_child_nodes(tree):
+        forwarder = _forwarding_dispatch(node, direct_names)
+        if forwarder is not None:
+            name, bound_parameters = forwarder
+            names[name] = bound_parameters
+    return names
 
 
-def _hook_name(node: ast.Call, dispatch_names: frozenset[str]) -> str | None:
-    """The literal hook name when ``node`` is a dispatch call, else None."""
+def _forwarding_dispatch(node: ast.AST, direct_names: frozenset[str]) -> tuple[str, frozenset[str]] | None:
+    """Recognize a local wrapper without guessing about payload transformations."""
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.args.kwarg is None:
+        return None
+    positional = node.args.posonlyargs + node.args.args
+    if not positional:
+        return None
+    children = list(ast.walk(node))
+    if any(isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) for child in children[1:]):
+        return None
+    calls = [child for child in children if isinstance(child, ast.Call) and _callee_name(child) in direct_names]
+    if len(calls) != 1:
+        return None
+    call = calls[0]
+    hook, payload = positional[0].arg, node.args.kwarg.arg
+    if not (
+        len(call.args) == 1
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == hook
+        and len(call.keywords) == 1
+        and call.keywords[0].arg is None
+        and isinstance(call.keywords[0].value, ast.Name)
+        and call.keywords[0].value.id == payload
+    ):
+        return None
+    # Other payload references could mutate/filter it or call a mutating helper.
+    # A reassigned hook name would also invalidate the wrapper's literal sites.
+    if any(
+        isinstance(child, ast.Name)
+        and (
+            (child.id == payload and child is not call.keywords[0].value)
+            or (child.id == hook and not isinstance(child.ctx, ast.Load))
+        )
+        for child in children
+    ):
+        return None
+    # Python binds these keyword names to wrapper parameters, so they never
+    # enter **kwargs. Positional-only parameter names can still enter **kwargs.
+    return node.name, frozenset(arg.arg for arg in node.args.args + node.args.kwonlyargs)
+
+
+def _callee_name(node: ast.Call) -> str | None:
+    """Return a plain or attribute call's final name."""
     func = node.func
     if isinstance(func, ast.Name):
-        callee = func.id
-    elif isinstance(func, ast.Attribute):
-        callee = func.attr
-    else:
-        return None
-    if callee not in dispatch_names or not node.args:
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _hook_name(node: ast.Call, dispatch_names: dict[str, frozenset[str]]) -> str | None:
+    """The literal hook name when ``node`` is a dispatch call, else None."""
+    if _callee_name(node) not in dispatch_names or not node.args:
         return None
     first = node.args[0]
     if isinstance(first, ast.Constant) and isinstance(first.value, str):
@@ -137,11 +189,14 @@ def extract_hook_payload_fields(
             hook = _hook_name(node, dispatch_names)
             if hook is None:
                 continue
+            bound_parameters = dispatch_names.get(_callee_name(node) or "", frozenset())
             sites.setdefault(hook, []).append(
                 DispatchSite(
                     file=str(rel),
                     line=node.lineno,
-                    fields=frozenset(kw.arg for kw in node.keywords if kw.arg is not None),
+                    fields=frozenset(
+                        kw.arg for kw in node.keywords if kw.arg is not None and kw.arg not in bound_parameters
+                    ),
                     has_dynamic_kwargs=any(kw.arg is None for kw in node.keywords),
                 )
             )
@@ -273,7 +328,9 @@ def compare(contract: dict[str, list[str]], sites: dict[str, list[DispatchSite]]
     for hook in sorted(contract):
         hook_sites = sites.get(hook, [])
         if not hook_sites:
-            drift.append(f"{hook}: no invoke_hook dispatch site found — core may have stopped firing this hook")
+            drift.append(
+                f"{hook}: no invoke_hook/ainvoke_hook dispatch site found — core may have stopped firing this hook"
+            )
             continue
         for site in hook_sites:
             if site.has_dynamic_kwargs:

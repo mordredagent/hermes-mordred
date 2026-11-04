@@ -19,8 +19,8 @@ from typing import Literal
 
 import psutil
 
+from .._core._windows_runtime import environment_root
 from .._private_fs import PrivateFSError, inspect_managed_installation_image, open_optional_confidential_directory
-from .._windows_runtime import environment_root
 from ._runtime_probe import GatewayRuntime
 
 

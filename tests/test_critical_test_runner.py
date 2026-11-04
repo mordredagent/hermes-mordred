@@ -41,16 +41,32 @@ def test_unsupported_platform_is_not_foreign_platform_skip_coverage() -> None:
         tool().select_cases("unknown")
 
 
-def test_missing_node_id_is_a_real_collection_failure(tmp_path: Path) -> None:
-    path = tmp_path / "test_small.py"
+@pytest.fixture
+def temporary_suite(tmp_path: Path) -> Path:
+    (tmp_path / "pytest.ini").write_text("[pytest]\nmarkers =\n    integration: live integration tests\n")
+    return tmp_path / "test_small.py"
+
+
+def test_missing_node_id_is_a_real_collection_failure(temporary_suite: Path) -> None:
+    path = temporary_suite
     path.write_text("def test_present(): assert True\n")
     assert tool().run_cases([f"{path}::test_absent"], collect_only=True) == 4
 
 
-def test_test_failure_is_propagated(tmp_path: Path) -> None:
-    path = tmp_path / "test_small.py"
+def test_test_failure_is_propagated(temporary_suite: Path) -> None:
+    path = temporary_suite
     path.write_text("def test_security_regression(): assert False\n")
     assert tool().run_cases([f"{path}::test_security_regression"]) == 1
+
+
+def test_integration_failure_is_excluded(temporary_suite: Path) -> None:
+    temporary_suite.write_text(
+        "import pytest\n"
+        "@pytest.mark.integration\n"
+        "def test_integration_failure(): assert False\n"
+        "def test_unit(): assert True\n"
+    )
+    assert tool().run_cases([str(temporary_suite)]) == 0
 
 
 def test_empty_selection_cannot_accidentally_run_the_full_suite(monkeypatch) -> None:
@@ -62,3 +78,11 @@ def test_empty_selection_cannot_accidentally_run_the_full_suite(monkeypatch) -> 
     monkeypatch.setattr(runner.subprocess, "run", refuse_full_sweep)
     with pytest.raises(ValueError, match="empty"):
         runner.run_cases([])
+
+
+def test_critical_feedback_covers_passive_database_status_and_native_source_refusal():
+    for platform in ("linux", "darwin", "win32"):
+        nodes = [node for _, node in tool().select_cases(platform)]
+        assert "tests/test_dbcrypt_capability.py::test_driver_import_is_not_readiness" in nodes
+        assert "tests/test_keyvault_mail_key.py::test_read_backend_never_upgrades_or_enrolls" in nodes
+        assert ("tests/test_dbcrypt_authority.py::test_hundred_operations_one_unwrap" in nodes) is (platform != "win32")

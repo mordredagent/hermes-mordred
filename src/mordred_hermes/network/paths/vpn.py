@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, Protocol
 
-from ..._policy_types import PolicyMode as PolicyMode
+from ..._core._policy_types import PolicyMode as PolicyMode
 from .._exceptions import BringupFailed
 from ..guidance import MACOS_MULLVAD_APP_CLI, mullvad_install_guidance
 
@@ -93,7 +93,7 @@ def _default_runner(
     """
     command = list(argv)
     if sys.platform == "win32":
-        return subprocess.run(
+        return subprocess.run(  # noqa: S603 - list argv, no shell
             command,
             check=check,
             capture_output=capture_output,
@@ -103,7 +103,7 @@ def _default_runner(
             stdin=subprocess.DEVNULL,
             creationflags=_CREATE_NO_WINDOW,
         )
-    return subprocess.run(
+    return subprocess.run(  # noqa: S603 - list argv, no shell
         command,
         check=check,
         capture_output=capture_output,

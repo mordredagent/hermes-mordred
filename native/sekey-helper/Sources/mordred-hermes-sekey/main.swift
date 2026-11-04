@@ -54,6 +54,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import LocalAuthentication
 import Security
 
 // MARK: - OSStatus mirror
@@ -108,7 +109,7 @@ func hexEncode(_ d: Data) -> String {
 //   1. MORDRED_SEKEY_STORE — explicit absolute directory (authoritative).
 //   2. $HERMES_HOME/mordred/keyvault/sekey
 //   3. ~/.hermes/mordred/keyvault/sekey
-// This mirrors mordred_hermes._home.hermes_home so the SE blobs live under
+// This mirrors mordred_hermes._core._home.hermes_home so the SE blobs live under
 // the same keyvault tree the Python side uses for everything else.
 
 func storeDir() -> URL {
@@ -457,10 +458,10 @@ func makeAccessControl(biometry: Bool) throws -> SecAccessControl {
 
 // MARK: - Operations
 
-func loadKey(tagHex: String) throws -> SecureEnclave.P256.KeyAgreement.PrivateKey {
+func loadKey(tagHex: String, authenticationContext: LAContext? = nil) throws -> SecureEnclave.P256.KeyAgreement.PrivateKey {
     let blob = try readBlob(tagHex: tagHex)
     do {
-        return try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: blob)
+        return try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: blob, authenticationContext: authenticationContext)
     } catch {
         throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "failed to load enclave key: \(error.localizedDescription)")
     }
@@ -537,14 +538,15 @@ func deleteKey(tagHex: String) throws {
     }
 }
 
-func ecdh(tagHex: String, peerPub: Data) throws -> Data {
-    let key = try loadKey(tagHex: tagHex)
+func ecdh(tagHex: String, peerPub: Data, authenticationContext: LAContext? = nil, checkPresence: (() throws -> Void)? = nil) throws -> Data {
+    let key = try loadKey(tagHex: tagHex, authenticationContext: authenticationContext)
     let peer: P256.KeyAgreement.PublicKey
     do {
         peer = try P256.KeyAgreement.PublicKey(x963Representation: peerPub)
     } catch {
         throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "invalid peer public key: \(error.localizedDescription)")
     }
+    try checkPresence?()
     let shared: SharedSecret
     do {
         // This is the authorization boundary — triggers the Touch ID /
@@ -729,6 +731,12 @@ func fail(_ message: String) -> Never {
 
 // MARK: - Main
 
+if CommandLine.arguments.count > 1 {
+    guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--presence-session",
+          let seconds = Int(CommandLine.arguments[2]) else { fail("invalid presence arguments") }
+    presenceSession(seconds: seconds)
+}
+
 let input = FileHandle.standardInput.readDataToEndOfFile()
 guard let request = try? JSONDecoder().decode(Request.self, from: input) else {
     fail("invalid JSON request on stdin")
@@ -755,6 +763,8 @@ do {
             fail("missing or invalid peer_pub_hex")
         }
         emit(["shared_hex": hexEncode(try ecdh(tagHex: requireTagHex(request), peerPub: peer))])
+    case "capabilities":
+        emit(["presence_session": 1])
     case "probe":
         try probe()
         emit(["ok": true])

@@ -78,7 +78,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 from ..keyvault._identity import resolve_root
 from ..keyvault._memory_hook import memory_marker_path, memory_optout_marker_path
 from ..keyvault._runtime_env import _env_optout_marker_path
@@ -167,12 +167,12 @@ def _enrolled_names(root: Path) -> set[str]:
 
 
 def _env_target_ready(*, home: Path, root: Path) -> bool:
-    """Whether the ``env`` target is enrolled and actually injecting.
+    """Whether the ``env`` target is enrolled and the runtime shim actually loads it.
 
     ``.env`` enrolled and not opted out — the state agent-memory encryption
-    rides on to get ``HERMES_MEMORY_KEY`` to the runtime (see
-    :mod:`mordred_hermes.wizard.memory_cli`'s module docstring): the key is
-    carried by the ``.env`` injection shim, so it does not matter that the
+    rides on to get ``HERMES_MEMORY_KEY`` to the runtime's process-private holder
+    (see :mod:`mordred_hermes.wizard.memory_cli`'s module docstring): the key is
+    carried by the ``.env`` shim, so it does not matter that the
     manifest still lists ``.env`` as enrolled if the opt-out marker has
     suppressed the shim. Shared by ``memory_cli._enable_gate_reason`` and
     ``setup_cli``'s memory step so the two do not drift on what "the env

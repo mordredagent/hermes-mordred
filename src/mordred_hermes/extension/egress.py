@@ -1,9 +1,9 @@
 """Outbound route resolution shared by the extension server's own clients.
 
 The extension server talks to third parties directly (Discord's bot API, the
-Telegram MTProto network, Venice.ai). None of those clients may read ambient
-proxy environment variables on their own, so each resolves ONE explicit route
-here and passes it to its transport. The rules:
+Telegram MTProto network, Venice.ai, wallet JSON-RPC nodes). None of those
+clients may read ambient proxy environment variables on their own, so each
+resolves ONE explicit route here and passes it to its transport. The rules:
 
 - **Tor selected** → a loopback SOCKS proxy is mandatory. No proxy, a
   non-loopback proxy, or an HTTP proxy all fail closed.
@@ -20,7 +20,7 @@ import ipaddress
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
-from .._home import hermes_home
+from .._core._home import hermes_home
 
 _PROTECTED_NETWORK_PATHS = frozenset({"tor", "vpn"})
 

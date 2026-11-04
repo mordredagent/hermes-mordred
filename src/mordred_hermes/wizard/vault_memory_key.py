@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 from . import _term
 from .vault_cli import _open_hot_path_or_report, _resolve_root
 
@@ -80,8 +80,9 @@ def _effective_memory_key(text: str) -> str | None:
     """The ``HERMES_MEMORY_KEY`` value the runtime shim would use, or ``None``.
 
     Parsed with ``dotenv_values`` (last-wins, no interpolation, quotes stripped) —
-    exactly the value :func:`...keyvault._runtime_env.inject_vault_env` injects at
-    startup, matching the key Mordred's memory-encryption runtime reads.
+    exactly the value :func:`...keyvault._runtime_env.inject_vault_env` hands to the
+    process-private holder at startup, matching the key Mordred's memory-encryption
+    runtime reads.
     """
     import io
 
@@ -95,13 +96,18 @@ def _ambient_memory_key() -> str | None:
 
     A user who already enabled ``memory.encryption`` has their key in
     ``os.environ`` (Hermes loads ``~/.hermes/.env`` into the environment at
-    startup) or still in the plaintext ``~/.hermes/.env`` not yet migrated into the
-    vault. ``set-memory-key`` must **adopt** that key rather than mint a new one —
-    a fresh key would override theirs at startup and orphan memories encrypted
-    under it. Returns the env value first (it is what the memory tool reads), then
-    the plaintext ``.env`` value; ``None`` if neither holds a usable key.
+    startup), in this process's holder after the runtime shim evicted it, or still
+    in the plaintext ``~/.hermes/.env`` not yet migrated into the vault.
+    ``set-memory-key`` must **adopt** that key rather than mint a new one — a fresh
+    key would override theirs at startup and orphan memories encrypted under it.
+    Returns the live value first (it is what the memory tool reads), then the
+    plaintext ``.env`` value; ``None`` if neither holds a usable key. A child of a
+    running Hermes does not inherit the live value, so only a key that is also in
+    the plaintext ``.env`` is found there.
     """
-    env_value = os.environ.get(_MEMORY_KEY_ENV)
+    from ..keyvault._memory_key_holder import memory_key_value
+
+    env_value = memory_key_value(os.environ)
     if _is_valid_memory_key(env_value):
         return env_value
     try:
@@ -157,8 +163,8 @@ def _env_with_memory_key(text: str, value: str) -> str:
 def _print_memory_config_hint() -> None:
     """Tell the operator what the stored key does and does not do (never prints the key)."""
     print(
-        f"The key stays protected at rest by the vault; the runtime shim injects {_MEMORY_KEY_ENV} into the "
-        "environment at startup, where Mordred's memory hook reads it. Storing the key does not seal "
+        f"The key stays protected at rest by the vault; the runtime shim loads {_MEMORY_KEY_ENV} into process "
+        "memory at startup, where Mordred's memory hook reads it. Storing the key does not seal "
         "anything by itself — turn agent-memory encryption on with "
         "`hermes-mordred encryption enable memory` (it arms the hook and seals existing memory files)."
     )
@@ -189,18 +195,39 @@ def ensure_memory_key(
     store: AnchorStore | None = None,
     flow_session: FlowSession | None = None,
 ) -> tuple[int, str | None]:
+    if not rotate:
+        return _ensure_memory_key(root=root, backend=backend, store=store, flow_session=flow_session)
+    from ..keyvault._database_mutation import database_key_mutation
+    from ..keyvault._identity import _vault_database_home
+
+    try:
+        with database_key_mutation(root=_vault_database_home(root), generation=None):
+            return _ensure_memory_key(root=root, rotate=True, backend=backend, store=store, flow_session=flow_session)
+    except (OSError, RuntimeError, ValueError) as exc:
+        _term.emit_error(f"cannot rotate native memory key: {exc}")
+        return 1, None
+
+
+def _ensure_memory_key(
+    *,
+    root: Path,
+    rotate: bool = False,
+    backend: NativeBackend | None = None,
+    store: AnchorStore | None = None,
+    flow_session: FlowSession | None = None,
+) -> tuple[int, str | None]:
     """Ensure the vault ``.env`` carries a usable ``HERMES_MEMORY_KEY``, and report it.
 
     Returns ``(exit_code, key_value)`` — the value is the effective key the
-    runtime shim will inject (``None`` whenever the exit code is 1), so a
+    runtime shim will load (``None`` whenever the exit code is 1), so a
     caller that must seal files with it does not have to open the vault a
     second time (a second Touch ID prompt). It is never printed.
 
     The key Mordred's memory-encryption runtime is keyed by (AES-256-GCM, see
     :mod:`mordred_hermes.keyvault.memory_crypto`). Keeping it in the vault
     ``.env`` means the device wrapping key protects it at rest and the runtime
-    decrypt shim (:mod:`mordred_hermes.keyvault._runtime_env`) injects it into
-    the environment at startup.
+    decrypt shim (:mod:`mordred_hermes.keyvault._runtime_env`) loads it into the
+    process-private holder at startup.
 
     Opens the vault on the **hot path** (the device wrapping key — Secure Enclave
     or its software fallback, no passphrase) and decides off the *effective*
@@ -209,15 +236,17 @@ def ensure_memory_key(
 
     - **Already usable** (the effective value decodes to 32 bytes) and no
       ``rotate`` → no-op; the ``.env`` is left untouched.
-    - **No usable key** → write one and re-enroll, collapsing the file to a single
+    - **Absent key** → write one and re-enroll, collapsing the file to a single
       assignment. Without ``rotate`` it **adopts** a key the user is already using
       (live env, then the plaintext home ``.env``) so migrating into the vault
       keeps existing encrypted memories readable; otherwise it mints a fresh key.
     - **Malformed** (the effective value is invalid but an earlier assignment is a
       valid key) and no ``rotate`` → **refuse** (rc 1) rather than guess which key
       encrypted existing memories.
-    - ``rotate`` → always mint a fresh key, warning that memories encrypted under
-      the previous key can no longer be decrypted.
+    - **Invalid enrolled key** → refuse automatic replacement; retain the
+      authenticated source for explicit repair/recovery.
+    - ``rotate`` → mint a fresh key only from a valid source under preceding
+      database exclusion, warning that older memories cannot be decrypted.
 
     ``backend`` / ``store`` default to the production implementations; tests inject
     fakes. Returns 0 on success (no-op, store, or adoption), 1 on an uninitialised
@@ -228,8 +257,10 @@ def ensure_memory_key(
     ``enable env`` in one setup run) the flow's already open vault is reused,
     so this costs no second unlock / Touch ID.
     """
+    from .._core._database_contracts import DatabaseRefused
     from ..keyvault import anchor, vault
     from ..keyvault._exceptions import WrapError
+    from ._vault_entries import _source_change_lease
 
     opened = _open_hot_path_or_report(root, backend=backend, store=store, flow_session=flow_session)
     if opened is None:
@@ -261,8 +292,8 @@ def ensure_memory_key(
             _term.emit_error(
                 f"the vault .env at {root} has a {_MEMORY_KEY_ENV} whose effective (last) value is not a "
                 f"usable 32-byte key, but an earlier assignment is. Refusing to guess which key encrypted "
-                f"existing memories: fix the .env by hand, or pass --rotate to replace it (which orphans "
-                f"memories encrypted under the old key)."
+                f"existing memories: restore an authenticated valid source before retrying. Automatic "
+                f"replacement is refused, including with --rotate."
             )
             return 1, None
 
@@ -279,9 +310,15 @@ def ensure_memory_key(
 
         new_text = _env_with_memory_key(existing, chosen)
         try:
-            opened.enroll_file(".env", new_text.encode("utf-8"))
+            plaintext = new_text.encode("utf-8")
+            with _source_change_lease(root, opened, ".env", plaintext) as lease:
+                if orphan_risk:
+                    from .memory_cli import _warn_external_backups
+
+                    _warn_external_backups()
+                opened.enroll_file(".env", plaintext, database_lease=lease)
             generation = opened.generation
-        except (vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
+        except (DatabaseRefused, vault.VaultError, anchor.AnchorError, WrapError, OSError) as exc:
             _term.emit_error(f"cannot store {_MEMORY_KEY_ENV}: {exc}")
             return 1, None
 

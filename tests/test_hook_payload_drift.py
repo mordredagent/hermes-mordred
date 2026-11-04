@@ -124,6 +124,131 @@ class TestOwnedSources:
 
 
 class TestExtract:
+    @pytest.mark.parametrize("signature", ["name, session_id=None, **kwargs", "name, *, session_id=None, **kwargs"])
+    def test_wrapper_bound_keywords_are_not_dispatched_payload(self, tmp_path: Path, signature: str) -> None:
+        _write(
+            tmp_path,
+            "finalizer.py",
+            f"""\
+            from hermes_cli.lifecycle import invoke_hook as dispatch
+            def emit({signature}):
+                return dispatch(name, **kwargs)
+            emit("post_llm_call", session_id="s")
+            """,
+        )
+        report = drift.compare({"post_llm_call": ["session_id"]}, drift.extract_hook_payload_fields(tmp_path))
+        assert len(report) == 1
+        assert "missing payload field(s): session_id" in report[0]
+
+    def test_wrapper_positional_only_name_can_still_be_forwarded_as_keyword(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "finalizer.py",
+            """\
+            from hermes_cli.lifecycle import invoke_hook as dispatch
+            def emit(name, session_id=None, /, **kwargs):
+                return dispatch(name, **kwargs)
+            emit("post_llm_call", session_id="s")
+            """,
+        )
+        assert drift.compare({"post_llm_call": ["session_id"]}, drift.extract_hook_payload_fields(tmp_path)) == []
+
+    @pytest.mark.parametrize("asynchronous", [False, True])
+    @pytest.mark.parametrize("payload,expected", [("session_id='s'", []), ("model='m'", ["session_id"])])
+    def test_local_forwarder_preserves_payload_contract(self, tmp_path: Path, asynchronous, payload, expected) -> None:
+        dispatcher = "ainvoke_hook" if asynchronous else "invoke_hook"
+        _write(
+            tmp_path,
+            "finalizer.py",
+            f"""\
+            from hermes_cli.lifecycle import {dispatcher} as dispatch
+
+            {"async " if asynchronous else ""}def emit(name, logger, **kwargs):
+                try:
+                    return {"await " if asynchronous else ""}dispatch(name, **kwargs)
+                except Exception:
+                    logger.warning(name)
+                    return []
+
+            {"async " if asynchronous else ""}def finish(logger):
+                {"await " if asynchronous else ""}emit("post_llm_call", logger, {payload})
+            """,
+        )
+        report = drift.compare({"post_llm_call": ["session_id"]}, drift.extract_hook_payload_fields(tmp_path))
+        if expected:
+            assert len(report) == 1
+            assert "missing payload field(s): session_id" in report[0]
+        else:
+            assert report == []
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "kwargs.pop('session_id', None)\nreturn dispatch(name, **kwargs)",
+            "name = 'other'\nreturn dispatch(name, **kwargs)",
+            "return dispatch('other', **kwargs)",
+            "def nested():\n    return dispatch(name, **kwargs)\nreturn []",
+        ],
+    )
+    def test_nontransparent_forwarder_does_not_satisfy_contract(self, tmp_path: Path, body: str) -> None:
+        _write(
+            tmp_path,
+            "finalizer.py",
+            "from hermes_cli.lifecycle import invoke_hook as dispatch\n"
+            "def emit(name, **kwargs):\n" + textwrap.indent(body, "    ") + "\n"
+            "emit('post_llm_call', session_id='s')\n",
+        )
+        report = drift.compare({"post_llm_call": ["session_id"]}, drift.extract_hook_payload_fields(tmp_path))
+        assert len(report) == 1
+        assert "no invoke_hook" in report[0]
+
+    @pytest.mark.parametrize("module", ["hermes_cli.plugins", "hermes_cli.lifecycle"])
+    @pytest.mark.parametrize("alias", ["ainvoke_hook", "_ainvoke_hook", "dispatch_gateway_hook"])
+    def test_async_gateway_dispatch_satisfies_payload_contract(self, tmp_path: Path, module: str, alias: str) -> None:
+        _write(
+            tmp_path,
+            "gateway.py",
+            f"""\
+            from {module} import ainvoke_hook as {alias}
+
+            async def dispatch(event, gateway):
+                await {alias}("pre_gateway_dispatch", event=event, gateway=gateway)
+            """,
+        )
+        sites = drift.extract_hook_payload_fields(tmp_path)
+        assert drift.compare({"pre_gateway_dispatch": ["event", "gateway"]}, sites) == []
+        assert sites["pre_gateway_dispatch"][0].fields == {"event", "gateway"}
+
+    def test_async_attribute_dispatch_still_checks_missing_payload(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "gateway.py",
+            """\
+            from hermes_cli import lifecycle
+
+            async def dispatch(event):
+                await lifecycle.ainvoke_hook("pre_gateway_dispatch", event=event)
+            """,
+        )
+        report = drift.compare(
+            {"pre_gateway_dispatch": ["event", "gateway"]}, drift.extract_hook_payload_fields(tmp_path)
+        )
+        assert len(report) == 1
+        assert "missing payload field(s): gateway" in report[0]
+
+    def test_unrelated_async_alias_is_not_a_hermes_dispatch(self, tmp_path: Path) -> None:
+        _write(
+            tmp_path,
+            "unrelated.py",
+            """\
+            from unrelated import ainvoke_hook as dispatch_gateway_hook
+
+            async def dispatch():
+                await dispatch_gateway_hook("pre_gateway_dispatch", event=None, gateway=None)
+            """,
+        )
+        assert drift.extract_hook_payload_fields(tmp_path) == {}
+
     def test_extracts_literal_invoke_hook_kwargs(self, tmp_path: Path) -> None:
         _write(
             tmp_path,

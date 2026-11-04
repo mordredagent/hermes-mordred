@@ -32,9 +32,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .._audit_support import AuditWriter as _AuditWriter
-from .._audit_support import safe_audit_append
-from .._yaml_io import load_plugin_section
+from .._core._audit_support import AuditWriter as _AuditWriter
+from .._core._audit_support import safe_audit_append
+from .._core._yaml_io import load_plugin_section
 from ._exceptions import MordredHarnessRefused
 from ._windows_policy import read_decision
 
@@ -68,7 +68,7 @@ _REASON = "mordred.degraded.disable_unprotected"
 def _safe_audit_append(audit: _AuditWriter, entry: Mapping[str, Any]) -> None:
     """Best-effort audit write binding this module's logger.
 
-    Thin wrapper over :func:`mordred_hermes._audit_support.safe_audit_append`
+    Thin wrapper over :func:`mordred_hermes._core._audit_support.safe_audit_append`
     (security review H1): the strict-mode refusal raises
     :class:`MordredHarnessRefused` (``BaseException``-derived) and must still
     fire even if the audit write itself raises a plain ``Exception`` before

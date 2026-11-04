@@ -2,7 +2,7 @@
 
 Date: 2026-10-07 (initial feasibility snapshot).
 The consolidated Windows implementation has since merged into `dev` (#226).
-See [CI.md](./CI.md#manual-live-device-validation-log) for 2026-10-11 ordinary-user
+See [VALIDATION_LOG.md](./VALIDATION_LOG.md#manual-live-device-validation-log) for 2026-10-11 ordinary-user
 Server/NitroTPM validation. The findings and proposed sequence below describe the
 initial investigation; SPEC.md, PLAN.md and TODO.md own current behavior and
 remaining work. Full Windows product support remains incomplete.
@@ -40,7 +40,7 @@ the existing local changes remain untouched.
 | AWS environment | Dedicated Windows Server 2025 NitroTPM host provisioned and exercised | Retain only identified development resources; stop compute between runs |
 | Key backend | `_seckey_backend.py` selects `find_winkey_helper()` on `win32` | Native CNG helper and production MRKW integration validated; port runtime/storage callers next |
 | Encryption contract | `keyvault/wrap.py` requires P-256 ECDH, HKDF, AES-KW and the existing MRKW format | Helper parity, persistence and second-TPM refusal proved; validate full product custody after filesystem port |
-| Files and locks | `_file_lock.py` depends on POSIX mode checks and `flock`; `_audit_io.py` calls `os.fchmod` | Provide equivalent Windows ACL, handle, reparse-point, and process-lock behavior |
+| Files and locks | `_core/_file_lock.py` depends on POSIX mode checks and `flock`; `_core/_audit_io.py` calls `os.fchmod` | Provide equivalent Windows ACL, handle, reparse-point, and process-lock behavior |
 | Memory and setup | Linux support exists, but platform branches admit macOS/Linux | Extend custody, bootstrap, reset/purge protection, CLI setup and status |
 | Desktop | API capability responses and setup routes currently exclude Windows | Add accurate capabilities, setup actions and actual packaged/source-built app verification |
 | Network | Existing lifecycle and process inspection include POSIX assumptions | Inventory Tor/VPN executable discovery, subprocess shutdown, DNS/proxy behavior and failure refusal |
@@ -172,7 +172,7 @@ not itself a Windows defect.
 
 | Slice | Concrete seams | Required review |
 | --- | --- | --- |
-| Shared storage | `_file_lock.py`, `_audit_io.py` | Replace mode-bit and optional-`fcntl` behavior with real Windows ACL/handle/lock guarantees; audit startup currently fails at `os.fchmod` |
+| Shared storage | `_core/_file_lock.py`, `_core/_audit_io.py` | Replace mode-bit and optional-`fcntl` behavior with real Windows ACL/handle/lock guarantees; audit startup currently fails at `os.fchmod` |
 | Keyvault persistence | `keyvault/_storage.py`, `_plaintext_capture.py`, `_memory_key.py`, `_config_bootstrap.py` | Secure creation and replacement, private temporary files, retained encrypted data and lifecycle locks |
 | Runtime discovery | `keyvault/_runtime_probe.py`, `_runtime_env.py`, `_pth_bootstrap.py` | User identity, Windows process/interpreter paths, isolated home and actual Desktop runtime |
 | Wizard | `wizard/openclaw_migration.py`, `_keyvault_init.py`, `_runtime_gate.py`, `uninstall_cli.py`, encryption/memory/Telegram setup CLIs | PowerShell builds, file protection, supported capability gates, idempotent setup and guarded purge |
@@ -221,7 +221,7 @@ storage and recurring charges. Do not terminate an instance retaining the only
 TPM key for data the operator wants to keep. Use disposable synthetic fixtures
 for destructive/key-deletion experiments.
 
-The Phase 0 evidence is recorded in [CI.md](CI.md#manual-live-device-validation-log).
+The Phase 0 evidence is recorded in [VALIDATION_LOG.md](VALIDATION_LOG.md#manual-live-device-validation-log).
 The immediate implementation deliverable is the independent CNG helper and its
 Python bridge ([PLAN W1–W4](PLAN.md#windows-cng-helper-implementation-plan));
 full Windows product readiness depends on the later component gates. No reliable

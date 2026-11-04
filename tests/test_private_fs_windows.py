@@ -171,9 +171,11 @@ def test_native_staged_write_faults_preserve_complete_versions(
 
         def fault_flush(handle):
             nonlocal calls
-            calls += 1
-            if calls == (2 if stage == "post_flush" else 1):
-                raise PrivateFSError("io", "flush", native_code=1117)
+            # Count file flushes only: directory namespace barriers share api.flush.
+            if not api.metadata(handle).directory:
+                calls += 1
+                if calls == (2 if stage == "post_flush" else 1):
+                    raise PrivateFSError("io", "flush", native_code=1117)
             flush(handle)
 
         if stage == "zero_write":
@@ -263,6 +265,8 @@ with open_private_directory(sys.argv[1]) as d,d.transaction() as tx:
     original=api.flush if sys.argv[2]=='staged' else api.rename
     def pause(*args,**kwargs):
         result=original(*args,**kwargs)
+        if sys.argv[2]=='staged' and api.metadata(args[0]).directory:
+            return result  # Directory barriers precede staging; pause at the staged file flush.
         print('boundary',flush=True)
         sys.stdin.readline()
         return result

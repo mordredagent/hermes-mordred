@@ -177,11 +177,11 @@ def _audit_log_path() -> Path:
 
     Resolved the same way :func:`_ext_dir` already resolves the hermes home
     (a fresh ``hermes_constants.get_hermes_home()`` call, not the
-    import-time-frozen :data:`mordred_hermes._home.HERMES_BASE`) so this
+    import-time-frozen :data:`mordred_hermes._core._home.HERMES_BASE`) so this
     module keeps its existing import-cheapness contract: no package-root
     import pulls in the profile-aware home resolution at module-import time.
     ``.parent.parent`` of this path is ``<HERMES_BASE>``, matching
-    :func:`mordred_hermes._audit_support.build_audit_writer`'s
+    :func:`mordred_hermes._core._audit_support.build_audit_writer`'s
     ``keyvault_home = path.parent.parent`` contract.
     """
     from hermes_constants import get_hermes_home
@@ -197,12 +197,12 @@ def _audit_writer() -> Writer:
     because this module deliberately never freezes ``HERMES_BASE`` at import
     time (see :func:`_audit_log_path`); the path is recomputed on the first
     call. The local cache preserves the test ``cache_clear()`` API, while
-    :mod:`mordred_hermes._audit_support` owns the normalized-path singleton so
+    :mod:`mordred_hermes._core._audit_support` owns the normalized-path singleton so
     clearing this cache never closes a writer another plugin is using. The
-    :mod:`mordred_hermes._audit_support` import happens here, at first call,
+    :mod:`mordred_hermes._core._audit_support` import happens here, at first call,
     not at module scope, so plugin discovery stays cheap.
     """
-    from .._audit_support import build_audit_writer
+    from .._core._audit_support import build_audit_writer
 
     return build_audit_writer(_audit_log_path())
 
@@ -231,7 +231,7 @@ def _audit_sink(entry: dict[str, Any]) -> None:
     """
     _log.debug("extension_sign audit: %s", entry.get("event", "?"))
     try:
-        from .._audit_support import safe_audit_append
+        from .._core._audit_support import safe_audit_append
 
         safe_audit_append(_audit_writer(), entry, logger=_log)
     except Exception as exc:  # best-effort: never fail a sign over an audit issue
@@ -338,9 +338,10 @@ def _resolve_account() -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def _sign_hash(message_hash: bytes) -> ethereum.EthereumSignature:
+def _sign_hash(message_hash: bytes, *, expected_signer: str | None = None) -> ethereum.EthereumSignature:
     acct = _resolve_account()
     backend, sink = _backend(), _audit_sink
+    signer_options: dict[str, Any] = {"expected_signer": expected_signer} if expected_signer is not None else {}
     if acct["kind"] == "hd":
         return ethereum.sign_hash_hd(
             acct["key_id"],
@@ -349,6 +350,7 @@ def _sign_hash(message_hash: bytes) -> ethereum.EthereumSignature:
             message_hash,
             backend=backend,
             audit_sink=sink,
+            **signer_options,
             account=int(acct.get("account", 0)),
             change=int(acct.get("change", 0)),
         )
@@ -358,6 +360,7 @@ def _sign_hash(message_hash: bytes) -> ethereum.EthereumSignature:
         message_hash,
         backend=backend,
         audit_sink=sink,
+        **signer_options,
     )
 
 
@@ -419,21 +422,26 @@ def _eip191_hash(signable: Any) -> bytes:
     return bytes(keccak(b"\x19" + signable.version + signable.header + signable.body))
 
 
-def personal_sign(message: str) -> str:
+def personal_sign(message: str, *, expected_signer: str | None = None) -> str:
     """EIP-191 ``personal_sign``. ``message`` is the DApp param (hex or text)."""
     from eth_account.messages import encode_defunct
 
     signable = encode_defunct(hexstr=message) if message.startswith("0x") else encode_defunct(text=message)
-    sig = _sign_hash(_eip191_hash(signable))
+    sig = _sign_hash(
+        _eip191_hash(signable), **({"expected_signer": expected_signer} if expected_signer is not None else {})
+    )
     return "0x" + sig.hex
 
 
-def sign_typed_data_v4(typed_data: str | dict[str, Any]) -> str:
+def sign_typed_data_v4(typed_data: str | dict[str, Any], *, expected_signer: str | None = None) -> str:
     """EIP-712 ``eth_signTypedData_v4``. Accepts the JSON string or dict."""
     from eth_account.messages import encode_typed_data
 
     data = json.loads(typed_data) if isinstance(typed_data, str) else typed_data
-    sig = _sign_hash(_eip191_hash(encode_typed_data(full_message=data)))
+    sig = _sign_hash(
+        _eip191_hash(encode_typed_data(full_message=data)),
+        **({"expected_signer": expected_signer} if expected_signer is not None else {}),
+    )
     return "0x" + sig.hex
 
 
@@ -453,7 +461,7 @@ def _rlp_int(n: int) -> bytes:
     return n.to_bytes((n.bit_length() + 7) // 8, "big")
 
 
-def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]:
+def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1, expected_signer: str | None = None) -> dict[str, str]:
     """Sign a transaction, returning ``{"raw": "0x..", "hash": "0x.."}``.
 
     All nonce/gas/fee fields must already be present. The extension wallet fills
@@ -490,7 +498,7 @@ def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]
             canonical["accessList"],
         ]
         sighash = keccak(b"\x02" + rlp.encode(unsigned))
-        sig = _sign_hash(sighash)
+        sig = _sign_hash(sighash, **({"expected_signer": expected_signer} if expected_signer is not None else {}))
         y = sig.v - 27
         r = int.from_bytes(sig.r, "big")
         s_int = int.from_bytes(sig.s, "big")
@@ -510,7 +518,7 @@ def sign_transaction(tx: dict[str, Any], *, chain_id: int = 1) -> dict[str, str]
             b"",
         ]
         sighash = keccak(rlp.encode(unsigned))
-        sig = _sign_hash(sighash)
+        sig = _sign_hash(sighash, **({"expected_signer": expected_signer} if expected_signer is not None else {}))
         v = (sig.v - 27) + 35 + 2 * signing_chain_id
         signed = [
             _rlp_int(nonce),

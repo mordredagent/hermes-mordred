@@ -33,3 +33,12 @@ def _memory_encryption_on(request, monkeypatch):
         return
     monkeypatch.setattr(memory_guard, "memory_encryption_active", lambda home=None: True)
     monkeypatch.setattr(memory_guard, "require_memory_encryption", lambda home=None: None)
+
+
+@pytest.fixture
+def desktop(monkeypatch, tmp_path):
+    """The Desktop API on a TestClient, as macOS, with the mail and store seams faked (``_desktop_support``)."""
+    pytest.importorskip("fastapi")
+    from ._desktop_support import desktop_client
+
+    yield from desktop_client(monkeypatch, tmp_path)

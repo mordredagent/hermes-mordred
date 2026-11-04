@@ -46,6 +46,7 @@ def change(path: str, status: str = "modified", **extra: object) -> dict:
         ("tests/test_local_adapter.py", False, False, False, (), ("floor",)),
         ("src/mordred_hermes/llm_guard/future.py", True, False, True, (), ()),
         ("src/mordred_hermes/keyvault/ethereum.py", True, False, True, (), ()),
+        ("src/mordred_hermes/_core/_home.py", True, False, True, (), ()),
         ("src/mordred_hermes/extension/telegram/windows_secrets.py", True, False, True, (), ()),
         ("tests/test_config_io_windows.py", True, False, True, (), ()),
         ("tools/ci_test_policy.py", True, False, True, (), ()),
@@ -81,10 +82,20 @@ def test_empty_malformed_duplicate_scope_fails_closed(changes):
     assert scope_tool().classify_changes(changes).final
 
 
-def test_sensitive_overrides_win_even_if_inventory_accidentally_allowlists_them(tmp_path):
+@pytest.mark.parametrize(
+    "source",
+    [
+        "src/mordred_hermes/keyvault/api.py",
+        "src/mordred_hermes/imports/store.py",
+        "src/mordred_hermes/imports/_mail_reconcile.py",
+        "src/mordred_hermes/activity/contracts.py",
+        "src/mordred_hermes/activity/_redaction.py",
+    ],
+)
+def test_sensitive_overrides_win_even_if_inventory_accidentally_allowlists_them(tmp_path, source):
     path = tmp_path / "inventory.json"
-    path.write_text(json.dumps({"schema_version": 1, "paths": {"src/mordred_hermes/keyvault/api.py": []}}))
-    assert scope_tool().classify_changes([change("src/mordred_hermes/keyvault/api.py")], inventory_path=path).final
+    path.write_text(json.dumps({"schema_version": 1, "paths": {source: []}}))
+    assert scope_tool().classify_changes([change(source)], inventory_path=path).final
 
 
 @pytest.mark.parametrize("path", ["docs/dev/CI.md", "src/mordred_hermes/llm_guard/health.py", "docs/user/example.py"])
@@ -223,3 +234,26 @@ def test_docs_mixed_with_code_cannot_skip_execution_workers():
 
 def test_unmapped_wizard_setup_owner_stays_final_even_in_extension_test_directory():
     assert scope_tool().classify_changes([change("tests/extension/test_telegram_setup.py")]).final
+
+
+def test_dbcrypt_and_mail_modules_are_explicit_windows_inventory_members():
+    expected = {
+        "tests/test_dbcrypt_contracts.py",
+        "tests/test_dbcrypt_inventory.py",
+        "tests/test_dbcrypt_windows_paths.py",
+        "tests/test_dbcrypt_windows_native_paths.py",
+        "tests/test_dbcrypt_windows_locking.py",
+        "tests/test_dbcrypt_capability.py",
+        "tests/test_dbcrypt_packaging.py",
+        "tests/test_keyvault_mail_key.py",
+        "tests/test_windows_custody_schema_v2.py",
+    }
+    module = scope_tool()
+    assert expected <= set(module.native_modules())
+    for path in (
+        "hatch_build.py",
+        "tools/dbcrypt_build_headers.py",
+        "src/mordred_hermes/dbcrypt/_capability.py",
+        "native/dbcrypt-vfs/checked_io.c",
+    ):
+        assert module.classify_changes([change(path)]).final

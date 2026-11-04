@@ -84,12 +84,23 @@
     "tests/extension/test_desktop_api.py",
     "tests/extension/test_desktop_platform.py",
     "tests/extension/test_extension_serve_shutdown.py",
-    "tests/test_desktop_capture.py"
+    "tests/test_desktop_capture.py",
+    "tests/test_dbcrypt_contracts.py",
+    "tests/test_dbcrypt_inventory.py",
+    "tests/test_dbcrypt_windows_paths.py",
+    "tests/test_dbcrypt_windows_native_paths.py",
+    "tests/test_dbcrypt_windows_locking.py",
+    "tests/test_dbcrypt_capability.py",
+    "tests/test_dbcrypt_packaging.py",
+    "tests/test_keyvault_mail_key.py",
+    "tests/test_windows_custody_schema_v2.py"
   ],
   "paths": {
     "README.md": [
       "package"
     ],
+    "docs/superpowers/plans/2026-10-24-cross-platform-database-encryption.md": [],
+    "docs/superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md": [],
     "docs/user/EXTENSION.md": [
       "docs"
     ],
@@ -102,10 +113,52 @@
     "docs/user/USAGE.md": [
       "docs"
     ],
+    "hatch_build.py": [],
+    "native/dbcrypt-vfs/README.md": [],
+    "native/dbcrypt-vfs/build.ps1": [],
+    "native/dbcrypt-vfs/checked_io.c": [],
+    "native/dbcrypt-vfs/checked_io.h": [],
+    "native/dbcrypt-vfs/probe.c": [],
+    "native/dbcrypt-vfs/vfs.c": [],
+    "src/mordred_hermes/activity/_redaction.py": [],
+    "src/mordred_hermes/dbcrypt/_capability.py": [],
+    "src/mordred_hermes/dbcrypt/_uninstall.py": [],
     "src/mordred_hermes/desktop/__init__.py": [
       "extension"
     ],
+    "src/mordred_hermes/desktop/_body.py": [
+      "extension"
+    ],
     "src/mordred_hermes/desktop/_capture.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_ceremony_routes.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_databases.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_mail_routes.py": [
+      "extension"
+    ],
+    "src/mordred_hermes/desktop/_maintenance_routes.py": [
+      "extension"
+    ],
+    "src/mordred_hermes/desktop/_projections.py": [
+      "extension"
+    ],
+    "src/mordred_hermes/desktop/_seams.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_status_v4.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/desktop/_vault.py": [
       "extension",
       "macos"
     ],
@@ -189,6 +242,14 @@
     "src/mordred_hermes/extension/web/index.html": [
       "package"
     ],
+    "src/mordred_hermes/imports/_mail_reconcile.py": [],
+    "src/mordred_hermes/imports/mail/forget.py": [
+      "macos"
+    ],
+    "src/mordred_hermes/imports/mail/setup_flow.py": [
+      "macos"
+    ],
+    "src/mordred_hermes/keyvault/_uninstall_authority.py": [],
     "src/mordred_hermes/llm_guard/__init__.py": [],
     "src/mordred_hermes/llm_guard/_cloud_endpoint.py": [],
     "src/mordred_hermes/llm_guard/_exceptions.py": [],
@@ -196,6 +257,7 @@
       "llm",
       "privacy"
     ],
+    "src/mordred_hermes/llm_guard/_registration.py": [],
     "src/mordred_hermes/llm_guard/_typing.py": [],
     "src/mordred_hermes/llm_guard/_windows_policy.py": [
       "llm",
@@ -213,6 +275,10 @@
       "tor"
     ],
     "src/mordred_hermes/network/_exceptions.py": [],
+    "src/mordred_hermes/network/_registration.py": [
+      "network",
+      "tor"
+    ],
     "src/mordred_hermes/network/_windows_exec.py": [
       "network",
       "tor"
@@ -324,18 +390,65 @@
     ],
     "src/mordred_hermes/privacy_check/skill_frontmatter.py": [],
     "src/mordred_hermes/wizard/_defaults.py": [],
+    "src/mordred_hermes/wizard/_direct_tools_yaml.py": [
+      "extension",
+      "macos"
+    ],
     "src/mordred_hermes/wizard/_network_answers.py": [],
     "src/mordred_hermes/wizard/_prompt_io.py": [],
     "src/mordred_hermes/wizard/_term.py": [],
     "src/mordred_hermes/wizard/_typing.py": [],
+    "src/mordred_hermes/wizard/_uninstall_coordinator.py": [],
+    "src/mordred_hermes/wizard/_uninstall_erase.py": [],
+    "src/mordred_hermes/wizard/direct_tools.py": [
+      "extension",
+      "macos"
+    ],
+    "src/mordred_hermes/wizard/direct_tools_cli.py": [
+      "extension"
+    ],
     "src/mordred_hermes/wizard/extension_pair_cli.py": [
       "features"
     ],
     "src/mordred_hermes/wizard/policy_explainer.py": [],
+    "tests/_dbcrypt_support.py": [],
+    "tests/_desktop_page.py": [
+      "extension"
+    ],
+    "tests/extension/_desktop_support.py": [
+      "extension"
+    ],
+    "tests/extension/test_desktop_activity.py": [
+      "extension"
+    ],
     "tests/extension/test_desktop_api.py": [
       "extension"
     ],
+    "tests/extension/test_desktop_bodies.py": [
+      "extension"
+    ],
+    "tests/extension/test_desktop_databases.py": [
+      "extension",
+      "macos"
+    ],
+    "tests/extension/test_desktop_mail.py": [
+      "extension"
+    ],
     "tests/extension/test_desktop_platform.py": [
+      "extension",
+      "macos"
+    ],
+    "tests/extension/test_desktop_status_e2e.py": [
+      "extension",
+      "macos"
+    ],
+    "tests/extension/test_desktop_status_v4.py": [
+      "extension"
+    ],
+    "tests/extension/test_desktop_tools.py": [
+      "extension"
+    ],
+    "tests/extension/test_desktop_vault.py": [
       "extension",
       "macos"
     ],
@@ -374,12 +487,35 @@
       "extension",
       "features"
     ],
+    "tests/fixtures/desktop/windows_page.json": [
+      "extension"
+    ],
+    "tests/fixtures/desktop/windows_scenarios.js": [
+      "extension"
+    ],
+    "tests/integration/_uninstall_macos_acceptance.py": [
+      "macos"
+    ],
+    "tests/integration/test_dbcrypt_windows_vfs_probe.py": [],
     "tests/test_audit.py": [],
     "tests/test_audit_reasons_phase3.py": [],
     "tests/test_audit_reasons_phase4.py": [],
+    "tests/test_dbcrypt_acceptance_control.py": [],
+    "tests/test_dbcrypt_capability.py": [],
+    "tests/test_dbcrypt_contracts.py": [],
+    "tests/test_dbcrypt_inventory.py": [],
+    "tests/test_dbcrypt_packaging.py": [],
+    "tests/test_dbcrypt_uninstall.py": [],
+    "tests/test_dbcrypt_vfs_probe.py": [],
+    "tests/test_dbcrypt_windows_locking.py": [],
+    "tests/test_dbcrypt_windows_native_paths.py": [],
+    "tests/test_dbcrypt_windows_paths.py": [],
     "tests/test_desktop_capture.py": [
       "extension",
       "macos"
+    ],
+    "tests/test_desktop_page.py": [
+      "extension"
     ],
     "tests/test_desktop_windows_api.py": [
       "extension"
@@ -399,6 +535,13 @@
     "tests/test_desktop_windows_pm_compat.py": [
       "extension"
     ],
+    "tests/test_direct_tools.py": [
+      "extension",
+      "macos"
+    ],
+    "tests/test_direct_tools_cli.py": [
+      "extension"
+    ],
     "tests/test_enforce.py": [],
     "tests/test_enforce_audit.py": [],
     "tests/test_enforce_prompt.py": [],
@@ -408,9 +551,11 @@
       "floor"
     ],
     "tests/test_install_wrapper.py": [],
+    "tests/test_keyvault_mail_key.py": [],
     "tests/test_keyvault_probe.py": [
       "macos"
     ],
+    "tests/test_keyvault_uninstall.py": [],
     "tests/test_llm_auxiliary_guard.py": [],
     "tests/test_llm_guard_register.py": [],
     "tests/test_llm_windows_policy.py": [
@@ -423,6 +568,9 @@
     ],
     "tests/test_local_adapter.py": [
       "floor"
+    ],
+    "tests/test_mail_setup_flow.py": [
+      "macos"
     ],
     "tests/test_network_api.py": [
       "network",
@@ -545,6 +693,7 @@
       "network",
       "tor"
     ],
+    "tests/test_windows_custody_schema_v2.py": [],
     "tests/test_windows_privacy_audit.py": [
       "llm",
       "privacy"
@@ -561,6 +710,9 @@
     "tests/test_wizard_extension_pair_cli.py": [
       "features"
     ],
-    "tests/test_wizard_term.py": []
+    "tests/test_wizard_term.py": [],
+    "tools/dbcrypt_acceptance_control.py": [],
+    "tools/dbcrypt_build_headers.py": [],
+    "tools/dbcrypt_vfs_probe.py": []
   }
 }

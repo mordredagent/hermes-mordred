@@ -11,7 +11,10 @@ a. **Restore plaintext.** Every encryption target that is on is turned off with
    engines (databases, config, memory, then env), sharing one :class:`._flow_session.FlowSession` so the vault is
    unlocked at most once. If the device key cannot open the vault the recovery
    passphrase is offered instead. If any target cannot be restored the command
-   stops *before removing anything* and says why.
+   stops *before removing anything* and says why. Before step b, source/helper
+   removal gets a fresh database inventory check. With ``--purge-data``, native
+   sources and their vault are removed under exclusion/custody at this point,
+   reusing the authenticated handle, so a refusal preserves the installation.
 b. **Give Hermes its config back.** The Hermes Desktop page is removed, and
    Mordred's entries leave ``config.yaml`` (plugin names, ``plugins.mordred_*``,
    the legacy memory flag -- a timestamped backup is kept) and ``.env``
@@ -22,9 +25,9 @@ c. **Launchers.** The ``hermes-mordred`` launcher the installer wrote is removed
    script). The native helpers in ``~/.local/bin`` are removed only with
    ``--remove-helper`` / ``--purge-data`` and only when Mordred built them.
 e. **Data.** Kept by default and listed with its location. ``--purge-data``
-   (after a typed confirmation that ``--yes`` does not skip) logs Telegram out,
-   deletes the device keys and Keychain anchor, resets the keyvault, and removes
-   ``<home>/mordred`` and ``<home>/extension``.
+   (after a typed confirmation that ``--yes`` does not skip) completes the
+   guarded source-removal phase after restore, then removes neighboring
+   ``<home>/mordred`` and ``<home>/extension`` data, retaining the database lock.
 d. **The package.** ``uv pip uninstall`` in Hermes's environment, last, because
    this very command usually runs from that environment.
 
@@ -40,6 +43,7 @@ and reports everything else it keeps (no recursive removal), and
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import shutil
 import sys
@@ -49,6 +53,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..keyvault._uninstall_authority import UninstallAuthorization
 from . import _term, _uninstall_databases, _uninstall_windows
 from ._uninstall_config import (
     ConfigCleanup,
@@ -68,10 +73,10 @@ from ._uninstall_hermes_env import (
     classify_launchers,
     default_runner,
     detect_hermes_env,
-    uninstall_packages,
 )
 
 if TYPE_CHECKING:
+    from .._core._database_lifecycle import ExclusiveLease
     from ..keyvault.anchor import AnchorStore
     from ..keyvault.wrap import NativeBackend
     from ._flow_session import FlowSession
@@ -164,11 +169,17 @@ class UninstallPlan:
     notes: list[str] = field(default_factory=list)
     #: Windows: what --purge-data does there (memory custody only; the rest is kept).
     windows_purge: list[str] | None = None
+    profiles: list[tuple[UninstallContext, UninstallPlan]] = field(default_factory=list)
+    database_observation: object = None
+    file_observation: object = None
+    profile_observation: object = None
+    erase_files: dict[Path, tuple[int, int, int, int, int, int]] = field(default_factory=dict)
 
     @property
     def nothing_to_do(self) -> bool:
         return not (
-            self.restores
+            any(plan.nothing_to_do is False for _, plan in self.profiles)
+            or self.restores
             or self.config.changed
             or self.env.names
             or self.desktop_page
@@ -298,7 +309,9 @@ def _default_gateways(home: Path) -> list[str]:
     return [f"pid {g.pid} ({g.python})" if g.pid is not None else str(g.python) for g in _running_gateways(home)]
 
 
-def build_plan(ctx: UninstallContext, opts: UninstallOptions) -> UninstallPlan:
+def build_plan(  # noqa: C901, PLR0912 - read-only platform/profile inventory
+    ctx: UninstallContext, opts: UninstallOptions, *, profiles: bool = True
+) -> UninstallPlan:
     """Everything ``uninstall`` would do, computed without changing anything."""
     from ..desktop.install import page_dir, plugin_dir
 
@@ -310,7 +323,10 @@ def build_plan(ctx: UninstallContext, opts: UninstallOptions) -> UninstallPlan:
         plugin_dir(ctx.home),
     )
     hermes_env = detect_hermes_env(ctx.home, which=ctx.which, runner=ctx.runner)
-    telegram_configured = (ctx.home / "mordred" / "telegram" / "credentials.sealed").exists()
+    telegram_configured = any(
+        path.exists() or path.is_symlink()
+        for path in (ctx.home / "mordred/telegram/credentials.sealed", ctx.home / "mordred/telegram-forget.json")
+    )
     plan = UninstallPlan(
         restores=restores,
         config=config,
@@ -348,9 +364,38 @@ def build_plan(ctx: UninstallContext, opts: UninstallOptions) -> UninstallPlan:
         plan.notes.append(f"Package: {hermes_env.problem}.")
     if opts.remove_helper and not opts.purge_data and plan.device_keys:
         plan.notes.append(
-            "--remove-helper without --purge-data: the kept vault's device key can no longer be used after the helper "
-            "is gone; the vault then opens only with its recovery passphrase."
+            "Preflight blocker: --remove-helper would remove a helper required by retained recovery keys."
         )
+    from ..keyvault._uninstall_authority import fingerprint, profile_fingerprint
+
+    plan.profile_observation = profile_fingerprint(ctx.home)
+
+    try:
+        plan.database_observation = fingerprint(ctx.home)
+    except (OSError, RuntimeError) as exc:
+        plan.notes.append(f"Database preflight blocker: {exc}")
+    from ._uninstall_coordinator import restoration_fingerprint
+
+    plan.file_observation = restoration_fingerprint(ctx)
+    if profiles:
+        directory = ctx.home / "profiles"
+        if directory.is_dir() and not directory.is_symlink():
+            for child in sorted(directory.iterdir()):
+                if child.is_dir() and not child.is_symlink():
+                    child_ctx = dataclasses.replace(ctx, home=child, vault_root=child / "mordred/vault")
+                    plan.profiles.append((child_ctx, build_plan(child_ctx, opts, profiles=False)))
+    if opts.erase_encrypted:
+        from ._uninstall_erase import inventory
+
+        plan.erase_files = inventory(ctx)
+    from ..dbcrypt._uninstall import known_blockers
+
+    plan.notes.extend(
+        f"Preflight blocker: {reason}"
+        for reason in known_blockers(
+            ctx.home, purge=opts.purge_data or opts.remove_helper, erase=frozenset(plan.erase_files)
+        )
+    )
     return plan
 
 
@@ -383,7 +428,7 @@ def _launcher_lines(plan: UninstallPlan, opts: UninstallOptions) -> list[str]:
     for helper in plan.helpers:
         if not helper.mordred_built:
             lines.append(f"keep {helper.path} ({helper.reason})")
-        elif opts.remove_helper or opts.purge_data:
+        elif opts.remove_helper or (opts.purge_data and plan.windows_purge is None):
             lines.append(f"remove {helper.path} ({helper.reason})")
         else:
             lines.append(f"keep {helper.path} ({helper.reason}; remove it with --remove-helper)")
@@ -400,6 +445,7 @@ def _package_line(env: HermesEnv) -> str:
 def render_plan(plan: UninstallPlan, opts: UninstallOptions) -> str:
     out: list[str] = ["hermes-mordred uninstall plan", ""]
     if opts.erase_encrypted:
+        out += _section("Reviewed erase targets:", [str(path) for path in plan.erase_files])
         erase = [_erase_line(r, plan) for r in plan.restores]
         out += _section("1. ERASE encrypted data WITHOUT decrypting it (cannot be undone):", erase) or [
             "1. Erase encrypted data: nothing is encrypted."
@@ -429,6 +475,8 @@ def render_plan(plan: UninstallPlan, opts: UninstallOptions) -> str:
     out += _section(title, data) or ["5. Data: none."]
     if plan.notes:
         out += ["", *(f"Note: {note}" for note in plan.notes)]
+    for child, child_plan in plan.profiles:
+        out += [f"\nProfile: {child.home}", render_plan(child_plan, opts)]
     return "\n".join(out)
 
 
@@ -447,23 +495,14 @@ def _erase_line(restore: Restore, plan: UninstallPlan) -> str:
     return "config: config.yaml stays; only the vault copy is deleted"
 
 
-def _erase_encrypted(ctx: UninstallContext, restores: list[Restore]) -> int:
-    """Step a in erase mode: remove sealed files without opening the vault.
+def _erase_encrypted(
+    ctx: UninstallContext, restores: list[Restore], *, reviewed: dict[Path, tuple[int, int, int, int, int, int]]
+) -> int:
+    from ._uninstall_erase import erase
 
-    Databases and sealed memory files live outside Mordred's directories and
-    must go before their keys. The vault (sealed .env / config.yaml copies)
-    and other markers are removed by the purge that erase mode always runs.
-    """
-    from . import memory_cli
-
+    erase(ctx, reviewed)
     for restore in restores:
-        if restore.target == "databases":
-            _uninstall_databases.erase(ctx)
-        elif restore.target == "memory":
-            for path in memory_cli._sealed_memory_files(ctx.home):
-                path.unlink(missing_ok=True)
-                print(f"Erased sealed memory file {path}.")
-        else:
+        if restore.target in {"config", "env"}:
             print(f"Erasing the encrypted {restore.target} with the vault (not decrypted).")
     return 0
 
@@ -514,7 +553,13 @@ def _open_vault_for_flow(ctx: UninstallContext, flow: FlowSession, *, needed: bo
     return True
 
 
-def _restore_all(ctx: UninstallContext, restores: list[Restore]) -> int:
+def _restore_all(
+    ctx: UninstallContext,
+    restores: list[Restore],
+    flow_session: FlowSession | None = None,
+    *,
+    uninstall: UninstallAuthorization | None = None,
+) -> int:
     """Step a. Returns 0, or 1 after explaining which target could not be restored."""
     from . import config_decrypt_cli, env_decrypt_cli, memory_cli
     from ._flow_session import FlowSession
@@ -524,29 +569,44 @@ def _restore_all(ctx: UninstallContext, restores: list[Restore]) -> int:
         "memory": memory_cli.disable,
         "env": env_decrypt_cli.disable,
     }
-    with FlowSession() as flow:
-        needed = any(r.needs_vault for r in restores)
-        vault_open = _open_vault_for_flow(ctx, flow, needed=needed) if restores else False
+    # Database restoration owns native EX authentication before any borrowed
+    # vault opening. A successful decrypt is not authorization to strip keys.
+    remaining = []
+    for restore in restores:
+        if restore.target == "databases":
+            print("Restoring databases ...")
+            _uninstall_databases.restore(ctx, flow_session)
+        else:
+            remaining.append(restore)
+    with contextlib.ExitStack() as stack:
+        if uninstall is None and any(restore.target == "memory" for restore in remaining):
+            from ..keyvault._database_mutation import database_key_mutation
+
+            stack.enter_context(database_key_mutation(root=ctx.home, generation=None))
+        flow = flow_session if flow_session is not None else stack.enter_context(FlowSession())
+        needed = any(r.needs_vault for r in remaining)
+        vault_open = _open_vault_for_flow(ctx, flow, needed=needed) if remaining else False
         if not vault_open and needed:
-            targets = ", ".join(r.target for r in restores if r.needs_vault)
+            targets = ", ".join(r.target for r in remaining if r.needs_vault)
             _term.emit_error(
                 f"uninstall stopped: the vault could not be opened, and restoring {targets} requires it. "
                 "Nothing was removed. Fix vault access (see the message above) and re-run."
             )
             return 1
-        for restore in restores:
+        for restore in remaining:
             print(f"Restoring {restore.target} ...")
-            if restore.target == "databases":
-                _uninstall_databases.restore(ctx, flow)
-                rc = 0
-            else:
-                rc = engines[restore.target](
-                    home=ctx.home, root=ctx.vault_root, backend=ctx.backend, store=ctx.store, flow_session=flow
-                )
+            rc = engines[restore.target](
+                home=ctx.home,
+                root=ctx.vault_root,
+                backend=ctx.backend,
+                store=ctx.store,
+                flow_session=flow,
+                **({"uninstall": uninstall} if restore.target == "memory" and uninstall is not None else {}),
+            )
             if rc != 0:
                 _term.emit_error(
                     f"uninstall stopped: {restore.target} could not be restored to plaintext (see above). "
-                    "Nothing was removed and Mordred stays installed, so Hermes keeps working. "
+                    "Mordred and its native sources remain installed. "
                     f"Fix the cause, then re-run `hermes-mordred uninstall` (or `encryption disable {restore.target}`)."
                 )
                 return 1
@@ -569,7 +629,8 @@ def _clean_hermes_files(ctx: UninstallContext, plan: UninstallPlan) -> int:
     env = apply_env_cleanup(ctx.home / ".env", save_dir=ctx.home / "mordred" / "uninstall", stamp=ctx.stamp)
     plan.env = env
     if env.error:
-        _term.emit_warn(f".env was not changed: {env.error}")
+        _term.emit_error(f".env was not changed: {env.error}")
+        return 1
     elif env.names:
         print(f".env: moved {', '.join(env.names)} to {env.saved_to}.")
     for path in plan.leftovers:
@@ -590,12 +651,25 @@ def _remove_launchers(plan: UninstallPlan) -> None:
             print(f"Removed {launcher.path}.")
 
 
-def _remove_helpers(plan: UninstallPlan, opts: UninstallOptions) -> None:
+def _remove_helpers(
+    plan: UninstallPlan,
+    opts: UninstallOptions,
+    ctx: UninstallContext,
+    lease: ExclusiveLease | None,
+    *,
+    uninstall: UninstallAuthorization | None = None,
+) -> None:
     """Step c (helpers). Runs after the purge: revoking the Telegram session and
     deleting the device keys both need the Secure Enclave helper."""
     if opts.remove_helper or opts.purge_data:
         for helper in plan.helpers:
             if helper.mordred_built:
+                from .._core._database_contracts import DatabaseRefused
+                from ..keyvault._database_mutation import assert_database_helper_removal_safe
+
+                if lease is None:
+                    raise DatabaseRefused("helper removal requires preceding database exclusion")
+                assert_database_helper_removal_safe(ctx.home, lease, uninstall=uninstall)
                 if helper.path.name == "mordred-hermes-winkey.exe":
                     from ._windows_install import remove_owned
 
@@ -607,70 +681,97 @@ def _remove_helpers(plan: UninstallPlan, opts: UninstallOptions) -> None:
                 _term.emit_warn(f"kept {helper.path}: {helper.reason}.")
 
 
-def _default_telegram_forget() -> int:
-    from .telegram_cli import telegram_logout
+def _default_telegram_forget() -> object:
+    from . import _windows_telegram
+    from .telegram_cli import _telegram_logout_result, telegram_logout
 
-    return telegram_logout(forget=True)
-
-
-def _default_keyvault_reset(ctx: UninstallContext) -> Callable[[Path], int]:
-    def reset(home: Path) -> int:
-        from .keyvault_cli import reset_keyvault
-
-        return reset_keyvault(home=home, backend=ctx.backend, assume_yes=True)
-
-    return reset
+    if _windows_telegram.routed():
+        return telegram_logout(forget=True, force=True)
+    return _telegram_logout_result(forget=True, force=True)
 
 
-def _delete_vault_keys(ctx: UninstallContext) -> None:
-    from ..keyvault._identity import resolve_backend, resolve_store, vault_identity
+def _delete_vault_keys(
+    ctx: UninstallContext,
+    flow: FlowSession,
+    lease: ExclusiveLease,
+    *,
+    uninstall: UninstallAuthorization | None = None,
+) -> None:
+    """Retain exclusion/custody until guarded native and anchor deletion finish."""
+    from .._core._database_contracts import DatabaseRefused
+    from ..keyvault import vault
+    from ..keyvault._identity import resolve_backend
+    from ..keyvault._native_deletion import _owned_delete_scope
+    from ._vault_open import _open_hot_path_or_report
 
-    label = vault_identity(ctx.vault_root)
-    try:
-        # Covers every namespace the key can live in: the helper's Secure
-        # Enclave key, the legacy one, and the software P-256 fallback.
-        resolve_backend(ctx.backend).delete_enclave_key(label)
-    except Exception as exc:  # report and continue; the files are removed regardless
-        _term.emit_warn(
-            f"could not delete the vault device key {label}: {exc}. If it is a software key another Python "
-            "created, remove it by hand: Keychain Access -> login -> Keys, the item whose application tag starts "
-            "with mordred-hermes.wrsw. (or mordred-hermes.wrap.)."
-        )
-    try:
-        resolve_store(ctx.store).delete(label)
-    except Exception as exc:
-        _term.emit_warn(
-            f"could not delete the vault Keychain anchor {label}: {exc}. Remove it in Keychain Access: the "
-            f"password items with account {label} under {' / '.join(_ANCHOR_SERVICES)}."
-        )
+    backend = resolve_backend(ctx.backend)
+    opened = _open_hot_path_or_report(ctx.vault_root, backend=backend, store=ctx.store, flow_session=flow)
+    if opened is None:
+        raise DatabaseRefused("vault authentication is required before removing its source")
+    store = opened._store
+    if store is None:
+        raise DatabaseRefused("a device-authenticated vault anchor is required before removing its source")
+    with opened._custody_scope():
+        owner = opened._native_delete_owner(backend)
+        expected = None
+        if uninstall is None:
+            vault._guard_vault_source_change(opened._root, lease)
+        else:
+            from ..keyvault._database_authority import observe_database_source
+            from ..keyvault._database_mutation import _assert_memory_database_mutation_safe
+
+            _assert_memory_database_mutation_safe(home=ctx.home, database_lease=lease, uninstall=uninstall)
+            if (ctx.home / "mordred/db-key-source.json").exists():
+                expected = observe_database_source(root=ctx.home)
+        with _owned_delete_scope(owner, backend=backend, database_lease=lease, uninstall=uninstall) as permit:
+            from .memory_cli import _warn_external_backups
+
+            _warn_external_backups()
+            backend.delete_enclave_key(opened._key_id, deletion=permit)
+        if expected is not None:
+            from ..keyvault._database_authority import retire_database_source
+
+            retire_database_source(root=ctx.home, expected=expected, lease=lease, uninstall=uninstall)
+        store.delete(opened._label)
+        shutil.rmtree(opened._root)
 
 
-def _purge_tpm_memory(ctx: UninstallContext) -> int:
-    from ..keyvault._memory_key import memory_key_path
-    from . import memory_cli
+def _has_database_refusal(error: BaseException) -> bool:
+    """A source refusal remains fatal through explicit and implicit wrappers."""
+    from .._core._database_contracts import DatabaseRefused
 
-    wrapped = memory_key_path(ctx.home)
-    if not (wrapped.exists() or wrapped.is_symlink()):
-        return 0
-    # Restore/erase already ran. Remove independent memory custody before
-    # keyvault reset can remove the containing native TPM store.
-    rc = memory_cli.purge(home=ctx.home, root=ctx.vault_root, backend=ctx.backend)
-    if rc != 0:
-        _term.emit_error("TPM memory could not be purged; Mordred data was retained")
-    return rc
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, DatabaseRefused):
+            return True
+        for chained in (current.__cause__, current.__context__):
+            if chained is not None:
+                pending.append(chained)
+    return False
 
 
 def _forget_telegram_for_uninstall(ctx: UninstallContext) -> None:
+    from .._core._database_contracts import DatabaseRefused
+    from .telegram_cli import _TelegramLogoutOutcome
+
     forget = ctx.telegram_forget or _default_telegram_forget
     try:
-        rc = forget()
-    except Exception as exc:  # e.g. the optional Telegram extra is missing
-        rc = 1
-        _term.emit_warn(f"Telegram logout failed: {exc}")
-    if rc != 0:
-        _term.emit_warn(
-            "the Telegram session could not be revoked here; terminate it in Telegram -> Settings -> Devices."
-        )
+        outcome = forget()
+    except Exception as exc:
+        if _has_database_refusal(exc):
+            raise  # Preserve direct and wrapped safety refusals and their traceback.
+        raise DatabaseRefused("Telegram local cleanup failed; uninstall retained later sources") from exc
+    if type(outcome) is _TelegramLogoutOutcome:
+        if not outcome.local_complete:
+            raise DatabaseRefused("Telegram local cleanup was not completed")
+        return
+    if type(outcome) is not int or outcome != 0:
+        raise DatabaseRefused("Telegram collaborator did not confirm local cleanup")
 
 
 def _purge_except_database_lock(path: Path) -> None:
@@ -685,25 +786,11 @@ def _purge_except_database_lock(path: Path) -> None:
 
 
 def _purge_data(ctx: UninstallContext, plan: UninstallPlan) -> int:
-    """Step e with ``--purge-data``. Returns 1 when the keyvault could not be reset."""
-    if plan.telegram_configured:
-        _forget_telegram_for_uninstall(ctx)
-    if _purge_tpm_memory(ctx) != 0:
-        return 1
-    if ctx.vault_root.exists():
-        _delete_vault_keys(ctx)
-    if (ctx.home / "mordred" / "keyvault").exists():
-        reset = ctx.keyvault_reset or _default_keyvault_reset(ctx)
-        if reset(ctx.home) != 0:
-            _term.emit_error(
-                "the keyvault could not be reset (see above), so the Mordred data was NOT deleted -- deleting it "
-                "would orphan the keyvault's hardware keys. Re-run `hermes-mordred uninstall --purge-data`."
-            )
-            return 1
+    """Remove neighboring data after guarded sources and config cleanup."""
     for path in (ctx.home / "mordred", ctx.home / "extension"):
         if path.is_dir() and not path.is_symlink():
             lock = path / _DATABASE_LOCK_NAME
-            if ctx.platform == "darwin" and path.name == "mordred" and lock.is_file():
+            if path.name == "mordred" and lock.is_file():
                 # Unlinking a held lock allows another process to acquire a
                 # different inode before this uninstall finishes. Keep the
                 # pathname permanently; only its neighboring data is purged.
@@ -747,60 +834,26 @@ def _confirm(ctx: UninstallContext, opts: UninstallOptions, plan: UninstallPlan)
     return True
 
 
-def _execute(ctx: UninstallContext, plan: UninstallPlan, opts: UninstallOptions) -> int:
-    """Steps a-e in order, stopping at the first one that must not be passed.
-
-    On Windows the ``--purge-data`` custody purge belongs to step a, so its
-    refusal also comes before step b removes anything.
-    """
-    windows = ctx.platform == "win32"
-    if windows:
-        step_a = _uninstall_windows.restore_step(purge_data=opts.purge_data)
-    else:
-        step_a = _erase_encrypted if opts.erase_encrypted else _restore_all
-    if step_a(ctx, plan.restores) != 0:
-        return 1
-    if _clean_hermes_files(ctx, plan) != 0:
-        return 1
-    _remove_launchers(plan)
-    if opts.purge_data:
-        if not windows and _purge_data(ctx, plan) != 0:
-            return 1
-        plan.data = _data_inventory(ctx)
-        plan.device_keys = _device_keys(ctx, plan.telegram_configured) if windows else []
-    _remove_helpers(plan, opts)
-
-    # The package goes last: this command normally runs from it. Everything
-    # printed afterwards is formatted now, before its files disappear.
-    farewell = _uninstall_windows.kept_lines(plan) if windows else _render_kept(plan, purged=opts.purge_data)
-    env = plan.hermes_env
-    ok, output = uninstall_packages(env, runner=ctx.runner)
-    if output:
-        print(output)
-    if not ok:
-        _term.emit_error(
-            f"uv pip uninstall failed in {env.root}; Hermes's files are already restored. "
-            f"Remove the package by hand: {env.uv} pip uninstall --python {env.python} {' '.join(env.installed)}"
-        )
-        return 1
-    if env.installed:
-        print(f"Uninstalled {', '.join(env.installed)} from {env.root}.")
-    print(farewell)
-    print("Done. Restart Hermes (and Hermes Desktop) so it stops loading Mordred.")
-    return 0
-
-
 def run_uninstall(ctx: UninstallContext, opts: UninstallOptions) -> int:
     """Plan, confirm, and run the uninstall. Returns the process exit code."""
+    from ..dbcrypt import root_home
+
+    if root_home(ctx.home).resolve() != ctx.home.resolve():
+        _term.emit_error(f"Uninstall removes a shared package; run with HERMES_HOME={root_home(ctx.home)}")
+        return 1
     if opts.erase_encrypted and ctx.platform == "win32":
         return _uninstall_windows.erase_refusal()
     if opts.erase_encrypted and not opts.purge_data:
         opts = dataclasses.replace(opts, purge_data=True)
-    plan = build_plan(ctx, opts)
+    try:
+        plan = build_plan(ctx, opts)
+    except (OSError, RuntimeError) as exc:
+        _term.emit_error(f"Uninstall inventory refused: {exc}. Nothing was changed.")
+        return 1
     print(render_plan(plan, opts))
     print()
     if opts.dry_run:
-        print("Dry run: nothing was changed.")
+        print("Dry run: nothing was changed. Keys and restoration were not checked. Success is not guaranteed.")
         return 0
     optional_work = (opts.purge_data and bool(plan.data or plan.device_keys)) or (
         (opts.remove_helper or opts.purge_data) and any(helper.mordred_built for helper in plan.helpers)
@@ -812,26 +865,20 @@ def run_uninstall(ctx: UninstallContext, opts: UninstallOptions) -> int:
     if not _confirm(ctx, opts, plan):
         print("Uninstall cancelled; nothing was changed.")
         return 1
-    planned_databases = any(r.target == "databases" for r in plan.restores)
-    if ctx.platform == "darwin" or (planned_databases and ctx.platform != "win32"):
-        try:
-            # Confirmation happens without a lease. Always take custody now:
-            # another process may have enabled encryption after the plan.
-            with _uninstall_databases.guard(ctx, erase=opts.erase_encrypted):
-                if _uninstall_databases.needed(ctx.home) != planned_databases:
-                    raise RuntimeError(
-                        "database protection changed after the plan was printed; nothing was removed. "
-                        "Re-run uninstall to review the updated plan"
-                    )
-                return _execute(ctx, plan, opts)
-        except Exception as exc:
-            _term.emit_error(f"uninstall stopped: {exc}. Resolve the failure before retrying.")
-            return 1
-    return _execute(ctx, plan, opts)
+    try:
+        from ._uninstall_coordinator import execute
+
+        return execute(ctx, plan, opts)
+    except Exception as exc:
+        _term.emit_error(
+            f"uninstall stopped: {exc}. Completed restoration steps remain in place; "
+            "later cleanup was stopped. Resolve the failure before retrying."
+        )
+        return 1
 
 
 def _context_from_environment() -> UninstallContext:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
     from ..keyvault._identity import resolve_root
 
     return UninstallContext(home=hermes_home(), vault_root=resolve_root(None), user_home=Path.home())

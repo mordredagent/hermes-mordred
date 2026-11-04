@@ -456,7 +456,7 @@ class TestWindowsSourceSnapshot:
         assert (marker.stat().st_ino, marker.read_bytes()) == before
 
     def test_upgrade_uses_one_snapshot_even_when_source_changes(self, windows_source, tmp_path, monkeypatch):
-        from mordred_hermes._config_io import CONFIG_LIMIT
+        from mordred_hermes._core._config_io import CONFIG_LIMIT
         from mordred_hermes.wizard import openclaw_migration as migration
 
         base, events, _ = windows_source

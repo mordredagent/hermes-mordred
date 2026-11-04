@@ -91,8 +91,15 @@ def _ancestor(fd: int) -> None:
     _validate_acl(fd)
 
 
+# The Darwin ACL query exists only on a macOS host. A policy simulation that
+# patches ``sys.platform`` must never reach the libSystem ABI from the other
+# side: neither a Linux host simulating darwin nor a macOS host simulating
+# Linux (tests/test_dbcrypt_lifecycle.py pins the latter).
+_MACOS_HOST = sys.platform == "darwin"
+
+
 def _validate_acl(fd: int) -> None:
-    if sys.platform == "darwin":
+    if _MACOS_HOST and sys.platform == "darwin":
         from ._macos_acl import validate_acl
 
         validate_acl(fd)
@@ -368,6 +375,21 @@ class _Transaction:
 
     def _mark_mutated(self) -> None:
         self.published = self.directory.published = True
+
+    def flush_directory(self) -> None:
+        self._check()
+        _flush(self.directory.fd)
+
+    def flush_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
+        validate_leaf(name)
+        self._check()
+        with self.directory._open(name) as fd:
+            identity = _identity(_private(fd))
+            if expected_identity is not None and identity != expected_identity:
+                raise PrivateFSError("unsafe", "flush_identity")
+            _flush(fd)
+            if _identity(_private(fd)) != identity or self.directory.stat(name).identity != identity:
+                raise PrivateFSError("unsafe", "flush_identity")
 
     def delete_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
         self._move(name, None, expected_identity)

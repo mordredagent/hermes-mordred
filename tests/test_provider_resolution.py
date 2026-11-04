@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from unittest.mock import Mock
 
-from mordred_hermes._provider_resolution import (
+from mordred_hermes._core._provider_resolution import (
     read_auth_active_provider,
     read_config_model_provider,
     resolve_disk_provider,

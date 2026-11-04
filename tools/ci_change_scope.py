@@ -54,7 +54,7 @@ def _inventory(path: Path = INVENTORY) -> dict[str, object]:
 
 
 def native_modules() -> tuple[str, ...]:
-    """Original 84 whole-module selector, in the external harness's order."""
+    """Reviewed Windows selector, preserving the original 84 modules first."""
     value = _inventory().get("native_modules")
     if (
         not isinstance(value, list)
@@ -98,6 +98,7 @@ def _sensitive(path: str) -> bool:
     if path.startswith(("native/", "packaging/", ".github/", "tools/", "docs/dev/")) or path in {
         "AGENTS.md",
         "pyproject.toml",
+        "hatch_build.py",
         "uv.lock",
         "scripts/install.sh",
         "scripts/install.ps1",
@@ -169,9 +170,13 @@ def _sensitive(path: str) -> bool:
     rel = path.removeprefix(base)
     if "/" not in rel:
         return True
-    if rel.startswith(("keyvault/", "dbcrypt/", "_private_fs/")):
+    if rel.startswith(("keyvault/", "dbcrypt/", "_core/", "_private_fs/")):
         return True
     if rel in {
+        "imports/store.py",
+        "imports/_mail_reconcile.py",
+        "activity/contracts.py",
+        "activity/_redaction.py",
         "extension/crypto.py",
         "extension/e2e.py",
         "extension/pairing.py",
@@ -284,7 +289,7 @@ def github_json(path: str) -> object:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request("https://api.github.com" + path, headers=headers)
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - https URL on a fixed origin
         body = response.read(8 * 1024 * 1024 + 1)
     if len(body) > 8 * 1024 * 1024:
         raise ValueError("API response exceeds limit")
@@ -354,14 +359,17 @@ def push_changes(before: str, after: str, *, root: Path = ROOT) -> list[dict[str
         or before == after
     ):
         raise ValueError("invalid push range")
-    ancestry = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", before, after], cwd=root, capture_output=True, check=False
+    ancestry = subprocess.run(  # noqa: S603 - list argv, no shell
+        ["git", "merge-base", "--is-ancestor", before, after],  # noqa: S607 - PATH lookup of a system tool is intended
+        cwd=root,
+        capture_output=True,
+        check=False,
     )
     if ancestry.returncode:
         raise ValueError("push before SHA is not an available ancestor")
     diff = (
-        subprocess.run(
-            ["git", "diff", "--name-status", "-z", "--find-renames", before, after, "--"],
+        subprocess.run(  # noqa: S603 - list argv, no shell
+            ["git", "diff", "--name-status", "-z", "--find-renames", before, after, "--"],  # noqa: S607 - PATH lookup of a system tool is intended
             cwd=root,
             capture_output=True,
             check=True,

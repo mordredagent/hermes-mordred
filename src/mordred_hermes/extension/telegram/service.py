@@ -5,6 +5,16 @@ task, exposes a status snapshot, the dialog list, and question answering. All
 failures surface as stable codes (``TelegramServiceError.code``) so no message
 text, name, or credential can reach a client or a log line through an
 exception string.
+
+Where a sync writes is decided per sync by :func:`.history.select_sink`: the
+``.enc`` archive, or ``mordred.db`` once ``index.enc`` is retired to it (macOS
+only; a fresh macOS account whose import-store gate passes starts there). The
+dialog list and the status counts read whichever store the index names.
+
+Questions (:meth:`TelegramService.ask`) read the same store
+(:func:`.history.load_ask_records`), render every selected part with an
+attributed head line, and validate the answer's evidence ids against the
+parts that were actually sent (:func:`mordred_hermes.imports.evidence.validate`).
 """
 
 from __future__ import annotations
@@ -19,6 +29,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from ...imports.evidence import EvidenceCard, EvidenceReport, validate
+from ...imports.render import LABELS, format_date
 from ..egress import EgressError, EgressRoute, resolve_route
 from . import venice
 from .ask import (
@@ -26,6 +38,7 @@ from .ask import (
     Aliases,
     AskError,
     AskRequest,
+    Selection,
     budget_for,
     build_messages,
     dealias_stream,
@@ -43,11 +56,23 @@ from .client import (
     sync_archive,
     telethon_available,
 )
+from .history import (
+    ArchiveSink,
+    ImportSink,
+    ImportStoreOpener,
+    dialog_rows,
+    ensure_history_authority,
+    list_conversations,
+    load_ask_records,
+    open_history_store,
+    select_sink,
+)
+from .history import summary as import_summary
 from .llm import DEFAULT_LOCAL_CONTEXT_TOKENS, LlmConfigError, LlmTarget, resolve_target
 from .memory_guard import MemoryEncryptionRequired
 from .readonly import ReadOnlyViolation, RequestPolicy
 from .secrets import TelegramSecrets, TelegramSecretsError
-from .store import ArchiveStore, StoreError
+from .store import ArchiveIndex, ArchiveStore, StoreError
 from .tee import default_secret_store
 
 _log = logging.getLogger(__name__)
@@ -106,6 +131,14 @@ def error_code(exc: BaseException, fallback: str) -> str:
 
 @dataclass
 class AskResult:
+    """What was asked (handed to ``on_meta`` before the first chunk).
+
+    The evidence fields are filled in on the same object after the last chunk:
+    cards for the evidence ids the answer cited that were in the selection,
+    built from stored data only; ``unverified_ids`` cited but not sent;
+    ``unsupported_quotes`` quoted spans that do not match their cited part.
+    """
+
     model: str
     message_count: int
     dialog_count: int
@@ -113,13 +146,52 @@ class AskResult:
     mode: str = "keyword"
     candidates: int = 0
     chats_searched: int = 0
+    evidence: tuple[EvidenceCard, ...] = ()
+    unverified_ids: tuple[str, ...] = ()
+    unsupported_quotes: tuple[str, ...] = ()
+
+
+def card_json(card: EvidenceCard) -> dict[str, Any]:
+    """One evidence card for a client: stored facts and the stored excerpt, never more of the body."""
+    return {
+        "id": card.evidence_id,
+        "speaker": card.speaker,
+        "speaker_class": str(card.speaker_class),
+        "part_kind": str(card.part_kind),
+        "chat": card.chat,
+        "sent_at": card.sent_at,
+        "date": format_date(card.sent_at),
+        "original_sent_at": card.original_sent_at,
+        "excerpt": card.excerpt,
+        "quote_verified": card.quote_verified,
+        "provenance_quality": str(card.provenance_quality),
+    }
+
+
+def _attach_evidence(
+    result: AskResult, report: EvidenceReport, on_evidence: Callable[[EvidenceReport], None] | None
+) -> None:
+    result.evidence = report.cards
+    result.unverified_ids = report.unverified_ids
+    result.unsupported_quotes = report.unsupported_quotes
+    if on_evidence is not None:
+        on_evidence(report)
+
+
+def _label_language(home: Path) -> str:
+    """``plugins.mordred_imports.label_language`` (``en`` / ``ja``); anything else is ``en``."""
+    from ..._core._yaml_io import load_plugin_section
+
+    section = load_plugin_section(home / "config.yaml", "mordred_imports", catch=(Exception,)) or {}
+    lang = section.get("label_language")
+    return lang if isinstance(lang, str) and lang in LABELS else "en"
 
 
 def _audit(event: str, decision: str, **fields: Any) -> None:
     """Best-effort audit entry. Never includes content, names, or keys."""
     try:
-        from ..._audit_support import build_audit_writer, safe_audit_append
-        from ..._home import hermes_home
+        from ..._core._audit_support import build_audit_writer, safe_audit_append
+        from ..._core._home import hermes_home
 
         writer = build_audit_writer(hermes_home() / "mordred" / "audit.log")
         safe_audit_append(writer, {"event": event, "decision": decision, "reason": None, **fields}, logger=_log)
@@ -138,15 +210,15 @@ def check_llm_policy(backend: str, base_url: str) -> None:
     contains ``"venice"`` and ``allow_cloud_llm`` is true). There is no
     interactive prompt here: ``prompt-once`` fails closed.
     """
-    from ..._home import hermes_home
-    from ..._policy_io import read_policy_mode_fail_closed
+    from ..._core._home import hermes_home
+    from ..._core._policy_io import read_policy_mode_fail_closed
     from ...llm_guard import enforce
     from ...llm_guard._exceptions import MordredSessionRefused
 
     path = hermes_home() / "mordred" / "policy.json"
     mode = read_policy_mode_fail_closed(path, default="lenient", log=_log)
     try:
-        from ..._audit_support import build_audit_writer
+        from ..._core._audit_support import build_audit_writer
 
         writer = build_audit_writer(hermes_home() / "mordred" / "audit.log")
         enforce.check_runtime_provider(
@@ -229,6 +301,8 @@ class TelegramService:
         policy_check: Callable[[str, str], None] = check_llm_policy,
         installed: Callable[[], bool] = telethon_available,
         memory_guard: Callable[[], None] | None = None,
+        import_store_opener: ImportStoreOpener | None = None,
+        home: Path | None = None,
     ) -> None:
         # Hardware-sealed (Enclave/TPM, or the Windows custody telegram role);
         # every load() is a fresh native unwrap.
@@ -243,6 +317,9 @@ class TelegramService:
         self._route_resolver = route_resolver
         self._policy_check = policy_check
         self._installed = installed
+        # ``open_import_store``-shaped seam (tests inject a plain-SQLite store).
+        self._import_store_opener = import_store_opener
+        self._home = home
         if memory_guard is None:
             from .memory_guard import require_memory_encryption
 
@@ -257,10 +334,27 @@ class TelegramService:
     # -- helpers --------------------------------------------------------------
 
     async def _load_secrets(self, *, fresh: bool = False) -> TelegramSecrets | None:
-        return await asyncio.to_thread(self._secrets.load, fresh=fresh)
+        try:
+            return await asyncio.to_thread(self._secrets.load, fresh=fresh)
+        except BaseException:
+            from ...keyvault._presence import revoke_current
+
+            revoke_current()
+            raise
 
     def _archive(self, value: TelegramSecrets) -> ArchiveStore:
         return ArchiveStore(value.store_key, self._archive_root)
+
+    def _profile_home(self) -> Path:
+        if self._home is not None:
+            return self._home
+        from ..._core._home import hermes_home
+
+        return hermes_home()
+
+    def _select_sink(self, store: ArchiveStore, index: ArchiveIndex) -> ArchiveSink | ImportSink:
+        """``ImportSink`` iff the index is retired to ``mordred.db``, or it is fresh and the shared gate passes."""
+        return select_sink(store, index, home=self._profile_home(), opener=self._import_store_opener)
 
     @property
     def syncing(self) -> bool:
@@ -312,13 +406,23 @@ class TelegramService:
             "account_label": index.account_label,
         }
 
+    def _imported_dialogs(self, index: ArchiveIndex, store: Any = None) -> list[dict[str, Any]]:
+        """The dialog list from ``mordred.db`` (retired index); remembers the counts for status."""
+        imports = store if store is not None else open_history_store(self._profile_home(), self._import_store_opener)
+        convs = list_conversations(imports, index)
+        self._summary = import_summary(convs, index)
+        return dialog_rows(convs[:_MAX_DIALOGS_LISTED])
+
     async def dialogs(self) -> list[dict[str, Any]]:
+        await asyncio.to_thread(ensure_history_authority, self._profile_home())
         await asyncio.to_thread(self._memory_guard)
         value = await self._load_secrets()
         if value is None:
             raise TelegramServiceError("telegram_not_configured")
         index = await asyncio.to_thread(self._archive(value).load_index)
         del value
+        if index.retired_to is not None:
+            return await asyncio.to_thread(self._imported_dialogs, index)
         self._remember_summary(index)
         ordered = sorted(index.dialogs.values(), key=lambda d: d.last_date, reverse=True)
         return [
@@ -371,6 +475,7 @@ class TelegramService:
         try:
             if not self._installed():
                 raise TelegramServiceError("telegram_not_installed")
+            await asyncio.to_thread(ensure_history_authority, self._profile_home())
             await asyncio.to_thread(self._memory_guard)
             value = await self._load_secrets(fresh=True)
             if value is None:
@@ -394,19 +499,18 @@ class TelegramService:
 
     async def _run_sync(self, value: TelegramSecrets, store: ArchiveStore, lock: Any, options: SyncOptions) -> None:
         client: Any = None
+        revoked_session = False
         try:
+            # Chosen before connecting: a retired index whose store refuses never reaches Telegram.
+            index = await asyncio.to_thread(store.load_index)
+            sink = await asyncio.to_thread(self._select_sink, store, index)
             # Built on the loop thread: Telethon binds a client to its loop.
             client = self._client_factory(value.api_id, value.api_hash, value.session, policy=RequestPolicy())
             await client.connect()
             if not await client.is_user_authorized():
                 raise TelegramServiceError("telegram_session_revoked")
 
-            def on_progress(state: SyncProgress) -> None:
-                self._progress = state
-
-            result = await sync_archive(client, store, options=options, progress=on_progress)
-            self._progress = result
-            self._remember_summary(await asyncio.to_thread(store.load_index))
+            result = await self._sync_into(client, store, sink, options)
             _audit(
                 "telegram.sync",
                 "allow",
@@ -414,13 +518,19 @@ class TelegramService:
                 messages=result.messages_imported,
             )
         except asyncio.CancelledError:
+            from ...keyvault._presence import revoke_current
+
+            revoke_current()
             self._last_error = "sync_cancelled"
             raise
         except Exception as exc:
             code = error_code(exc, "telegram_sync_failed")
             self._last_error = code
-            if code == "telegram_session_revoked":
-                await self._forget_revoked_session()
+            revoked_session = code == "telegram_session_revoked"
+            if revoked_session:
+                from ...keyvault._presence import revoke
+
+                revoke(home=self._profile_home())
             if code == "telegram_sync_failed":
                 # Type name only: an exception message or traceback locals
                 # could carry message text.
@@ -435,8 +545,33 @@ class TelegramService:
             except StoreError as exc:
                 # A classified lock-release failure is reported, never lost.
                 self._last_error = self._last_error or exc.code
+            else:
+                # A fresh credential update may await hardware authentication.
+                # The archive scope must actually exit before that unwrap;
+                # failed release defers this best-effort cleanup to a retry.
+                if revoked_session:
+                    await self._forget_revoked_session()
             finally:
                 self._progress.finished_at = int(time.time())
+
+    async def _sync_into(
+        self, client: Any, store: ArchiveStore, sink: ArchiveSink | ImportSink, options: SyncOptions
+    ) -> SyncProgress:
+        def on_progress(state: SyncProgress) -> None:
+            self._progress = state
+
+        if isinstance(sink, ImportSink):
+            result = await sync_archive(client, store, options=options, progress=on_progress, sink=sink)
+        else:
+            # The archive path keeps today's exact call (sync_archive builds its own ArchiveSink).
+            result = await sync_archive(client, store, options=options, progress=on_progress)
+        self._progress = result
+        index = await asyncio.to_thread(store.load_index)
+        if isinstance(sink, ImportSink):
+            await asyncio.to_thread(self._imported_dialogs, index, sink.store)
+        else:
+            self._remember_summary(index)
+        return result
 
     async def _forget_revoked_session(self) -> None:
         """Telegram ended this login: drop the dead session so setup asks to log in again.
@@ -474,9 +609,37 @@ class TelegramService:
             local_api_key=value.local_api_key,
         )
 
-    async def ask(self, request: AskRequest, on_meta: Callable[[AskResult], None]) -> AsyncIterator[str]:
-        """Stream the answer; *on_meta* is called once before the first chunk."""
+    def _select(self, store: ArchiveStore, request: AskRequest, context_tokens: int) -> tuple[Selection, Aliases, int]:
+        """Read the history (worker thread) and pick the parts to send; returns (selection, aliases, last_sync)."""
+        index = store.load_index()
+        # mordred.db when the index is retired there (never .enc then), else the .enc archive.
+        home = self._profile_home() if index.retired_to is not None else None
+        records = load_ask_records(store, index, request, home=home, opener=self._import_store_opener)
+        if not records:
+            raise TelegramServiceError("archive_empty")
+        aliases = Aliases(enabled=request.pseudonymize)
+        lang = _label_language(self._profile_home())
+        selection = select_context(records, request, aliases, budget_tokens=budget_for(context_tokens), lang=lang)
+        if selection.message_count == 0:
+            raise TelegramServiceError("no_matching_messages")
+        return selection, aliases, index.last_sync
+
+    async def ask(
+        self,
+        request: AskRequest,
+        on_meta: Callable[[AskResult], None],
+        *,
+        on_evidence: Callable[[EvidenceReport], None] | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream the answer; *on_meta* is called once before the first chunk.
+
+        After the last chunk the answer's evidence ids are validated against
+        the parts sent: the result passed to *on_meta* gains ``evidence`` /
+        ``unverified_ids`` / ``unsupported_quotes``, then *on_evidence* (if
+        given) receives the report.
+        """
         question = validate_question(request.question)
+        await asyncio.to_thread(ensure_history_authority, self._profile_home())
         await asyncio.to_thread(self._memory_guard)
         # A fresh Enclave unwrap for every question; nothing is cached.
         value = await self._load_secrets(fresh=True)
@@ -499,26 +662,17 @@ class TelegramService:
                 context_tokens = (await venice.require_private_model(session, cfg)).context_tokens
             else:
                 context_tokens = DEFAULT_LOCAL_CONTEXT_TOKENS
-            index = await asyncio.to_thread(store.load_index)
-            if not index.dialogs:
-                raise TelegramServiceError("archive_empty")
-            aliases = Aliases(enabled=request.pseudonymize)
-            selection = await asyncio.to_thread(
-                select_context, store, index, request, aliases, budget_tokens=budget_for(context_tokens)
+            selection, aliases, last_sync = await asyncio.to_thread(self._select, store, request, context_tokens)
+            result = AskResult(
+                model=cfg.model,
+                message_count=selection.message_count,
+                dialog_count=selection.dialog_count,
+                truncated=selection.truncated,
+                mode=selection.mode,
+                candidates=selection.candidates,
+                chats_searched=selection.chats_searched,
             )
-            if selection.message_count == 0:
-                raise TelegramServiceError("no_matching_messages")
-            on_meta(
-                AskResult(
-                    model=cfg.model,
-                    message_count=selection.message_count,
-                    dialog_count=selection.dialog_count,
-                    truncated=selection.truncated,
-                    mode=selection.mode,
-                    candidates=selection.candidates,
-                    chats_searched=selection.chats_searched,
-                )
-            )
+            on_meta(result)
             _audit(
                 "telegram.ask",
                 "allow",
@@ -528,16 +682,19 @@ class TelegramService:
                 dialogs=selection.dialog_count,
                 pseudonymized=request.pseudonymize,
             )
-            prompt = build_messages(question, selection, request=request, last_sync=index.last_sync)
+            prompt = build_messages(question, selection, request=request, last_sync=last_sync, aliases=aliases)
             chunks = venice.stream_chat(session, cfg, prompt, max_tokens=ANSWER_TOKENS, backend=target.backend)
-            produced = False
+            answered: list[str] = []
             async with contextlib.aclosing(chunks), contextlib.aclosing(dealias_stream(chunks, aliases)) as answer:
                 async for text in _without_thinking(answer):
-                    produced = produced or bool(text.strip())
+                    answered.append(text)
                     yield text
-            if not produced:
+            full_answer = "".join(answered)
+            if not full_answer.strip():
                 # Never hand back a silent empty answer as if it were one.
                 raise AskError("llm_empty_answer")
+            # On the de-aliased answer: evidence ids carry no alias token.
+            _attach_evidence(result, validate(full_answer, selection.evidence), on_evidence)
         except venice.VeniceError as exc:
             if target.backend == "local":
                 _audit("telegram.ask.failed", "error", backend="local", error=exc.code, detail=exc.detail)
