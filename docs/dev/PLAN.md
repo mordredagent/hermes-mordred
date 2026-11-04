@@ -12,6 +12,17 @@ Mordred is a standalone Python distribution loaded through
 Hermes upstream.
 
 
+## Scoped maintenance coordination (2026-11-04)
+
+Follow [the six-task implementation plan](../superpowers/plans/2026-11-04-maintenance-six.md)
+and its [design](../superpowers/specs/2026-11-04-maintenance-six-design.md).
+Land this coordination documentation before cross-component implementation;
+use separate local worktrees/branches for YAML diagnostics, passive status,
+Windows test setup, dbcrypt admission, ImportStore history APIs and acceptance
+tooling. Integrate reviewed commits locally, run focused security modules per
+slice and one full regression at final integration. Preserve required live gates
+and distinguish historical timing weights from fresh same-host measurements.
+
 ## Bounded macOS presence reuse
 
 `keyvault/_presence.py` binds operation-local scope, fixed-purpose credential

@@ -7,6 +7,18 @@ formats, and public behavior must stay consistent with this specification or
 change here in the same patch.
 
 
+## Scoped maintenance coordination (2026-11-04)
+
+The six maintenance slices are specified in [the maintenance design](../superpowers/specs/2026-11-04-maintenance-six-design.md).
+This is the spec-first coordination boundary for shared-core, dbcrypt, imports
+and extension changes; implementations remain separately reviewable. Passive
+presentation may explicitly opt out of the R-C2b-1 in-process wait while ordinary
+runtime admission retains its 2.0-second bound. Database callbacks retain fresh
+metadata/path checks and every protected open retains authenticated integrity
+verification; the older TODO admission/commit-only suggestion is not adopted.
+Public ImportStore reads own conversation/cursor/statistics SQL and committed
+snapshot hydration, preserving source/account and legacy archive behavior.
+
 ## Bounded macOS presence reuse
 
 The opt-in `plugins.mordred_keyvault.presence_reuse_seconds` accepts integers
