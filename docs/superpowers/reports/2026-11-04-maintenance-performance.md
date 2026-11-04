@@ -106,3 +106,59 @@ acceptance, native Windows status contention or live Telegram/account acceptance
 was run for this delivery. Ordinary SQLCipher tests, injected Windows paths,
 synthetic evidence and hosted CI cannot close those hardware/account gates.
 No production Hermes home or production gateway port was used for validation.
+
+## Approved additional test and code reduction
+
+The user approved the [reduction design](../specs/2026-11-04-test-reduction-design.md)
+and requested its inclusion in this same PR. This deliberately changes collection
+identity/count; it is separate from the historical all-node-equivalent Unix
+comparison above.
+
+| Repeated execution | Before → after | Retained verification owner |
+| --- | ---: | --- |
+| Duplicate Windows syntax / plain Linux layout | 2 → 0 additional cases | Portable shared-source syntax check / stronger misleading-text Linux metadata case |
+| Duplicate late Telegram cancellation | 2 → 1 | Existing secret scenario now also checks request, UI and notification outcomes |
+| Older import completion happy paths | 2 → 0 additional cases | Both stronger stale-poll races now also check repeated and changed-count idle responses |
+| Vault failure lifecycle | 4 → 2 | Expired and busy cover the two branches; closed-code wording checks remain |
+| DirectTools generic refusal lifecycle | 7 → 1 | One real component refusal plus all seven independent literal wording checks |
+| Mail generic setup refusal lifecycle | 15 → 3 | IMAP-hint, mail-specific and shared wording representatives; all fifteen literal phrases checked through the pure mapping |
+| Secret value × admitted field kind | 90 → 32 | All thirty secret values plus the other two field branches; ordinary field/operation checks remain |
+| Standalone historical span executions | 119 → 86 | Thirty-three overlapping inputs run the identical independent span assertion inside existing exact-output corpus cases |
+
+Complete desktop pack: **343 → 318 cases**. Complete activity contract pack:
+**810 → 719 cases**. Total: **116 fewer selected executions**, retaining every
+unique behavior and all 119 independent historical span inputs. Runtime ownership
+instrumentation observed every original historical input. Diagnostic covered file,
+line and denominator sets were unchanged: desktop **482/482 covered lines**,
+activity **1,595/1,595**. These focused diagnostic runs intentionally disabled the
+whole-package coverage floor; they do not replace final >=80% acceptance.
+
+The change shares seven identical numeric tree-text walkers and removes two
+repeated full Node preparation runs. Two string-only walkers retain their
+original semantics. Fifty redundant positional callback protocol declarations
+were replaced by exact Callable field annotations; all default, keyword-only
+and variadic contracts remain, including `_python`. This removes **201 tooling
+lines**; test sources shrink by **57 lines**, for **258 net source lines removed**
+relative to the pre-cleanup integration. No unproven runtime dead-code deletion
+was made. Independent AST/call-site review verified the callback contracts.
+
+Final focused outcomes: desktop **318 passed**, activity **719 passed**, complete
+acceptance-tool pack **475 passed**; CLI help, Ruff, strict mypy (416 files),
+import contracts and shellcheck passed. Seven process-local injected faults were
+detected by retained checks: missing refresh, missing form clearing, lost busy
+flow, applied late-cancelled response, wrong mail wording, field-specific secret
+bypass, and lost historical spans while public exact-output expectations remained
+correct. No production file was mutated for these probes. The independent review
+found no Critical or Important issues; its documentation nit was corrected.
+
+Desktop focused elapsed was 14.28s before and 28.65s after; activity was 32.46s
+before and 83.89s in the final passing after run. **No new cleanup speedup is
+claimed.** Unchanged common desktop tests slowed together. An intermediate
+activity run under observed load 31.48 on ten CPUs failed the existing
+`test_the_text_redactor_is_linear_on_hostile_input` and
+`test_qualified_redaction_is_linear_on_hostile_input` wall-time ratio assertions
+(717 passed, two failed, 236.06s). Both tests, their timing helper and activity
+runtime were unchanged. They subsequently passed with wall/CPU sampling, then
+the complete 719-case module passed. Load/scheduling sensitivity is supported;
+the precise original failure timeline was not captured. Thresholds, timeouts,
+skip conditions and runtime code were not altered to obtain green.

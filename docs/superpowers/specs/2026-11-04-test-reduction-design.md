@@ -1,5 +1,8 @@
 # Focused test and acceptance-tool reduction — 2026-11-04
 
+Approved by the user on 2026-11-04. Implementation and measured limits are
+recorded in the [validation report](../reports/2026-11-04-maintenance-performance.md).
+
 ## Intent
 
 The user expanded the maintenance integration request to include substantially
