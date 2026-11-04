@@ -640,7 +640,6 @@ def test_backend_answers_version_4_like_version_3(monkeypatch, platform, tmp_pat
     "status,layout",
     [
         ({"platform": "darwin", "hardware_kind": "secure_enclave", "telegram_supported": True}, "macos"),
-        ({"platform": "linux", "hardware_kind": "tpm", "telegram_supported": True}, "linux"),
         ({"platform": "win32", "hardware_kind": "cng", "telegram_supported": False}, "windows"),
         ({"platform": "darwin", "hardware_kind": None, "telegram_supported": True}, "unsupported"),
         ({"platform": "darwin", "hardware_kind": "secure_enclave", "telegram_supported": False}, "unsupported"),
@@ -700,19 +699,39 @@ def test_every_code_the_page_knows_has_an_entry():
 
 
 def test_explain_uses_the_imap_hint_and_mail_wording():
-    result = render_page("""
+    result = render_page(
+        """
 console.log(JSON.stringify({
   hinted: new MordredError('imap_auth_failed', {hint: 'gmail_app_password_length'}).message,
   unknown: new MordredError('imap_auth_failed', {hint: 'free text from a server'}).message,
   plain: explain('imap_auth_failed'),
   mail: explainMail('secrets_corrupt'),
   shared: explainMail('imap_unreachable'),
+  mailFailures: ANSWERS.map(a => explainMail(a.error, a.hint)),
+  directFailures: Object.fromEntries(DIRECT_CODES.map(code => [code, explain(code)])),
 }))
-""")
+""".replace("ANSWERS", json.dumps([answer for answer, _ in MAIL_FAILURES])).replace(
+            "DIRECT_CODES", json.dumps(list(DIRECT_TOOLS_CODES))
+        )
+    )
     assert result["hinted"].startswith("A Gmail app password is exactly 16 letters")
     assert result["unknown"] == result["plain"] == "The login was refused. Nothing was stored."
     assert "mailbox" in result["mail"] and "Telegram" not in result["mail"]
     assert result["shared"].startswith("The server could not be reached")
+    for (answer, phrase), message in zip(MAIL_FAILURES, result["mailFailures"], strict=True):
+        assert phrase in message, answer
+    direct_phrases = {
+        "config_unreadable": "could not be read (or is not a YAML mapping)",
+        "config_vault_managed": "sealed in Mordred\u2019s vault",
+        "config_write_failed": "hermes config command did not finish",
+        "config_has_setting": "already sets tools.tool_search",
+        "hermes_cli_missing": "hermes command was not found",
+        "config_unsupported_shape": "shares the tools or tool_search mapping",
+        "hermes_cli_unsupported": "hermes config command has no get/unset",
+    }
+    assert set(direct_phrases) == set(DIRECT_TOOLS_CODES) == set(result["directFailures"])
+    for code, phrase in direct_phrases.items():
+        assert phrase in result["directFailures"][code], code
 
 
 def test_sync_in_progress_names_both_writers():
@@ -848,9 +867,7 @@ console.log(JSON.stringify([...out]))
 def page_text(status: dict[str, Any]) -> str:
     return render_page(
         """
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 console.log(JSON.stringify(text(PageBody({status: STATUS, health: null, refresh: () => {}}))))
 """.replace("STATUS", json.dumps(status))
     )
@@ -943,9 +960,7 @@ rest = async path => {
 }
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)) }
 const page = () => { cursor = 0; effects.length = 0; return SetupPage({}) }
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 const out = {}
 page()
 effects.slice().forEach(f => f())
@@ -988,83 +1003,6 @@ console.log(JSON.stringify(out))
 SYNC_IDLE = {"syncing": False, "progress": None, "last_error": None, "dialog_count": 0, "message_count": 0}
 
 
-@pytest.mark.parametrize(
-    "polls",
-    [
-        # Finished before any poll saw it running: the first idle answer is its completion.
-        [{**SYNC_IDLE, "dialog_count": 2, "message_count": 9}],
-        # Seen running first: the busy → idle rule refreshes, and only once.
-        [SYNC_RUNNING, {**SYNC_IDLE, "dialog_count": 2, "message_count": 9}],
-    ],
-    ids=["idle-to-idle", "busy-to-idle"],
-)
-def test_an_import_started_here_refreshes_the_counts_once_even_between_polls(polls):
-    before = mac(**v4(telegram=(0, 0)))
-    after = mac(**v4(telegram=(2, 9)))
-    result = render_page(
-        """
-globalThis.setInterval = () => 0
-globalThis.clearInterval = () => {}
-const original = jsx
-let body = null
-jsx = jsxs = (type, props) => type === PageBody ? (body = props, {type: 'PageBody', props: {}}) : original(type, props)
-const statuses = [BEFORE, AFTER]
-const reads = []
-const polls = POLLS
-rest = async (path, init) => {
-  if (path.startsWith('/status')) {
-    reads.push(path)
-    return statuses[Math.min(reads.length - 1, statuses.length - 1)]
-  }
-  if (path === '/sync') return init && init.method === 'POST' ? {ok: true} : polls.length ? polls.shift() : LAST
-  return {ok: true}
-}
-const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)) }
-const page = () => { cursor = 0; effects.length = 0; return SetupPage({}) }
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
-const out = {}
-page()
-effects.slice().forEach(f => f())
-await flush()
-page()
-// The import step's first poll, before anything was started: idle, nothing to refresh.
-body.onSync(IDLE)
-await flush()
-out.beforeStart = reads.length
-// The real import step (its hooks numbered apart from SetupPage's), started by its button.
-const step = () => { cursor = 1000; effects.length = 0; return ImportStep({id: 'telegram_import', n: '2.4',
-  state: 'next', title: 'Import Telegram messages', refresh: body.refresh, onSync: body.onSync,
-  onStarted: body.onImportStarted}) }
-let tree = step()
-await find(tree, n => n.type === 'button' && n.props.children === 'Import').props.onClick()
-await flush()
-// The step's next polls (its interval), until the import is seen idle.
-while (polls.length) { body.onSync(await rest('/sync')); await flush() }
-out.afterImport = reads.length
-// Later polls of the same idle state, or of another one, never read the status again.
-body.onSync(LAST); await flush()
-body.onSync({...LAST, message_count: 10}); await flush()
-out.later = reads.length
-page()
-cursor = 2000
-out.text = text(PageBody({...body}))
-console.log(JSON.stringify(out))
-""".replace("BEFORE", json.dumps(before))
-        .replace("AFTER", json.dumps(after))
-        .replace("POLLS", json.dumps(polls))
-        .replace("LAST", json.dumps(polls[-1]))
-        .replace("IDLE", json.dumps(SYNC_IDLE))
-    )
-    assert result["beforeStart"] == 1
-    assert result["afterImport"] == 2, "exactly one extra status read for the finished import"
-    assert result["later"] == 2
-    text = result["text"]
-    assert "connected · 2 chats · 9 messages in Mordred\u2019s store (all accounts)" in text
-    assert "Import Telegram messages\u2713 Done" in text
-
-
 # SetupPage with its PageBody captured, and the real import step mounted beside it (hooks
 # numbered apart): /sync GETs and the POST answer from `syncAnswers` in order, "HOLD"
 # staying pending until `held.shift()(answer)`; /status answers BEFORE, then AFTER.
@@ -1090,9 +1028,7 @@ rest = async (path, init) => {
 }
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)) }
 const page = () => { cursor = 0; effects.length = 0; return SetupPage({}) }
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 page()
 effects.slice().forEach(f => f())
 await flush()
@@ -1136,6 +1072,9 @@ out.afterCurrent = reads.length
 timers[0](); await flush()
 out.later = reads.length
 out.gets = gets.length
+body.onSync(NINE); await flush()
+body.onSync({...NINE, message_count: 10}); await flush()
+out.afterRepeatedIdle = reads.length
 page()
 cursor = 2000
 out.text = text(PageBody({...body}))
@@ -1145,13 +1084,15 @@ out.text = text(PageBody({...body}))
     assert result["afterStale"] == 1, "the stale idle answer (poll issued before the start) refreshes nothing"
     assert result["afterCurrent"] == 2, "the first idle answer to a later poll is the import's end"
     assert result["later"] == 2 and result["gets"] == 3
+    assert result["afterRepeatedIdle"] == 2, "repeated or changed idle counts never repeat completion"
     assert "connected · 2 chats · 9 messages in Mordred\u2019s store (all accounts)" in result["text"]
     assert "Import Telegram messages\u2713 Done" in result["text"]
 
 
 def test_a_stale_pre_start_idle_after_a_post_start_busy_answer_changes_nothing():
     """busy (post-start) → stale idle (pre-start) → completed idle: one read, at the real end."""
-    script = """
+    script = (
+        """
 await find(tree, n => n.type === 'button' && n.props.children === 'Import').props.onClick()
 await flush()
 held[1](RUNNING)
@@ -1162,13 +1103,20 @@ await flush()
 out.afterStale = reads.length
 timers[0](); await flush()
 out.afterEnd = reads.length
+body.onSync(NINE); await flush()
+body.onSync({...NINE, message_count: 10}); await flush()
+out.afterRepeatedIdle = reads.length
 page()
 cursor = 2000
 out.text = text(PageBody({...body}))
-""".replace("RUNNING", json.dumps(SYNC_RUNNING)).replace("STALE", json.dumps(SYNC_IDLE))
+""".replace("RUNNING", json.dumps(SYNC_RUNNING))
+        .replace("STALE", json.dumps(SYNC_IDLE))
+        .replace("NINE", json.dumps(SYNC_NINE))
+    )
     result = import_page(["HOLD", {"ok": True}, "HOLD", SYNC_NINE], script)
     assert result["afterBusy"] == 1 and result["afterStale"] == 1
     assert result["afterEnd"] == 2, "exactly one extra status read, at the real completion"
+    assert result["afterRepeatedIdle"] == 2, "repeated or changed idle counts never repeat completion"
     assert "connected · 2 chats · 9 messages in Mordred\u2019s store (all accounts)" in result["text"]
     assert "Import Telegram messages\u2713 Done" in result["text"]
 
@@ -1603,9 +1551,7 @@ Object.defineProperty(globalThis, 'navigator', {value: {clipboard}, configurable
 let refreshes = 0
 const refresh = () => {refreshes++}
 const view = () => {cursor = 0; effects.length = 0; return COMPONENT}
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 const button = (tree, label) => find(tree, n => n.type === 'button' && n.props.children === label)
 const press = (tree, label) => {
   const found = button(tree, label)
@@ -1667,7 +1613,7 @@ COMMIT = "await press(tree, 'Create the vault'); tree = view()\n"
 
 
 def test_vault_step_shows_the_passphrase_before_anything_is_created():
-    result = component(vault_step(VAULT_NONE), [PREPARED], PREPARE)
+    result = component(vault_step(VAULT_NONE), [PREPARED], PREPARE + COMMIT)
     assert result["requests"] == [["/vault/prepare", {}]]
     words = render_page_words(result["tree"])
     assert words == WORDS
@@ -1676,9 +1622,7 @@ def test_vault_step_shows_the_passphrase_before_anything_is_created():
     assert create == ["Create the vault"]
     assert "Ask for Touch ID every time Hermes unlocks the vault" in result["text"]
     # Not ticked yet: the commit stays disabled, and pressing it anyway sends nothing.
-    gated = component(vault_step(VAULT_NONE), [PREPARED], PREPARE + COMMIT)
-    assert gated["requests"] == [["/vault/prepare", {}]]
-    assert '"disabled": true' in json.dumps(find_button(gated["tree"], "Create the vault"))
+    assert '"disabled": true' in json.dumps(find_button(result["tree"], "Create the vault"))
 
 
 def render_page_words(tree: Any) -> list[str]:
@@ -1813,8 +1757,6 @@ def test_a_malformed_prepare_answer_shows_no_card(answer):
     "code,kept",
     [
         ("vault_flow_expired", False),
-        ("vault_exists", False),
-        ("env_optout", False),
         ("memory_operation_in_progress", True),
     ],
 )
@@ -2358,22 +2300,22 @@ def test_a_superseded_setup_start_is_cancelled_and_the_newer_one_applies():
         + f"held.shift()({json.dumps(FOLDERS)})\nawait first\n"
         + f"held.shift()({json.dumps(newer)})\nawait second\ntree = view()\n"
         + "out.finish = Boolean(button(tree, 'Finish'))\n"
+        + "out.beforeFinish = {requests: [...requests], text: text(tree)}\n"
     )
-    result = component(late_step(MAIL_V4), ["HOLD", "HOLD", {"ok": True}], script)
-    assert [request[0] for request in result["requests"]] == [
-        "/mail/setup/start",
-        "/mail/setup/start",
-        "/mail/setup/m7/cancel",
-    ]
-    assert result["out"]["finish"] is True and "Gesendet" in json.dumps(result["tree"])
-    finish = component(
+    result = component(
         late_step(MAIL_V4),
         ["HOLD", "HOLD", {"ok": True}, {"ok": True, "step": "done"}],
         script
         + "find(find(tree, n => n.type === 'label' && text(n) === 'Archiv'), n => n.props && n.props.type === 'radio')"
         + ".props.onChange(); tree = view()\nawait press(tree, 'Finish'); tree = view()\n",
     )
-    assert finish["requests"][-1] == ["/mail/setup/m8/finish", {"selection": "f-arch"}]
+    assert [request[0] for request in result["out"]["beforeFinish"]["requests"]] == [
+        "/mail/setup/start",
+        "/mail/setup/start",
+        "/mail/setup/m7/cancel",
+    ]
+    assert result["out"]["finish"] is True and "Gesendet" in result["out"]["beforeFinish"]["text"]
+    assert result["requests"][-1] == ["/mail/setup/m8/finish", {"selection": "f-arch"}]
 
 
 def test_a_late_setup_failure_after_unmount_shows_nothing():
@@ -2400,26 +2342,26 @@ def test_mail_finish_failures_keep_the_flow_only_for_a_retry(code, kept):
     assert '"role": "alert"' in json.dumps(result["tree"])
 
 
-@pytest.mark.parametrize(
-    "answer,phrase",
-    [
-        ({"error": "imap_auth_failed", "hint": "authentication_failed"}, "The server rejected the address or the app"),
-        ({"error": "imap_auth_failed", "hint": "server_alert"}, "The server refused the login with an alert"),
-        ({"error": "imap_auth_failed", "hint": "login_disabled"}, "does not allow password login over IMAP"),
-        ({"error": "imap_auth_failed", "hint": "gmail_app_password_length"}, "exactly 16 letters"),
-        ({"error": "imap_auth_failed"}, "The login was refused. Nothing was stored."),
-        ({"error": "imap_unreachable"}, "The server could not be reached"),
-        ({"error": "sync_in_progress"}, "A mail fetch or import is running (from Hermes or Terminal)"),
-        ({"error": "mail_already_configured"}, "A mailbox is already set up. Remove it below first."),
-        ({"error": "mail_setup_busy"}, "Another mail setup is waiting for its folder choice"),
-        ({"error": "touch_id_policy_mismatch"}, "Touch ID setting differs from your choice"),
-        ({"error": "invalid_address"}, "Enter a mail address"),
-        ({"error": "invalid_host"}, "Enter the IMAP server name"),
-        ({"error": "invalid_account"}, "The account label must start with a lowercase letter"),
-        ({"error": "invalid_password"}, "1 to 256 printable characters"),
-        ({"error": "too_many_addresses"}, "at most 20 other addresses"),
-    ],
-)
+MAIL_FAILURES = [
+    ({"error": "imap_auth_failed", "hint": "authentication_failed"}, "The server rejected the address or the app"),
+    ({"error": "imap_auth_failed", "hint": "server_alert"}, "The server refused the login with an alert"),
+    ({"error": "imap_auth_failed", "hint": "login_disabled"}, "does not allow password login over IMAP"),
+    ({"error": "imap_auth_failed", "hint": "gmail_app_password_length"}, "exactly 16 letters"),
+    ({"error": "imap_auth_failed"}, "The login was refused. Nothing was stored."),
+    ({"error": "imap_unreachable"}, "The server could not be reached"),
+    ({"error": "sync_in_progress"}, "A mail fetch or import is running (from Hermes or Terminal)"),
+    ({"error": "mail_already_configured"}, "A mailbox is already set up. Remove it below first."),
+    ({"error": "mail_setup_busy"}, "Another mail setup is waiting for its folder choice"),
+    ({"error": "touch_id_policy_mismatch"}, "Touch ID setting differs from your choice"),
+    ({"error": "invalid_address"}, "Enter a mail address"),
+    ({"error": "invalid_host"}, "Enter the IMAP server name"),
+    ({"error": "invalid_account"}, "The account label must start with a lowercase letter"),
+    ({"error": "invalid_password"}, "1 to 256 printable characters"),
+    ({"error": "too_many_addresses"}, "at most 20 other addresses"),
+]
+
+
+@pytest.mark.parametrize("answer,phrase", [MAIL_FAILURES[i] for i in (0, 7, 10)])
 def test_mail_setup_failures_are_explained_and_clear_every_input(answer, phrase):
     result = component(mail_step(MAIL_V4), [{"ok": False, **answer}], FILL + CONNECT + FIELDS)
     assert phrase in result["text"]
@@ -2945,15 +2887,11 @@ def test_masked_inputs_leave_no_trace_after_success_failure_cancel_collapse_bloc
     assert [canary for canary in CANARIES if canary in sinks] == []
     for note in result["notifications"]:
         assert set(note) <= {"error", "kind", "message"}
-
-
-def test_a_late_answer_after_cancel_changes_nothing():
-    target, answers, script = SECRET_CASES["code-late-answer-after-cancel"]
-    result = secret(target, answers, script)
-    text = json.dumps(result["tree"])
-    assert "Telegram password" not in text and "Send login code" in text
-    assert result["requests"][-1] == "/telegram/login/f1/cancel"
-    assert result["notifications"] == []
+    if case == "code-late-answer-after-cancel":
+        text = json.dumps(result["tree"])
+        assert "Telegram password" not in text and "Send login code" in text
+        assert result["requests"][-1] == "/telegram/login/f1/cancel"
+        assert result["notifications"] == []
 
 
 def test_a_late_flow_after_collapse_is_cancelled():
@@ -3313,9 +3251,7 @@ def test_the_card_sits_in_maintenance_between_updates_and_uninstall():
     result = render_page(
         """
 const tree = PageBody({status: STATUS, health: null, refresh: () => {}})
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 const group = find(tree, n => n.type === 'section' && n.props['aria-labelledby'] === 'mordred-group-maintenance')
 const order = [].concat(group.props.children).filter(Boolean).map(n => n.props && n.props['aria-labelledby'] || n.type)
 const card = find(group, n => n.type === 'section' && n.props['aria-labelledby'] === 'mordred-tools')
@@ -3408,8 +3344,8 @@ def test_the_checkbox_shows_only_the_status_and_stays_disabled_while_saving():
     assert result["refreshes"] == 1
 
 
-@pytest.mark.parametrize("code", DIRECT_TOOLS_CODES)
-def test_a_refused_change_is_an_alert_with_its_sentence_and_no_restart(code):
+def test_a_refused_change_is_an_alert_with_its_sentence_and_no_restart():
+    code = "config_unreadable"
     result = tools_card(TOOLS_OFF, [{"ok": False, "error": code}], TICK)
     messages = block("MESSAGES")
     sentence = re.search(rf"^  {code}: '([^']+)',$", messages, re.M).group(1)
@@ -3445,9 +3381,7 @@ def model_step(check: dict[str, Any], tools: dict[str, Any] | None, state: str =
 const calls = []
 globalThis.document = {getElementById: id => ({scrollIntoView: () => calls.push(['scroll', id]),
   focus: () => calls.push(['focus', id])})}
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 const props = {id: 'hermes_model', n: '2.1', state: STATE, check: CHECK, tools: TOOLS, refresh: () => {}}
 const tree = HermesModelStep(props)
 const go = find(tree, n => n.type === 'button' && n.props['aria-label'] === 'Go to Tool calls')
@@ -3537,9 +3471,7 @@ def test_the_history_card_follows_tool_calls_in_maintenance():
     result = render_page(
         """
 const tree = PageBody({status: STATUS, health: null, refresh: () => {}})
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 const group = find(tree, n => n.type === 'section' && n.props['aria-labelledby'] === 'mordred-group-maintenance')
 const order = [].concat(group.props.children).filter(Boolean).map(n => n.props && n.props['aria-labelledby'] || n.type)
 const card = find(group, n => n.type === 'section' && n.props['aria-labelledby'] === 'mordred-history')

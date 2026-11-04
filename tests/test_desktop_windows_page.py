@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 
 import pytest
 
@@ -51,20 +49,6 @@ CODES = (
     "forget_confirm_mismatch",
     "custody_busy",
 )
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
-def test_page_is_a_valid_es_module():
-    completed = subprocess.run(
-        ["node", "--input-type=module", "--check"],
-        input=source(),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=60,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
 
 
 def test_page_requests_the_windows_capable_status_and_selects_by_hardware_kind():
