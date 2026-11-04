@@ -9,6 +9,8 @@ from types import ModuleType
 
 import pytest
 
+from tests.test_dbcrypt_authority import native_root as native_root
+
 
 def implementation() -> ModuleType:
     from mordred_hermes import dbcrypt
@@ -388,3 +390,161 @@ def test_native_memory_uri_rw_keeps_existing_refusal(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with pytest.raises(DatabaseRefused, match="does not exist"):
         _shim._native_path("file::memory:?mode=rw", uri=True)
+
+
+def _simulate_windows_backup(monkeypatch):
+    import os
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _backup, _maintenance_windows, _policy
+
+    for module in (_policy, _backup):
+        monkeypatch.setattr(module, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    # Off Windows the edition gate refuses too, which would hide a missing guard.
+    monkeypatch.setattr(_maintenance_windows, "require_qualified", lambda: None)
+    return _backup
+
+
+def _forbid_remote_io(guard, remote):
+    """Fail on any filesystem step for ``remote``; other paths keep real behavior."""
+    import os
+
+    from mordred_hermes.dbcrypt import _backup
+
+    def wrap(owner, name):
+        original = getattr(owner, name)
+
+        def checked(*args, **kwargs):
+            if args and any(isinstance(a, str | Path) and str(a) == str(Path(remote)) for a in args):
+                pytest.fail(f"{name} reached a remote backup path before refusal")
+            return original(*args, **kwargs)
+
+        guard.setattr(owner, name, checked)
+
+    for name in ("absolute", "resolve", "exists", "stat", "lstat"):
+        wrap(Path, name)
+    wrap(os.path, "realpath")
+    wrap(_backup, "open_private_directory")
+
+
+@pytest.mark.parametrize("name", _REMOTE_DATABASE_NAMES)
+def test_backup_destination_refuses_remote_names_before_any_filesystem_call(monkeypatch, name):
+    import os
+
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+
+    backup = _simulate_windows_backup(monkeypatch)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("remote destination reached the filesystem")
+
+    with monkeypatch.context() as guard:
+        for method in ("absolute", "resolve", "exists", "stat", "lstat"):
+            guard.setattr(Path, method, forbidden)
+        guard.setattr(os.path, "realpath", forbidden)
+        guard.setattr(backup, "open_private_directory", forbidden)
+        with pytest.raises(DatabaseRefused, match="namespace") as refused:
+            backup._canonical_destination(Path(name))
+    assert name not in str(refused.value)
+
+
+def test_backup_relative_destination_under_unc_cwd_refused_after_absolute(monkeypatch):
+    from pathlib import PureWindowsPath
+
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+
+    backup = _simulate_windows_backup(monkeypatch)
+    monkeypatch.setattr(backup, "open_private_directory", lambda *a, **k: pytest.fail("remote directory opened"))
+    resolved = []
+
+    class UncAbsolute(PureWindowsPath):
+        def resolve(self, *args, **kwargs):
+            resolved.append(self)
+            return self
+
+    with monkeypatch.context() as guard:
+        guard.setattr(Path, "absolute", lambda self: UncAbsolute(r"\\server\share\x.db"))
+        with pytest.raises(DatabaseRefused, match="namespace"):
+            backup._canonical_destination(Path("x.db"))
+    assert resolved == []
+
+
+@pytest.mark.parametrize("name", _REMOTE_DATABASE_NAMES)
+@pytest.mark.parametrize("entry", ["find", "delete", "pending_destination", "pending_prepared"])
+def test_registered_backup_values_refuse_remote_names_before_filesystem(monkeypatch, tmp_path, name, entry):
+    from contextlib import nullcontext
+
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes.dbcrypt import _migrate
+
+    backup = _simulate_windows_backup(monkeypatch)
+    local = str(tmp_path.resolve() / "x.db")
+    monkeypatch.setattr(backup, "asdict", lambda snapshot: {"synthetic": True})
+    monkeypatch.setattr(backup, "open_private_directory", lambda *a, **k: nullcontext())
+    journal = {"version": 1, "snapshot": {"synthetic": True}, "phase": "preparing"}
+    journal |= {"destination": name, "prepared": local}
+    if entry == "pending_prepared":
+        journal |= {"destination": local, "prepared": name}
+    monkeypatch.setattr(_migrate, "_read_json", lambda root, record: journal)
+    calls = {
+        "find": lambda: backup._find(tmp_path, Path(name), None),
+        "delete": lambda: backup._delete_registered_file({"path": name}, []),
+        "pending_destination": lambda: backup._pending(tmp_path, None),
+        "pending_prepared": lambda: backup._pending(tmp_path, None),
+    }
+    with monkeypatch.context() as guard:
+        _forbid_remote_io(guard, name)
+        with pytest.raises(DatabaseRefused, match="namespace"):
+            calls[entry]()
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        "backup_destination",
+        "backup_source",
+        "restore_source",
+        "restore_destination",
+        "export_source",
+        "export_output",
+        "delete",
+    ],
+)
+def test_public_backup_routes_refuse_remote_operator_paths_first(monkeypatch, native_root, route):
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
+    from mordred_hermes.dbcrypt._authority import Authority
+
+    root = native_root[0]
+    remote = r"\\server\share\x.db"
+    local = root / "state.db"
+    outside = root.parent / "outside.db"
+    backup = _simulate_windows_backup(monkeypatch)
+
+    def attempt():
+        if route.startswith(("backup", "delete")):
+            authority = Authority.acquire(root)
+            try:
+                if route == "backup_destination":
+                    backup.backup_database(local, Path(remote), authority=authority)
+                elif route == "backup_source":
+                    backup.backup_database(Path(remote), outside, authority=authority)
+                else:
+                    backup.delete_backup(Path(remote), authority=authority)
+            finally:
+                authority.close()
+            return
+        with acquire_exclusive(root) as lease:
+            if route == "restore_source":
+                backup.restore_database(Path(remote), local, lease=lease)
+            elif route == "restore_destination":
+                backup.restore_database(outside, Path(remote), lease=lease)
+            elif route == "export_source":
+                backup.export_database(root, Path(remote), outside, lease=lease)
+            else:
+                backup.export_database(root, outside, Path(remote), lease=lease)
+
+    with monkeypatch.context() as guard:
+        _forbid_remote_io(guard, remote)
+        with pytest.raises(DatabaseRefused, match="namespace"):
+            attempt()

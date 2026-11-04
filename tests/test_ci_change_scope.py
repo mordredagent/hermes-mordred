@@ -241,6 +241,7 @@ def test_dbcrypt_and_mail_modules_are_explicit_windows_inventory_members():
         "tests/test_dbcrypt_contracts.py",
         "tests/test_dbcrypt_inventory.py",
         "tests/test_dbcrypt_windows_paths.py",
+        "tests/test_dbcrypt_windows_native_paths.py",
         "tests/test_dbcrypt_windows_locking.py",
         "tests/test_dbcrypt_capability.py",
         "tests/test_dbcrypt_packaging.py",

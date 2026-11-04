@@ -2038,8 +2038,9 @@ volumes and reparse points, including cloud placeholders and mounted folders.
 Windows 11, ReFS, removable drives and network filesystems need later acceptance.
 Database admission rejects UNC and device namespaces with a path-free
 `DatabaseRefused` before target-path metadata lookup or SQL connection, including
-after URI decoding and after making relative names absolute. Later ACL and
-checked-VFS admission still apply to local paths.
+after URI decoding and after making relative names absolute. Backup, restore
+and export paths, including registered backup values, get the same refusal before
+any filesystem call. Later ACL and checked-VFS admission still apply to local paths.
 Protect against other ordinary users and accidental path substitution, not
 administrators, kernel code or arbitrary hostile code under the same user SID.
 

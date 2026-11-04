@@ -2080,12 +2080,16 @@ completion acceptance matrix track later work and current open gates.
 
 - **2026-11-03 — Windows database namespace refusal (host verification only).**
   Lexical refusal was exercised on macOS with simulated Windows policy, before
-  target-path absolutization, existence/metadata lookup, binding and SQL open.
+  target-path absolutization, existence/metadata lookup, binding and SQL open,
+  and for backup, restore, export and registered-backup paths before any
+  filesystem call.
   `uv run pytest -q tests/test_dbcrypt_windows_paths.py
   tests/test_dbcrypt_connections.py tests/test_dbcrypt_windows_routing.py
-  tests/test_dbcrypt_windows_admission.py` passed (263 cases); the legacy
-  `tests/test_dbcrypt.py` module also passed (43 cases). No native Windows
-  environment was available. Explicit invocation with `-m integration` of
+  tests/test_dbcrypt_windows_admission.py` passed (312 cases); the legacy
+  `tests/test_dbcrypt.py` module also passed (44 cases). No native Windows
+  environment was available, so there was no native run:
+  `tests/test_dbcrypt_windows_native_paths.py` skipped all 5 cases on macOS.
+  Explicit invocation with `-m integration` of
   `tests/integration/test_dbcrypt_windows_vfs.py` and
   `tests/integration/test_dbcrypt_windows_vfs_probe.py` skipped all 90 cases on
   macOS; these skips establish no acceptance.

@@ -71,7 +71,7 @@ def test_workflow_selector_preserves_frozen_native_harness_contract() -> None:
     weights = _tool().load_weights(WEIGHTS)
     additions = {"tests/test_windows_database_compat.py", "tests/test_desktop_windows_pm_compat.py"}
     assert additions <= set(modules)
-    assert len(modules) == len(set(modules)) == 92
+    assert len(modules) == len(set(modules)) == 93
     baseline = modules[:84]
     assert {
         "tests/test_dbcrypt_capability.py",

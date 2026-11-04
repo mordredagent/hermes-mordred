@@ -320,10 +320,11 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   `_verify_native_stops` are untested (`tools/dbcrypt_acceptance.py`).
 - [ ] Oversized files: `tools/dbcrypt_acceptance.py` (4,407 lines), `tests/test_dbcrypt_acceptance_manifest.py` (3,258),
   `tests/_dbcrypt_acceptance_native.py` (1,905; destructive collector shipped in the sdist); split them, consider stacked PRs.
-- [x] Windows path handling: `_shim.py` and `_connection.py` reject UNC/device
-  namespaces lexically before target I/O, including decoded URIs and relative
-  paths under a UNC working directory. Host regressions cover refusal order;
-  native Windows local-database and `:memory:` acceptance remains unverified.
+- [x] Windows path handling: `_shim.py`, `_connection.py` and `_backup.py` reject
+  UNC/device namespaces lexically before target I/O, including decoded URIs,
+  registered backup values and relative paths under a UNC working directory.
+  Host regressions cover refusal order; `tests/test_dbcrypt_windows_native_paths.py`
+  covers native local-database and `:memory:` admission but has not yet run on Windows.
 - [ ] Backup cleanup: `_copy_registered_backup`'s `finally` leaks the destination connection and
   VFS registration when rollback fails (`src/mordred_hermes/dbcrypt/_connection.py`).
 - [ ] Backup restore is not bound to its source database or profile (latent)
