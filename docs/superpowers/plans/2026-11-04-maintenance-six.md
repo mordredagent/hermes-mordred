@@ -51,7 +51,8 @@ then its containing test modules. No worker runs the full repository suite.
 
 **Branch:** `fix/yaml-diagnostics`.
 
-**Files:** Modify `src/mordred_hermes/_core/_yaml_io.py`, `tests/test_yaml_io.py`.
+**Files:** Modify `src/mordred_hermes/_core/_yaml_io.py`, `tests/test_yaml_io.py`;
+add `src/mordred_hermes/_core/_yaml_warnings.py` for coordinated warning routing.
 
 **Interfaces:** Preserve `load_yaml_mapping`, `yaml_mapping_from_snapshot`, and
 `load_plugin_section` signatures. A private parse helper may accept a text stream
@@ -59,8 +60,8 @@ or string and `round_trip: bool`; it returns the parser's original object.
 
 - [ ] Add parameterized tests for generic-file and checked-snapshot paths, safe/pure and round-trip modes. Use a synthetic secret-like anchor token twice, malformed scalar content and a custom tag. Assert the token appears nowhere in caplog/capsys/captured warnings, exception class is logged, existing catch selection remains exact, and round-trip tags/duplicate-anchor values retain old behavior. Assert an unrelated warning outside the parse scope still reaches its caller.
 - [ ] Run `uv run pytest -q tests/test_yaml_io.py` and confirm leak tests fail before implementation.
-- [ ] Route both `yaml.load` calls through narrowly scoped ruamel `YAMLWarning` suppression. Replace exception-value logging with `type(exc).__name__`, without traceback or exception chaining in logs. Preserve missing/nonmapping and exception propagation behavior.
-- [ ] Run `uv run pytest -q tests/test_yaml_io.py tests/test_config_io.py tests/test_config_io_windows.py`; run Ruff on changed files. Review warning-filter restoration, including exceptions.
+- [ ] Route both `yaml.load` calls through thread-local ruamel `YAMLWarning` suppression without mutating warning filters. Temporarily install a coordinated `warnings.warn` dispatcher only while scopes exist; preserve unrelated warnings, arguments/source locations, nesting, exceptions and fork cleanup. Replace exception-value logging with `type(exc).__name__`, without traceback or exception chaining in logs. Preserve missing/nonmapping and exception propagation behavior.
+- [ ] Run complete YAML/config/direct-tools modules and Ruff on changed files. Real-parser concurrent tests must cover both exit orders, duplicate anchors and YAML 1.1 float warnings, warning-as-error in unrelated threads, unchanged filters, nested/exception restoration, forwarding compatibility and fork cleanup. A bare lock around `catch_warnings` or an anchor-only parser switch is insufficient.
 - [ ] Commit `fix(core): keep YAML diagnostics content-free` and hand off exact tests.
 
 ### Task 2: Make passive status refuse contention promptly

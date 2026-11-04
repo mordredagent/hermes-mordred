@@ -50,6 +50,18 @@ Log the exception class name, never its value or traceback. Use a shared private
 parse helper for snapshots and files, keeping ruamel's lazy imports. Do not
 install a process-global warning suppression policy.
 
+Final concurrency review found that Python 3.11 `catch_warnings` scopes mutate
+shared filters: overlapping loads can disclose a warning and restore the wrong
+policy. The implementation therefore leaves filters untouched and temporarily
+routes `warnings.warn` through a thread-aware dispatcher. It suppresses YAML
+warnings only on the currently parsing thread; all other warnings retain the
+original handling, arguments and source location. The first active scope
+installs the dispatcher, the last restores it, and nested thread-local scopes
+share only entry/exit coordination. Parsing never holds that lock. Fork cleanup
+replaces the inherited lock and retains only the surviving thread's scope.
+Real-parser tests cover both finish orders, YAML 1.1 mantissa warnings, unrelated
+thread/error policies, direct-tools overlap, exception restoration and fork.
+
 ## 2. Passive status has a zero-wait observation policy
 
 `canonical_session(blocking=False)` deliberately waits up to 2.0 seconds for
