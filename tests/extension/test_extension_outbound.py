@@ -1922,3 +1922,124 @@ def test_discord_ambiguous_destination_binding_never_inherits_parent_key():
     assert not result.success
     assert result.error == "mordred_encrypt_unavailable"
     assert channel.sent == []
+
+
+def test_discord_unbound_channel_cache_miss_looks_up_before_plaintext(monkeypatch):
+    """The fetch-failure half is ``test_discord_destination_context_failure_refuses_before_send``."""
+    chat_id = "986001"
+    client = FakeDiscordClient()
+    channel = client.add_channel(chat_id)
+    lookups = []
+
+    def get_channel(cid):
+        lookups.append(("cache", cid, len(channel.sent)))
+
+    async def fetch_channel(cid):
+        lookups.append(("fetch", cid, len(channel.sent)))
+        return channel
+
+    monkeypatch.setattr(client, "get_channel", get_channel)
+    monkeypatch.setattr(client, "fetch_channel", fetch_channel)
+
+    result = asyncio.run(FakeDiscordAdapter(client).send(chat_id, "plain"))
+
+    assert result.success
+    assert lookups == [("cache", int(chat_id), 0), ("fetch", int(chat_id), 0)]
+    assert channel.sent == ["PLAINTEXT_LEAK:plain"]
+
+
+_LONG_DISCORD_REPLY = "discord-secret-reply " * 300
+
+
+class FailingDiscordChannel(FakeDiscordChannel):
+    """Raises on the send attempts ``should_fail`` selects, echoing the reply."""
+
+    def __init__(self, cid, should_fail, exc_type=RuntimeError) -> None:
+        super().__init__(cid)
+        self.should_fail = should_fail
+        self.exc_type = exc_type
+        self.attempts = 0
+
+    async def send(self, content):
+        self.attempts += 1
+        if self.should_fail(self.attempts):
+            raise self.exc_type("HTTP 500: discord-secret-reply")
+        return await super().send(content)
+
+
+def _bound_discord_client(chat_id, channel):
+    _seed_master_key()
+    _bind_channel_key(chat_id, platform="discord", scope="987009")
+    client = FakeDiscordClient()
+    client.channels[int(chat_id)] = channel
+    return client
+
+
+@pytest.mark.parametrize(("fail_at", "message_ids"), [(1, []), (2, ["1"])])
+def test_discord_encrypted_send_http_error_stays_in_result(caplog, fail_at, message_ids):
+    chat_id = "987001"
+    channel = FailingDiscordChannel(int(chat_id), lambda attempt: attempt >= fail_at)
+    client = _bound_discord_client(chat_id, channel)
+
+    result = asyncio.run(FakeDiscordAdapter(client).send(chat_id, _LONG_DISCORD_REPLY))
+
+    assert not result.success
+    assert result.error == outbound._SEND_FAILED
+    assert result.raw_response == {"message_ids": message_ids}
+    # The failed chunk ended the loop: nothing after it, nothing in plaintext.
+    assert channel.attempts == fail_at
+    assert len(channel.sent) == fail_at - 1
+    assert all(crypto.is_encrypted(m) for m in channel.sent)
+    assert "discord-secret-reply" not in result.error
+    assert "Discord encrypted send failed" in caplog.text
+    assert "discord-secret-reply" not in caplog.text
+
+
+def test_discord_encrypted_send_to_channel_without_send_stays_in_result():
+    """A forum channel has no ``send``; the wrapper must not fall back to ``orig_send``."""
+    chat_id = "987002"
+    channel = SimpleNamespace(id=int(chat_id), parent_id=None, sent=[])
+    client = _bound_discord_client(chat_id, channel)
+
+    result = asyncio.run(FakeDiscordAdapter(client).send(chat_id, _LONG_DISCORD_REPLY))
+
+    assert not result.success
+    assert result.error == outbound._SEND_FAILED
+    assert channel.sent == []
+
+
+@pytest.mark.parametrize("persistent", [True, False])
+def test_discord_encrypted_send_failure_stays_ciphertext_through_base_retry(persistent):
+    """Hermes' ``_send_with_retry`` answers a non-network failure with a "plain
+    text" resend. That resend re-enters the wrapper, so the wire stays ciphertext."""
+    from gateway.platforms.base import BasePlatformAdapter
+
+    class RetryingAdapter(FakeDiscordAdapter):
+        name = "discord"
+        _send_with_retry = BasePlatformAdapter._send_with_retry
+        _is_retryable_error = staticmethod(BasePlatformAdapter._is_retryable_error)
+        _is_timeout_error = staticmethod(BasePlatformAdapter._is_timeout_error)
+
+    chat_id = "987003"
+    should_fail = (lambda attempt: attempt >= 2) if persistent else (lambda attempt: attempt == 2)
+    channel = FailingDiscordChannel(int(chat_id), should_fail)
+    client = _bound_discord_client(chat_id, channel)
+
+    result = asyncio.run(RetryingAdapter(client)._send_with_retry(chat_id, _LONG_DISCORD_REPLY))
+
+    # Not retryable: a network-style retry would repost the chunks already sent.
+    assert not RetryingAdapter._is_retryable_error(outbound._SEND_FAILED)
+    assert result.success is not persistent
+    assert channel.sent
+    assert all(crypto.is_encrypted(m) for m in channel.sent)
+
+
+def test_discord_encrypted_send_propagates_cancellation():
+    chat_id = "987004"
+    channel = FailingDiscordChannel(int(chat_id), lambda attempt: True, asyncio.CancelledError)
+    client = _bound_discord_client(chat_id, channel)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(FakeDiscordAdapter(client).send(chat_id, _LONG_DISCORD_REPLY))
+
+    assert channel.sent == []

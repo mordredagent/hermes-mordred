@@ -342,7 +342,13 @@ client before deciding whether encryption is mandatory. Check the destination,
 supplied channel and parent binding in that order; parent inheritance does not
 supply or change the reply thread context or v3 AAD. Unavailable destination or
 parent context refuses the send with `mordred_encrypt_context_unavailable`.
-Unbound ordinary channels and fixed control notices keep their existing policy.
+The encryption policy for unbound ordinary channels and fixed control notices is
+unchanged, but every Discord send must now resolve its destination first: a
+lookup failure refuses the send even on an unbound channel, and a cache miss
+costs an extra lookup because the wrapped `send` then fetches the channel again.
+A platform error while posting encrypted chunks returns
+`mordred_encrypt_send_failed` without message text. Chunks already posted stay
+posted, and the wrapper never resends them or the rest in plaintext.
 
 [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) and
 `tools/hook_payload_contract.json` own the exact consumed fields.

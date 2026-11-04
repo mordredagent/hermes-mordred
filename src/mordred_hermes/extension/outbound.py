@@ -34,6 +34,7 @@ _patched: set[str] = set()
 
 _LOCKED_NOTICE = "🔒 (暗号化できないため本文を送信できませんでした)"
 _CONTEXT_UNAVAILABLE = "mordred_encrypt_context_unavailable"
+_SEND_FAILED = "mordred_encrypt_send_failed"
 
 
 def _SendResult() -> Any:
@@ -148,17 +149,25 @@ async def _discord_encrypted_send(self: Any, channel: Any, content: str, thread_
         return SendResult(success=False, error="mordred_encrypt_unavailable")
 
     mids: list[str] = []
-    for chunk in e2e.encrypt_reply(
-        key,
-        content,
-        self.MAX_MESSAGE_LENGTH,
-        e2e.DISCORD_MENTION_PREFIX_RE,
-        platform="discord",
-        chat_id=str(tid),
-        thread_root=thread_id,
-    ):
-        msg = await channel.send(chunk)
-        mids.append(str(msg.id))
+    try:
+        for chunk in e2e.encrypt_reply(
+            key,
+            content,
+            self.MAX_MESSAGE_LENGTH,
+            e2e.DISCORD_MENTION_PREFIX_RE,
+            platform="discord",
+            chat_id=str(tid),
+            thread_root=thread_id,
+        ):
+            msg = await channel.send(chunk)
+            mids.append(str(msg.id))
+    except Exception as exc:
+        # Gateway callers do not catch raw send errors (discord.HTTPException, a
+        # forum channel with no ``send``). Chunks already posted stay posted and
+        # the rest are never retried in plaintext. Log only the type: exception
+        # text is platform-controlled and may echo the payload.
+        logger.warning("mordred_e2e: Discord encrypted send failed after %d chunks: %s", len(mids), type(exc).__name__)
+        return SendResult(success=False, error=_SEND_FAILED, raw_response={"message_ids": mids})
     return SendResult(success=True, message_id=mids[0] if mids else None, raw_response={"message_ids": mids})
 
 
@@ -173,6 +182,10 @@ def _wrap_discord(cls: Any) -> None:
                 raw_thread_id = (metadata or {}).get("thread_id")
                 thread_id = str(raw_thread_id) if raw_thread_id not in (None, "") else None
                 tid = thread_id or str(chat_id)
+                # This must precede the plaintext path: a parent binding is only
+                # discoverable from the live channel, so an unresolved destination
+                # cannot be treated as unbound. Every send pays for it, and on a
+                # cache miss orig_send fetches the channel a second time.
                 channel = self._client.get_channel(int(tid))
                 if channel is None:
                     channel = await self._client.fetch_channel(int(tid))
