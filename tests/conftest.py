@@ -8,16 +8,15 @@ import of ``mordred_hermes`` (or any of its plugins) anywhere in the process —
 including pytest's own test collection — permanently decides which Hermes
 home the whole run operates against.
 
-So this has to happen here, at **module import time**, before pytest imports
-any test module that could import ``mordred_hermes`` first. It must NOT be a
-fixture or a hook (those only run after collection has already imported test
-modules) and this module itself must NOT import ``mordred_hermes`` or
+The serial fallback happens here at **module import time**. Real xdist workers
+replace the inherited home in early ``pytest_configure``, before test-module
+collection; fixtures run too late. This module itself must NOT import ``mordred_hermes`` or
 ``hermes`` — doing either would freeze ``HERMES_BASE`` against whatever
 ``HERMES_HOME`` happens to be set (or unset, falling back to ``~/.hermes``)
 at that point, before we get a chance to set it below.
 
 ``setdefault``-style semantics: an explicit ``HERMES_HOME`` from the caller or
-CI is left untouched and wins as-is. Only a *bare* invocation (no
+CI is left untouched in serial runs and wins as-is. Only a *bare* invocation (no
 ``HERMES_HOME`` in the environment) gets a throwaway temp directory, cleaned
 up at interpreter exit.
 
@@ -32,6 +31,7 @@ from __future__ import annotations
 import atexit
 import os
 import shutil
+import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -46,6 +46,23 @@ if "HERMES_HOME" not in os.environ:
     _home = tempfile.mkdtemp(prefix="mordred-tests-home-")
     os.environ["HERMES_HOME"] = _home
     atexit.register(shutil.rmtree, _home, ignore_errors=True)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config: pytest.Config) -> None:
+    """Give genuine workers private homes before any product paths can freeze.
+
+    A nested serial pytest inherits PYTEST_XDIST_WORKER, but has no workerinput.
+    Never remove or replace its caller-owned home based on environment alone.
+    """
+    if getattr(config, "workerinput", None) is None:
+        return
+    imported = sorted(name for name in sys.modules if name == "mordred_hermes" or name.startswith("mordred_hermes."))
+    if imported:
+        raise pytest.UsageError("product modules imported before worker home isolation: " + ", ".join(imported))
+    home = tempfile.mkdtemp(prefix="mordred-tests-worker-home-")
+    os.environ["HERMES_HOME"] = home
+    config.add_cleanup(lambda: shutil.rmtree(home, ignore_errors=True))
 
 
 @pytest.fixture

@@ -662,6 +662,18 @@
       "package",
       "windows-wheel"
     ],
+    "tests/test_parallel_test_home.py": [
+      "network",
+      "llm",
+      "privacy",
+      "extension",
+      "features",
+      "floor",
+      "package",
+      "tor",
+      "macos",
+      "windows-wheel"
+    ],
     "tests/test_paths_clearnet.py": [
       "network",
       "tor"
