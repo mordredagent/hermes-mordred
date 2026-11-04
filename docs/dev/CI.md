@@ -83,6 +83,13 @@ The labeler remains independent PR metadata automation, not a test workflow.
 
 Key policy:
 
+- Non-critical Linux/macOS default suites and the Hermes-floor suite use
+  `-n 2 --dist=loadfile --max-worker-restart=0`. Real workers receive private
+  homes before collection; local pytest remains serial by default. Critical,
+  Windows and explicit feature/live suites keep their existing execution.
+  The controlled same-host comparison retained all outcomes and covered lines
+  with 41.47% less elapsed time; see the [validation record](../superpowers/reports/2026-11-04-maintenance-performance.md)
+  for revision boundaries, resource ownership and outstanding platform gates.
 - Ubuntu ordinary/final workers run the complete default suite with coverage
   >=80% and strict mypy. Drafts run critical feedback plus CI-tool tests.
 - The optional macOS worker runs the complete default suite, coverage, typing

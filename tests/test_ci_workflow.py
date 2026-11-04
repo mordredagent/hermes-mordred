@@ -6,6 +6,7 @@ import itertools
 import json
 import re
 import shlex
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -119,6 +120,37 @@ def test_floor_runs_in_parallel_with_main_only_when_requested() -> None:
     test = next(s for s in floor["steps"] if s.get("id") == "floor_tests")
     assert "-m pytest -q --deselect" in test["run"]
     assert "--role floor" in next(s for s in floor["steps"] if s.get("id") == "evidence")["run"]
+
+
+@pytest.mark.parametrize("job_name,step_id", [("linux", "pytest"), ("macos", "pytest"), ("linux-floor", "floor_tests")])
+def test_unix_default_commands_use_two_file_workers_only(job_name: str, step_id: str) -> None:
+    jobs = workflow()["jobs"]
+    step = next(step for step in jobs[job_name]["steps"] if step.get("id") == step_id)
+    script = step["run"]
+    default = script.split("else", 1)[-1] if job_name != "linux-floor" else script
+    command = next(shlex.split(line) for line in default.splitlines() if "-m pytest" in line)
+    assert command[-4:] == ["-n", "2", "--dist=loadfile", "--max-worker-restart=0"]
+    if job_name == "linux-floor":
+        assert command.count("--deselect") == 2
+        assert "tests/test_provider_identity.py::test_replica_matches_hermes_source" in command
+        assert (
+            "tests/test_provider_transport_flagger.py::TestRegistrySync::test_known_provider_slugs_are_real_hermes_ids"
+            in command
+        )
+    else:
+        assert "--cov=mordred_hermes" in command and "--cov-report=xml" in command
+        assert "-n" not in script.split("else", 1)[0]
+    # No other pack may inherit worker flags, including critical and Windows.
+    allowed = {("linux", "pytest"), ("macos", "pytest"), ("linux-floor", "floor_tests")}
+    for name, job in jobs.items():
+        for other in job["steps"]:
+            if "--dist=" in other.get("run", ""):
+                assert (name, other.get("id")) in allowed
+            assert "PYTEST_ADDOPTS" not in other.get("env", {})
+    assert (
+        "-n"
+        not in tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]["addopts"].split()
+    )
 
 
 def test_documentation_filters_preserve_code_events_and_manual_validation() -> None:
