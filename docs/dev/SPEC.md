@@ -19,6 +19,16 @@ verification; the older TODO admission/commit-only suggestion is not adopted.
 Public ImportStore reads own conversation/cursor/statistics SQL and committed
 snapshot hydration, preserving source/account and legacy archive behavior.
 
+## Additional performance coordination (2026-11-04)
+
+The [additional design](../superpowers/specs/2026-11-04-additional-performance-design.md)
+and [implementation plan](../superpowers/plans/2026-11-04-additional-performance.md)
+coordinate measured Unix default-suite parallelism, audit preflight setup and
+single-snapshot public search hydration. Preserve all selected cases, per-cell
+coverage floors, native Windows shards and live gates. Enable parallel CI only
+after controlled outcome/coverage equivalence and at least 25% elapsed reduction.
+Each implementation remains a separate owner-scoped change.
+
 ## Bounded macOS presence reuse
 
 The opt-in `plugins.mordred_keyvault.presence_reuse_seconds` accepts integers
