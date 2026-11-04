@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from ._authority import Authority
 
 from ._key import DatabaseKey
-from ._policy import in_scope, lexically_in_scope
+from ._policy import in_scope, lexically_in_scope, refuse_windows_remote_path
 
 PLAINTEXT_HEADER_BYTES: Final = 112
 SQLITE_MAGIC: Final = b"SQLite format 3\x00"
@@ -265,6 +265,7 @@ def _native_path(database: Any, *, uri: bool) -> tuple[Path | None, bool]:
 
     text = os.fsdecode(os.fspath(database))
     readonly = False
+    require_existing = False
     if text.startswith("file:") or uri:
         parsed = urlsplit(text)
         query = parse_qsl(parsed.query, keep_blank_values=True)
@@ -278,11 +279,15 @@ def _native_path(database: Any, *, uri: bool) -> tuple[Path | None, bool]:
             raise DatabaseRefused("unsafe database URI")
         text = unquote(parsed.path)
         readonly = query == [("mode", "ro")]
-        if query == [("mode", "rw")] and not Path(text).exists():
-            raise DatabaseRefused("read-write database does not exist")
+        require_existing = query == [("mode", "rw")]
     if not text or "\x00" in text:
         raise DatabaseRefused("temporary or invalid database names are unsupported")
+    refuse_windows_remote_path(text)
     path = None if text == ":memory:" else Path(text).absolute()
+    if path is not None:
+        refuse_windows_remote_path(path)
+    if require_existing and not (path if path is not None else Path(text)).exists():
+        raise DatabaseRefused("read-write database does not exist")
     return path, readonly
 
 

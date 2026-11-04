@@ -23,7 +23,7 @@ from urllib.parse import quote
 from .._core._database_contracts import DatabaseRefused
 from ..keyvault._database_authority import resolve_database_domain
 from ._authority import Authority
-from ._policy import in_scope
+from ._policy import in_scope, refuse_windows_remote_path
 
 # Qualified against Hermes's installed declarative schema. Future versions need
 # explicit compatibility qualification before opening an existing state.db.
@@ -802,7 +802,10 @@ def _open(
 
     authority.check()
     _reap()
-    path = path.absolute() if path is not None else None
+    if path is not None:
+        refuse_windows_remote_path(path)
+        path = path.absolute()
+        refuse_windows_remote_path(path)
     if os.name == "nt" and path is not None:
         from ._windows_vfs import NATIVE_QUALIFIED, windows_edition_admitted
 

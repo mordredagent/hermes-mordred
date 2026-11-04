@@ -20,7 +20,7 @@ from .._private_fs import PrivateFSError, open_private_directory
 from . import _migrate
 from ._authority import Authority
 from ._key import DatabaseKey
-from ._policy import in_scope
+from ._policy import in_scope, refuse_windows_remote_path
 
 _INVENTORY = "db-backups.json"
 _JOURNAL = "db-backups.journal.json"
@@ -45,12 +45,20 @@ def _registry(root: Path) -> Iterator[None]:
         yield
 
 
+def _local_absolute(path: Path) -> Path:
+    """Refuse remote/device spellings as given and after a working directory joins."""
+    refuse_windows_remote_path(path)
+    absolute = path.absolute()
+    refuse_windows_remote_path(absolute)
+    return absolute
+
+
 def _canonical_destination(path: Path) -> Path:
+    absolute = _local_absolute(path)
     if os.name == "nt":
         from ._maintenance_windows import require_qualified
 
         require_qualified()
-    absolute = path.absolute()
     if ".." in path.parts or absolute.parent != absolute.parent.resolve(strict=True):
         raise DatabaseRefused("backup destination must have a canonical private parent")
     with open_private_directory(absolute.parent):
@@ -230,7 +238,7 @@ def backup_database(source: Path, destination: Path, *, authority: Authority) ->
     if type(authority) is not Authority:
         raise DatabaseRefused("backup requires a live native database authority")
     authority.check()
-    source = source.absolute()
+    source = _local_absolute(source)
     destination = _canonical_destination(destination)
     if os.name == "nt" and (
         authority.root.is_relative_to(destination.parent) or destination.parent.is_relative_to(authority.root)
@@ -423,9 +431,10 @@ def restore_database(source: Path, destination: Path, *, lease: ExclusiveLease) 
 
     if type(lease) is not ExclusiveLease or lease not in current_thread_exclusive_leases():
         raise DatabaseRefused("restore requires a preceding exclusive lease")
+    _local_absolute(source)
     # A destination must already exist in a protected home; restore cannot create
     # an empty replacement for an ambiguous or missing database.
-    destination = destination.absolute()
+    destination = _local_absolute(destination)
     root: Path | None = None
     for parent in destination.parents:
         try:

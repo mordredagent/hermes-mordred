@@ -43,6 +43,17 @@ _DB_SUFFIXES: Final = (".db", ".sqlite", ".sqlite3")
 _NOT_DATABASES: Final = ("-wal", "-shm", "-journal", ".lock")
 
 
+def refuse_windows_remote_path(path: str | os.PathLike[str]) -> None:
+    """Reject remote/device namespaces lexically, before any target-path I/O."""
+    if os.name != "nt":
+        return
+    normalized = os.fspath(path).replace("/", "\\")
+    if normalized.startswith(("\\\\", "\\??\\")):
+        from .._core._database_contracts import DatabaseRefused
+
+        raise DatabaseRefused("Windows remote or device database namespace is unsupported")
+
+
 def looks_like_database_name(name: str) -> bool:
     """``x.db`` / ``x.sqlite[3]`` and the copies Hermes writes beside them (``state.db.pre-update-….bak``)."""
     lowered = name.casefold()
