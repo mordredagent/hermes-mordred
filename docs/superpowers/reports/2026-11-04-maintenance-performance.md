@@ -222,7 +222,7 @@ and arm64 capacity notices. All other selected platforms passed in attempt 1;
 CI acceptance correctly rejected the incomplete matrix. No successful earlier
 worker manifest is reused for a later attempt or head.
 
-The `macos` job now uses `macos-26-intel`. The first actual runner image was
+The first Intel fallback selected `macos-26-intel`. The first actual runner image was
 `macos-26-arm64`, so the macOS generation remains 26. [GitHub's runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 lists the supported Intel label. Job/check identity, Python 3.11 floor, selected
 cases, two-process command, coverage floor, strict typing, status guard, Swift
@@ -247,3 +247,25 @@ budget failed. Host load was observed above 24 on ten CPUs during this run.
 The failure is retained in the record; no budget or selector is weakened.
 The complete containing property module is rerun separately, with its result
 and the final exact-head hosted acceptance recorded in the PR.
+
+
+## macOS 15 Intel allocation fallback
+
+Run `41859074955` at `b2880045` also could not acquire its `macos-26-intel`
+runner. GitHub cancelled the job before any test ran, with the same hosted
+runner-acquisition error. Since both macOS 26 architectures were unavailable,
+the existing `macos` job is pinned to the documented `macos-15-intel` pool.
+This stays within the Swift helper's macOS 13+ declaration and the existing
+T2 Intel test boundary; all selected cases, Python 3.11 floor, full native
+packs, timeouts, coverage requirement, live gates and acceptance identity remain.
+It does change OS/hardware coverage: current hosted ARM and macOS 26 native
+compilation are not established. No native/helper or product Python source is
+changed for this fallback. Fresh exact-head complete CI is still required.
+
+The standard, uninstrumented local full regression at `b2880045` passed
+**14,688 cases with 300 skips and 24 warnings in 502.36s**. All skip-reason
+counts match the earlier complete baseline. The preceding instrumented
+performance failure remains recorded above; its containing module passed all
+145 cases with its original bounds. The standard run does not supply coverage;
+the unchanged >=80% combined coverage gate remains mandatory in hosted CI.
+The only next source changes select the CI pool and document this evidence.
