@@ -502,6 +502,7 @@
     "tests/test_audit_reasons_phase3.py": [],
     "tests/test_audit_reasons_phase4.py": [],
     "tests/test_dbcrypt_acceptance_control.py": [],
+    "tests/test_dbcrypt_acceptance_sequences.py": [],
     "tests/test_dbcrypt_capability.py": [],
     "tests/test_dbcrypt_contracts.py": [],
     "tests/test_dbcrypt_inventory.py": [],
@@ -712,6 +713,10 @@
       "features"
     ],
     "tests/test_wizard_term.py": [],
+    "tools/_dbcrypt_acceptance_common.py": [],
+    "tools/_dbcrypt_acceptance_evidence.py": [],
+    "tools/_dbcrypt_acceptance_execution.py": [],
+    "tools/_dbcrypt_acceptance_windows.py": [],
     "tools/dbcrypt_acceptance_control.py": [],
     "tools/dbcrypt_build_headers.py": [],
     "tools/dbcrypt_vfs_probe.py": []
