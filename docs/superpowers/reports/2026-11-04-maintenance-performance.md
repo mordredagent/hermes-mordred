@@ -162,3 +162,27 @@ runtime were unchanged. They subsequently passed with wall/CPU sampling, then
 the complete 719-case module passed. Load/scheduling sensitivity is supported;
 the precise original failure timeline was not captured. Thresholds, timeouts,
 skip conditions and runtime code were not altered to obtain green.
+
+
+## Final local integrated regression
+
+At source freeze `fae8b3b3ed856207be794ccb92cdca0d4570657c`, one complete
+combined default regression passed: **14,688 passed, 300 skipped, 24 warnings**,
+exit 0, **1,045.50s**. Combined coverage was **91.67%**, above the unchanged
+80% floor. The 300 skip-reason counts match the original controlled baseline;
+no new skip reason was introduced. The integration now selects 14,988 cases
+versus 15,104 before the approved reduction.
+
+Command: `uv run pytest -n 2 --dist=loadfile --max-worker-restart=0
+--cov=mordred_hermes --cov-report=xml:<owned-path>
+--cov-report=json:<owned-path> --junitxml=<owned-path>
+-o junit_family=xunit1 --durations=15`, with an owned `COVERAGE_FILE` and
+unchanged configured strict markers / integration exclusion. No concurrent
+owned suite or build was running. Initial host load was 9.66/11.71/11.02 on
+ten logical CPUs. This observed duration is not a repeat of the earlier
+controlled comparison and supplies no additional speedup claim.
+
+Final repository Ruff/format, strict mypy, import contracts, shellcheck and
+documentation links passed. The only subsequent changes record these results.
+Hosted acceptance for the current PR head/base remains a separate pre-merge
+requirement; its immutable run/artifact identity is recorded in the PR.

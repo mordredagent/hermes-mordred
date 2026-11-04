@@ -68,6 +68,6 @@
 **Files:** Existing performance report, docs/dev/TODO.md and plan/spec execution records only as evidence requires.
 
 - [x] Independently review the additional component diffs and coverage-owner ledger; fix substantive findings with targeted failing/passing evidence.
-- [ ] Run one full default suite using `-n 2 --dist=loadfile --max-worker-restart=0`, combined coverage, JUnit, durations and unchanged integration exclusion. Require zero failures and coverage >=80%.
-- [ ] Run repository Ruff/format, strict mypy, import-linter, shellcheck and docs links; record counts/deltas and unrun device gates.
+- [x] Run one full default suite using `-n 2 --dist=loadfile --max-worker-restart=0`, combined coverage, JUnit, durations and unchanged integration exclusion. Require zero failures and coverage >=80%.
+- [x] Run repository Ruff/format, strict mypy, import-linter, shellcheck and docs links; record counts/deltas and unrun device gates.
 - [ ] Push component history, create one ready PR targeting dev, verify all mandatory CI/acceptance and exact current head/base evidence, then merge with merge method preserving commits.
