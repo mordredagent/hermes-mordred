@@ -188,6 +188,12 @@ Accepted limitations include:
   audit history; the process-private memory-key holder does not change this;
 - vault-enrolled `.env` values other than `HERMES_MEMORY_KEY` stay in
   `os.environ` and reach terminal children according to Hermes's own blocklist;
+- Discord and Slack outbound encryption covers the live adapter's `send` only.
+  Hermes's standalone senders do not reach it: the `send_message` tool's Discord
+  route calls `standalone_sender_fn` directly, and cron falls back to it when the
+  adapter returns a failure, including Mordred's own encryption refusals. Text
+  can therefore reach a bound channel in cleartext on those routes. Other adapter
+  methods have the same gap (see `TODO.md`);
 - a plaintext `.env` holding `HERMES_MEMORY_KEY` can put it in `os.environ`, and
   eviction points narrow that without closing it: (a) in the brief window between
   a `.env` reload and the next eviction point, another spawn can copy the key;
@@ -336,6 +342,19 @@ dropped protected routes, and unverifiable VPN routes refuse with
 isolation credentials and use Requests `socks5h://` for remote DNS. Permitted
 direct routes retain public-DNS validation, IP pinning, TLS verification and
 redirect refusal.
+
+Discord outbound encryption resolves the destination from cache or the existing
+client before deciding whether encryption is mandatory. Check the destination,
+supplied channel and parent binding in that order; parent inheritance does not
+supply or change the reply thread context or v3 AAD. Unavailable destination or
+parent context refuses the send with `mordred_encrypt_context_unavailable`.
+The encryption policy for unbound ordinary channels and fixed control notices is
+unchanged, but every Discord send must now resolve its destination first: a
+lookup failure refuses the send even on an unbound channel, and a cache miss
+costs an extra lookup because the wrapped `send` then fetches the channel again.
+A platform error while posting encrypted chunks returns
+`mordred_encrypt_send_failed` without message text. Chunks already posted stay
+posted, and the wrapper never resends them or the rest in plaintext.
 
 [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) and
 `tools/hook_payload_contract.json` own the exact consumed fields.

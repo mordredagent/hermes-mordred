@@ -43,8 +43,8 @@ condition. Preserve the zero-upstream-PR commitment and one-plugin-one-PR rule.
 
 ## Standalone-repo repair backlog (2026-07-01)
 
-The original repair backlog is complete. One extension-operability decision is
-still actionable:
+The original repair backlog is complete. One extension-operability decision and
+two outbound-encryption gaps are still actionable:
 
 - [ ] Decide and document the supported long-running lifecycle for
   `extension serve`: explicit foreground operation, operator-managed
@@ -52,6 +52,24 @@ still actionable:
   service hook. Preserve coexistence with a standalone service or compatible
   legacy/custom gateway already using port 7788, and define restart behavior
   after package upgrades.
+- [ ] **Priority: plaintext through standalone senders.** The `send_message` tool's
+  Discord route calls the registry's `standalone_sender_fn` directly, with no
+  `outbound_must_encrypt` check (reproduced with a fake sender), and cron falls
+  back to `_send_to_platform` when the adapter returns a failure, including
+  `mordred_encrypt_*` refusals (read in `cron/scheduler.py`; not run). Check Slack's
+  route as well. Done when a test drives each route with a bound channel, thread
+  and unresolvable parent and asserts no cleartext reaches the sender.
+- [ ] Cover the adapter outbound methods other than `send`. `_wrap_discord` and
+  `_wrap_slack` wrap only `send`, so these Hermes adapter methods are unwrapped
+  and can write plaintext to a bound channel: `edit_message` (reached by the
+  stream consumer when streaming is enabled, off by default), `send_image`,
+  `send_image_file`, `send_multiple_images`, `send_voice`, `send_video`,
+  `send_document`, `send_exec_approval`, `send_slash_confirm`,
+  `send_update_prompt`, `send_model_picker`, `send_choice_picker`,
+  `send_private_notice`, and on Discord `send_animation`, `send_clarify` and
+  `_edit_overflow_split`. Check which of these each adapter defines. Found by reading
+  the code; not yet reproduced. Done when a test proves each path refuses or
+  encrypts on a bound channel (`src/mordred_hermes/extension/outbound.py`).
 
 ## Phase 0 — Operational Setup (blocks all later phases)
 
