@@ -210,6 +210,18 @@ def test_terminal_authority_is_not_runtime_protected(protected_runtime: Any) -> 
     assert authority.terminal and _databases._runtime_protected(root) is False
 
 
+def test_inherited_authority_is_not_runtime_protected(protected_runtime: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A forked child inherits the provider, but its authority only goes terminal on next use."""
+    from mordred_hermes.desktop import _databases
+
+    root, provider, _ = protected_runtime
+    authority = provider.authority
+    assert _databases._runtime_protected(root) is True
+    parent = authority._pid
+    monkeypatch.setattr(_databases.os, "getpid", lambda: parent + 1)
+    assert not authority.terminal and _databases._runtime_protected(root) is False
+
+
 def test_authority_for_another_root_is_not_runtime_protected(protected_runtime: Any, tmp_path_factory: Any) -> None:
     from mordred_hermes.desktop import _databases
 

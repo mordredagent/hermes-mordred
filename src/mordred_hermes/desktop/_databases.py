@@ -72,7 +72,8 @@ def _runtime_protected(root: Path) -> bool:
         if provider is None or not provider.runtime_native:
             return False
         authority = provider.current_authority
-        if authority is None or authority.terminal:
+        # A forked child's authority only goes terminal on next use, which polling never does.
+        if authority is None or authority.terminal or authority._pid != os.getpid():
             return False
         return authority.root == Path(os.path.realpath(root)) and _shim.is_installed()
     except Exception:
