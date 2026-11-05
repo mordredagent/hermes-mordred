@@ -57,7 +57,6 @@ def capability_lines(rows: tuple[WindowsCapability, ...], error: str | None) -> 
     return [f"    {describe_capability(row)}" for row in rows]
 
 
-@passive_canonical_reads()
 def keyvault_state(home: Path) -> tuple[bool, int, str]:
     """The secret-store line: not ported to Windows; a retained store is reported, not read."""
     from ..keyvault import _storage
@@ -155,7 +154,6 @@ def memory_target_status(observation: MemoryObservation) -> TargetStatus:
     )
 
 
-@passive_canonical_reads()
 def collect_target_statuses(home: Path) -> list[TargetStatus]:
     """The four targets on Windows: excluded seals plus the proof-bound memory target."""
     from ._windows_memory import observe

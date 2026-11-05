@@ -336,7 +336,6 @@ def collect_status(
     ]
 
 
-@passive_canonical_reads()
 def status(
     *,
     home: Path,

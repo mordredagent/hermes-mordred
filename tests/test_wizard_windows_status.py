@@ -12,11 +12,14 @@ import json
 import subprocess
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core import _yaml_io
 from mordred_hermes.keyvault import _seckey_helper, wrap
+from mordred_hermes.network import _windows_policy, settings
 from mordred_hermes.wizard import encryption_cli, keyvault_windows_cli, memory_cli, setup_cli, status_cli
 from mordred_hermes.wizard._encryption_status import status_mark
 from mordred_hermes.wizard._workspace_paths import WorkspacePaths
@@ -39,6 +42,8 @@ ORDER = (
     "per-use presence",
     "secret store",
 )
+# The autouse fixture below pins this; the held-lock network test needs the real reader.
+REAL_NETWORK_STATE = status_cli._network_state
 
 
 def forbid_native(monkeypatch, env):
@@ -231,7 +236,9 @@ def test_held_lock_is_reported_not_awaited(seeded, monkeypatch, capsys):
         thread.join(30)
     assert not thread.is_alive()
     assert setup_result.action == "blocked" and "custody-uncertain" in setup_result.detail
-    assert elapsed < 1.0
+    # Five status surfaces at the one-second budget each; the pre-fix wait took 10.52s.
+    # Exact admission arguments below are the precise check; this only catches other waits.
+    assert elapsed < 5.0
     assert lock.calls and all(kwargs == {"blocking": False} for _, _, kwargs in lock.calls)
     assert "custody-uncertain" in status.detail and not status.active
     assert all(not target.active for target in collected.encryption)
@@ -242,6 +249,41 @@ def test_held_lock_is_reported_not_awaited(seeded, monkeypatch, capsys):
     after = {p.relative_to(env.home): p.read_bytes() for p in env.home.rglob("*") if p.is_file()}
     assert after == before
     assert native_attempts == [] and mutations == []
+
+
+def test_held_lock_reports_network_unavailable_not_the_clearnet_default(win, monkeypatch):
+    env = win
+    paths = cio.CanonicalPaths(env.home)
+    with cio.canonical_session(paths, scope="policy", create=True) as session, session.policy_update() as update:
+        update.put_config(b"plugins:\n  mordred_network:\n    default_path: tor\n")
+        update.commit()
+    monkeypatch.setattr(_yaml_io, "_platform", "nt")
+    windows = SimpleNamespace(platform="win32")
+    monkeypatch.setattr(settings, "sys", windows)
+    monkeypatch.setattr(_windows_policy, "sys", windows)
+    monkeypatch.setattr(status_cli, "_network_state", REAL_NETWORK_STATE)
+    assert REAL_NETWORK_STATE(env.home)[0] == "tor"
+    holding, release = threading.Event(), threading.Event()
+
+    def holder():
+        with cio.canonical_session(paths, scope="policy"):
+            holding.set()
+            release.wait(30)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        assert holding.wait(30)
+        collected = status_cli.collect(
+            home=env.home, root=env.home / "vault", platform="win32", workspace=workspace(env.home.parent)
+        )
+    finally:
+        release.set()
+        thread.join(30)
+    assert not thread.is_alive()
+    assert collected.network_configured_path == "unavailable"
+    rendered = status_cli.render_text(collected)
+    assert "network     : unavailable (" in rendered and "clearnet" not in rendered
 
 
 def test_retained_secret_store_and_excluded_artifacts_are_reported(win, monkeypatch, capsys):
