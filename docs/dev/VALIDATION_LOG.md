@@ -2124,3 +2124,61 @@ completion acceptance matrix track later work and current open gates.
   `backup_database` refused a UNC source, a UNC destination and an extended-length source.
   Refusal order is observed in-process; no SMB traffic capture was taken.
   User key inventories were unchanged and the instance ended `stopped`.
+
+- **2026-11-05 — E2E standalone tool/cron sender guard: automated candidate verification; live browser gate pending.**
+  Candidate branch `fix/e2e-standalone-senders` protects Hermes's common
+  `_send_to_platform` seam without changing Hermes, the extension or the v3
+  protocol. Actual tool/cron delivery is exercised with destination I/O replaced;
+  captured ciphertext is decrypted with the observed channel/thread context.
+  The initial regressions exposed plaintext tool and cron-fallback delivery.
+  Independent review found a `DISCORD_PROXY` regression; a real-resolver
+  regression failed before the platform override was carried through the shared
+  Tor/VPN route validation, then passed after the correction.
+
+  Locked Hermes 0.19.0: **66 standalone cases passed**, and **289 containing
+  module cases passed** (including the final routing correction). The extension
+  suite before that routing correction passed **1,775 tests, 12 skipped**; the
+  final full runs include the correction. Hermes 0.13.0 / Python 3.11.15:
+  **286 containing cases passed, 3 skipped** (the floor tool lacks Slack thread
+  target parsing; real cron origin-thread coverage passes, and two existing
+  Telegram cases require the optional Telethon dependency). Critical preset:
+  **24 passed**. Docs/CI-scope checks: **74 passed**. Plugin/import checks:
+  **17 passed**. Ruff, formatting, strict mypy (**416 files** in both the locked
+  and floor environments), import-layer contracts and shellcheck passed. The
+  floor typing environment uses dev/keyvault/extension plus FastAPI, which old
+  Hermes does not install; ethereum and tor-control extras are absent.
+
+  Final locked-version regression on Python 3.11.15 completed with **14,752
+  passed, 300 skipped, 170 deselected, 2 failed** in 747.23 seconds. The two
+  failures were:
+
+  - `tests/extension/test_activity_api.py::test_extension_batch_ack_reaches_receiver_with_extension_principal`:
+    its five-second WebSocket pairing wait timed out. The containing module and
+    focused full-collection selections passed on rerun.
+  - `tests/extension/test_pm_member.py::test_health_reports_version_environment_and_member`:
+    the temporary venv's `/tmp` prefix differed from the resolved `/private/tmp`
+    health response. Running through the canonical `/private/tmp` interpreter
+    path resolves the assertion. Both exact failed cases then passed together
+    (**2 passed**, 0.48 seconds). This is rerun evidence, not a clean single
+    full-suite result.
+
+  The initial uv-selected Python 3.14.7 full regression completed with **14,734
+  passed, 300 skipped, 170 deselected, 20 failed** in 769.35 seconds. Those
+  failures are in unchanged `test_dbcrypt_lifecycle.py` (2),
+  `test_mail_imap_client.py` (15) and `test_mail_imap_sync.py` (3). The database
+  Windows-platform simulation imports unavailable `_winapi`, and IMAP's literal
+  drain uses Python 3.14's unsupported `IMAP4.file` interface. Representative
+  failures `test_native_platform_missing_prerequisites_refuses_before_sql_or_auth[False-win32]`
+  and `test_a_literal_over_25_mib_that_fits_is_drained_unread` reproduce on the
+  original `dev` checkout under the same 3.14 interpreter. All three containing
+  modules pass on Python 3.11 (**240 passed**). These other-component
+  compatibility issues are not changed in this E2E candidate.
+
+  Evidence: `~/.codex/artifacts/mordred-e2e-standalone-20261105/`, including source
+  hashes, red/green logs, both full JUnit reports, exact failure-name JSON files,
+  baseline reproduction and focused rerun logs. **Live Slack/Discord
+  browser-extension decryption was not run:** no explicitly authorized test
+  destinations were supplied. Before release, run that check on authorized
+  channels/threads and append the live result. Automated crypto round trips do
+  not establish browser acceptance. Live-adapter edit/media/prompt methods
+  remain outside this change.

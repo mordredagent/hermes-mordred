@@ -210,12 +210,12 @@ Accepted limitations include:
   audit history; the process-private memory-key holder does not change this;
 - vault-enrolled `.env` values other than `HERMES_MEMORY_KEY` stay in
   `os.environ` and reach terminal children according to Hermes's own blocklist;
-- Discord and Slack outbound encryption covers the live adapter's `send` only.
-  Hermes's standalone senders do not reach it: the `send_message` tool's Discord
-  route calls `standalone_sender_fn` directly, and cron falls back to it when the
-  adapter returns a failure, including Mordred's own encryption refusals. Text
-  can therefore reach a bound channel in cleartext on those routes. Other adapter
-  methods have the same gap (see `TODO.md`);
+- Discord and Slack outbound encryption covers the live adapter's `send` and
+  Hermes's shared standalone tool/cron text sender while Mordred is enabled.
+  Other adapter methods, including edits, streaming edits, attachment APIs and
+  interactive prompts, remain unwrapped (see `TODO.md`). Standalone protected
+  requests containing attachments are refused in full; this does not protect
+  media sent through the separate live-adapter APIs;
 - a plaintext `.env` holding `HERMES_MEMORY_KEY` can put it in `os.environ`, and
   eviction points narrow that without closing it: (a) in the brief window between
   a `.env` reload and the next eviction point, another spawn can copy the key;
@@ -377,6 +377,35 @@ costs an extra lookup because the wrapped `send` then fetches the channel again.
 A platform error while posting encrypted chunks returns
 `mordred_encrypt_send_failed` without message text. Chunks already posted stay
 posted, and the wrapper never resends them or the rest in plaintext.
+
+Hermes tool and cron standalone delivery must pass through a required,
+idempotent guard on `tools.send_message_tool._send_to_platform`. E2E registration
+imports this module before installing hooks and refuses startup with a
+`BaseException` if the async seam or its supported signature cannot be verified.
+An ordinary component-registration warning is insufficient because Hermes can
+continue after ordinary plugin exceptions. Hermes itself is not modified.
+
+The guard uses the same remembered-thread/channel-binding policy and v3 reply
+wire as live sends. Discord resolves the actual destination with its bot API
+before deciding whether to delegate; missing or inconsistent destination/parent
+context refuses even when no local binding is known. A destination key precedes
+the supplied channel and parent key; a missing remembered key or conflicting
+binding never licenses parent-key fallback. Parent inheritance preserves the
+actual destination and supplied thread root in authenticated data.
+
+Protected text is fully split/encrypted before its first POST, with Slack
+`mrkdwn: false` and no Hermes Markdown conversion. Requests use
+`extension.egress.resolve_route`, explicit proxy selection (including
+`DISCORD_PROXY`), remote SOCKS DNS,
+no ambient proxy configuration, and no redirects. Protected attachments are
+refused before any text or file is posted. Protected Discord forum/media-channel
+creation is refused because the future thread ID cannot be authenticated;
+existing threads are supported. Errors contain only stable codes, never message
+text, credentials, or upstream response bodies. Failed chunks and cron retries
+never fall back to plaintext. Cron retry/duplicate-delivery semantics remain
+Hermes-owned. Unbound ordinary destinations and other platforms retain their
+original send behavior. Browser-extension decryption on authorized Slack and
+Discord test destinations remains a release gate.
 
 [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) and
 `tools/hook_payload_contract.json` own the exact consumed fields.
