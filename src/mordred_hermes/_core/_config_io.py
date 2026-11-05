@@ -38,6 +38,7 @@ MARKER_LIMIT = 4096
 # Bounded wait of a ``blocking=False`` session for another thread's in-process
 # session before refusing ``busy``/``canonical_lock``. The holder is one of our
 # own short sessions; cross-process file locks stay strictly nonblocking.
+# ``passive_canonical_reads`` opts presentation reads out of this wait.
 IN_PROCESS_WAIT_SECONDS = 2.0
 _Result = TypeVar("_Result")
 POLICY_TRANSACTION_MARKER = ".policy-write.pending"

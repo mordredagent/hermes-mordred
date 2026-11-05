@@ -69,6 +69,7 @@ __all__ = [
 ]
 
 _LOG = logging.getLogger("mordred.wizard.status_cli")
+_NETWORK_UNAVAILABLE = "unavailable"
 
 _POLICY_MODE_DETAILS = {
     "strict": "blocks on policy violations",
@@ -139,16 +140,30 @@ def _policy_mode(home: Path) -> str:
     return str(get_active_policy_mode(config_path=home / "config.yaml"))
 
 
+def _configured_network_path(home: Path) -> str:
+    """The configured path; a refused Windows generation is never the clearnet default."""
+    from ..network.settings import read_default_path, read_default_path_strict
+    from ._windows_gates import host_platform
+
+    config = home / "config.yaml"
+    if host_platform() != "win32":
+        # log= must be passed: with ``log=None`` the shared YAML loader swallows
+        # the malformed-config warning entirely and corrupted config.yaml would
+        # silently render as the clearnet default (review 2026-07-29).
+        return read_default_path(config, log=_LOG)
+    try:
+        return read_default_path_strict(config)
+    except Exception as exc:  # status never raises; keep only the type name, never config bytes
+        _LOG.warning("could not read checked config %s: %s", config, type(exc).__name__)
+        return _NETWORK_UNAVAILABLE
+
+
 def _network_state(home: Path) -> tuple[str, bool, str | None, bool | None]:
     """(configured_path, live, active_path, ready) without bringing anything up."""
     from ..network import api
     from ..network._exceptions import MordredNetworkError
-    from ..network.settings import read_default_path
 
-    # log= must be passed: with ``log=None`` the shared YAML loader swallows
-    # the malformed-config warning entirely and corrupted config.yaml would
-    # silently render as the clearnet default (review 2026-07-29).
-    configured = read_default_path(home / "config.yaml", log=_LOG)
+    configured = _configured_network_path(home)
     try:
         live_status = api.status()
     except MordredNetworkError:
@@ -346,6 +361,8 @@ def render_text(report: StatusReport, *, color: bool = False) -> str:
     if report.network_live:
         ready = "ready" if report.network_ready else "not ready"
         network = f"{report.network_active_path} (live, {ready})"
+    elif report.network_configured_path == _NETWORK_UNAVAILABLE:
+        network = f"{_NETWORK_UNAVAILABLE} (configuration could not be safely read)"
     else:
         network = f"{report.network_configured_path} (configured; runtime not active in this process)"
     helper = "hardware helper installed" if report.keyvault_helper_installed else "no hardware helper"

@@ -573,9 +573,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             native/tpmkey-helper/target
-          key: ${{ runner.os }}-cargo-tpmkey-helper-${{ hashFiles('native/tpmkey-helper/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-tpmkey-helper-${{ hashFiles('native/tpmkey-helper/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-tpmkey-helper-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-tpmkey-helper-
         if: contains(fromJSON(needs.ci-policy.outputs.macos_packs), 'tpm')
       - name: Toolchain info + components
         run: |

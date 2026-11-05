@@ -899,6 +899,9 @@ def test_fork_reset_drops_passive_policy_even_when_inherited_scope_exits(fs, mon
     _, paths = fs
     # Exercise the registered child hook without forking pytest's process.
     # Exiting an inherited scope must not reintroduce its parent's policy.
+    # The hook rebinds module globals: register both so teardown restores them.
+    monkeypatch.setattr(cio, "_lock", cio._lock)
+    monkeypatch.setattr(cio, "_local", cio._local)
     with cio.passive_canonical_reads():
         with cio.passive_canonical_reads():
             cio._after_fork()
