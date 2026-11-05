@@ -2124,3 +2124,83 @@ completion acceptance matrix track later work and current open gates.
   `backup_database` refused a UNC source, a UNC destination and an extended-length source.
   Refusal order is observed in-process; no SMB traffic capture was taken.
   User key inventories were unchanged and the instance ended `stopped`.
+
+- **2026-11-05 — Coordinated local keyvault reset.** Contract draft
+  [PR #299](https://github.com/mordredagent/hermes-mordred/pull/299) precedes
+  component commits `b0ce34bab` (keyvault), `2a4c2be9e` (imports),
+  `7da872f9d` (Telegram), `ca8e33133` (wizard), and `9928ffe8f` (verification).
+  Reset now journals its scope before deletion, erases all current-profile
+  Mail/Telegram accounts in one SQLCipher maintenance transaction outside
+  custody, authenticates component retirement, and removes only known owned
+  keyvault files. Independent helper material, memory/database sources, other
+  profiles, unrelated history, imported originals and backups remain intact.
+
+  macOS **26.6.2 / 25G83**, Python **3.11.15**, real installed Secure Enclave
+  helper `~/.local/bin/mordred-hermes-sekey`, SHA-256
+  `076beba85cf1310932ebba7e124ada75f08d11132604c9725f17c4e21e345642`:
+  `MORDRED_RESET_NATIVE_TEST=1 MORDRED_RESET_TEST_ROOT=<private synthetic root>
+  MORDRED_SEKEY_HELPER=<explicit helper> uv run pytest -m integration -s
+  tests/integration/test_keyvault_connected_reset_native.py` passed **1 test**,
+  exercising two complete provision/reset cycles of a scoped main key and its
+  encrypted envelope, Mail and Telegram credentials, and retained independent
+  helper material. The credentials were synthetic and unattended; no mail or
+  Telegram account connection, remote logout or production-home access occurred.
+  The successful retained fixture is
+  `/private/tmp/mordred-reset-native.JGbeQD/connected-reset-62df0c2b6f0e42d5885abec95a2bf33d`.
+  Earlier failed synthetic fixtures remain available for diagnosis.
+
+  SQLCipher erasure tests use the real encrypted driver with synthetic native
+  custody, including historical accounts, messages, parts, references, FTS,
+  cursors, unrelated data, a mid-transaction SQL failure, and retained native
+  database/memory source bytes. Backup recovery after selective reset also
+  passed with an independent helper file and the original backup unchanged.
+  This is separate from real macOS database-source hardware qualification.
+  Linux hardware acceptance remains **pending** on this macOS host:
+  `uv run pytest -m integration tests/integration/test_linux_telegram_tpm.py`
+  reported **2 skipped**. The new native reset test also supports an explicit
+  Linux TPM helper on a retained synthetic root. Windows secret-store reset
+  remains unported and its early-refusal tests pass.
+
+  Final default regression (`uv run pytest -n 4 --dist=worksteal
+  --max-worker-restart=0`) ran all **15,016 selected cases**: **14,715 passed,
+  300 skipped**, with one documentation portability check failing because this
+  log initially embedded a developer-specific helper path. The helper path was
+  changed to `~/.local/bin/...`; the complete documentation-link module then
+  passed **12 tests**, including the failing
+  `test_maintained_docs_do_not_embed_a_developer_home_path`. No runtime code
+  changed after that full regression; the repository's documentation-only
+  validation policy applies to this final correction.
+  Ruff check/format (**892 files**), strict mypy (**419 source files**), both
+  import-layer contracts and shellcheck passed. Strict mypy also passed in an
+  isolated CI-extras environment (`dev,keyvault,extension,macos`). The critical
+  preset passed **24 tests**; independent reset consumers passed **198 tests**.
+  The coverage run reached **91.67%** (80% floor). It caught one obsolete
+  expectation that the keyvault directory must remain after a source-only
+  binding is retained; that assertion was corrected to check source/native-key
+  preservation and the complete containing modules then passed. The final
+  regression includes the corrected test and additional rollback/recovery
+  cases. A preliminary serial run was interrupted after **1,539 passed** when
+  related tests still asserted the intentionally removed blanket DB/memory
+  refusal. Those tests now verify preservation. Python 3.14's existing
+  `test_mail_imap_sync.py::test_an_under_reported_message_is_drained_and_counted`
+  failed and reproduced independently; the same test passed on repository
+  Python 3.11, used for final acceptance.
+
+  A fresh read-only review found two Important recovery issues, both reproduced
+  RED then fixed: backend initialization must finish before recording uncertain
+  native deletion, and v2 scope checks must exclude already-authorized main-key
+  blobs. No Critical or Minor findings remained. Review decisions: uncertain
+  actual native calls keep their intent for manual reconciliation; v2 recovery
+  conservatively refuses existing component directories/databases rather than
+  assuming broader consent; same-UID adversarial edits remain outside the
+  existing cooperative-lock threat model; legacy archive ownership follows
+  Telegram's existing checked wipe; unavailable Linux/Python 3.14 acceptance is
+  not claimed. Their costs are respectively manual repair, conservative refusal
+  even for empty stores, no additional same-UID security guarantee, retaining
+  files outside the known archive contract, and unverified platform coverage.
+  Component commits remain on a stacked implementation branch so the contract
+  and component changes can be reviewed separately, at the cost of splitting
+  dependent implementation PRs before integration.
+
+  Evidence:
+  `~/.codex/artifacts/mordred-connected-reset-20261105-9928ffe8/`.

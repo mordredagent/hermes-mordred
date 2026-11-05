@@ -385,7 +385,17 @@ hermes-mordred keyvault reset         # asks you to type reset
 hermes-mordred keyvault reset --yes   # non-interactive and immediate
 ```
 
-This destroys profile-owned key material. Before reset, create a fresh snapshot
+This destroys profile-owned key material, Mail and Telegram credentials and
+all their local history, including previous accounts and synchronization cursors.
+The operation is local; remote messages are unchanged. Other profiles, shared
+database encryption, independent memory/file keys, imported originals and
+backups are retained. Shared helper directories can remain after reset. A
+pending reset blocks setup and sync until cleanup completes; retry reset after
+repairing the reported problem. An uncertain native deletion requires explicit
+ownership reconciliation and keeps its recovery journal. A keyvault backup
+does not restore Mail/Telegram credentials or their local history.
+
+Before reset, create a fresh snapshot
 in an existing private directory:
 
 ```sh

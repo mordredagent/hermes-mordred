@@ -1758,8 +1758,9 @@ re-enable. Purge deletes the Linux key only after successful disable and a
 rescan proving no sealed memory remains. Keep the current refusal on concurrent
 gateway resealing. Uninstall restores memory before removing the runtime hook;
 Telegram logout/forget never deletes the separate memory key. Keyvault reset
-takes the memory lifecycle lock before its own lock and refuses to remove the
-native store while independent memory custody remains. Uninstall with data
+retains independent memory custody and shared helper files, deleting only
+validated profile-owned keyvault and Mail/Telegram targets under root database
+exclusion. Uninstall with data
 purge restores or explicitly erases memory, then purges its key before resetting
 the native keyvault store.
 

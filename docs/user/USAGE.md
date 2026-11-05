@@ -409,7 +409,7 @@ hermes-mordred keyvault list                # list key IDs
 hermes-mordred keyvault verify-digest       # integrity check
 hermes-mordred keyvault export --output <path>  # create a new mode-0600 MRKV snapshot
 hermes-mordred keyvault recover --blob <path>   # restore from a backup blob
-hermes-mordred keyvault reset               # DESTROY profile-owned key material + remove the keyvault (irreversible; --yes to skip the prompt)
+hermes-mordred keyvault reset               # DESTROY profile keys, Mail/Telegram credentials and all their local history (--yes confirms the full scope)
 hermes-mordred keyvault enable-se           # macOS: build+install Secure Enclave helper (ad-hoc signed, no Apple Developer account)
                                 # safe to refresh; key policy is selected only by fresh init/recovery — see §4.3
 hermes-mordred keyvault enable-tpm          # Linux: build+install TPM 2.0 helper (machine-bound, Tier 2)
