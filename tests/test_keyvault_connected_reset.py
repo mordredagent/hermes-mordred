@@ -473,3 +473,34 @@ def test_sql_failure_mid_erase_rolls_back_all_account_rows(native_root):
         conn.close()
     finally:
         authority.close()
+
+
+def test_recover_after_reset_retains_shared_helpers_and_backup(tmp_path, fake_native_creation_receipts):
+    from mordred_hermes.keyvault import api
+    from tests.test_keyvault_api_backup import _export_backup, _import_backup, _init_device
+
+    backend = FakeBackend()
+
+    def sink(_event):
+        pass
+
+    key_id = _init_device(tmp_path, backend, sink)
+    api.encrypt(key_id, b"RECOVER THIS SECRET", "reset-test", backend=backend, audit_sink=sink, home=tmp_path)
+    blob = _export_backup(key_id, backend, tmp_path, sink)
+    backup_path = tmp_path / "retained-backup.mrkv"
+    backup_path.write_bytes(blob)
+    root = tmp_path / "mordred/keyvault"
+    shared = root / "sekey"
+    shared.mkdir(mode=0o700)
+    retained = shared / "independent-source.bin"
+    _storage.atomic_write(retained, b"KEEP SHARED SOURCE")
+    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+    recovered = _import_backup(blob, backend, tmp_path, sink)
+    envelopes = list((root / "ciphertexts").glob("*/*/*.gcm"))
+    assert len(envelopes) == 1
+    assert (
+        api.decrypt(recovered, envelopes[0].stem, "reset-test", backend=backend, audit_sink=sink, home=tmp_path)
+        == b"RECOVER THIS SECRET"
+    )
+    assert retained.read_bytes() == b"KEEP SHARED SOURCE"
+    assert backup_path.read_bytes() == blob
