@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import sqlite3
 import threading
 import time
+import types
 import uuid
 from pathlib import Path
 from typing import Any
@@ -571,6 +573,23 @@ def test_three_slow_writes_suspend_the_session(capture_home, monkeypatch, audit_
     }
     navigate(session="s2", turn_id="s2:t:1")  # another session still records
     assert len(opened) == 4
+
+
+def test_the_wall_clock_never_suspends_a_test_session(capture_home, monkeypatch, audit_entries) -> None:
+    """Regression (CI run 42017277672, ``linux (3.13)``): on a loaded runner three of a test's 402 commits took
+    longer than the production :data:`.capture_hermes.SLOW_APPEND_S`, the session was suspended and the episode
+    stopped at 74 events without its task start. :func:`capture_home` pins the threshold out of the wall clock's
+    reach, so how long a write really takes never decides a test; the suspension tests above set their own."""
+    _home, store = capture_home
+    clock = itertools.count(0, 1.0)  # as capture_hermes measures it, every write takes a full second
+    monkeypatch.setattr(capture_hermes, "time", types.SimpleNamespace(time=time.time, monotonic=lambda: next(clock)))
+    turn()
+    navigate()
+    for _ in range(capture_hermes.SLOW_APPENDS_TO_SUSPEND + 2):
+        call("browser_click", {"ref": "@e7"})
+    end_turn()
+    assert [event.op for event in events(store)] == ["navigate", *["click"] * 5, "task_start"]
+    assert audit_entries == []
 
 
 def test_a_write_blocked_by_another_writer_is_dropped_quickly(capture_home) -> None:
