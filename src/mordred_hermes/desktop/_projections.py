@@ -165,6 +165,13 @@ DATABASE_CODES: Final = frozenset(
         "stale_pending",
         "decrypt_pending",
         "journal",
+        "startup_busy",
+        "startup_memory_required",
+        "startup_key_unavailable",
+        "startup_refused",
+        "startup_too_large",
+        "startup_auth_interrupted",
+        "databases_cancel_refused",
         "invalid_body",
         "invalid_request",
     }
