@@ -4,9 +4,9 @@ Status: phases 0 (feasibility spike), 1 (startup hook under Hermes Desktop)
 2 (`mordred_hermes.dbcrypt`, all of Hermes's databases), 3 (conversion of
 an existing home, `hermes-mordred databases encrypt`), 4 (monitor), 5 (status
 line), reverse conversion (`databases decrypt`) and both uninstall modes
-implemented. The Desktop database step also exists; its remaining acceptance
-and passive-status regression, log-preview redaction and lifecycle review
-findings remain open.
+implemented. The Desktop database step is specified by
+[startup conversion](SPEC.md#startup-conversion); that work, its live acceptance,
+log-preview redaction and lifecycle review findings remain open.
 Track those remaining tasks in [`TODO.md`](./TODO.md#hermes-database-encryption).
 
 The selected cross-platform direction is a shared SQLCipher lifecycle for
@@ -187,18 +187,23 @@ instead when SQLCipher's SQLite has the WAL-reset bug, as Hermes itself
 chooses for new databases) and verify it
 (`quick_check`, same tables and row counts). Only then: write a journal, arm,
 swap with `os.replace`, drop the old sidecars, remove the journal. A failure
-while preparing changes nothing; a crash after arming is completed from the
-journal on the next start. Classification reads each file with a plain
+while preparing changes nothing; a crash after arming refuses startup until
+`databases encrypt` completes it from the journal, or until the next start resumes
+a scheduled conversion whose pending marker remains. Classification reads each
+file with a plain
 `open()` and the stdlib `sqlite3`, so it is offline work: it runs only in the
 maintenance CLI or in the bootstrap before Hermes opens a database, and it
 refuses inside a Hermes process that has the SQLCipher module (see the POSIX
 lock gotcha below). `hermes-mordred databases encrypt` runs it now and refuses
 when a Hermes runtime or another converter holds the lock; it never schedules.
 Hermes Desktop's **Encrypt databases** schedules it (`db-encryption.pending`)
-instead. Quit all Hermes processes before restarting to apply the pending
-conversion; a runtime that has not opened a database yet also prevents
-conversion. The runtime bootstrap converts before opening any
-database, while other starting processes wait on `db-encryption.lock`.
+instead. The runtime bootstrap converts before opening any database, while other
+starting processes wait on `db-encryption.lock`; a runtime that has not opened a
+database yet also prevents conversion, which leaves the home plain with a
+`startup-conversion.json` outcome. A home too large to convert inside Hermes
+Desktop's backend deadline stays a Terminal job. The
+[startup conversion contract](SPEC.md#startup-conversion) owns the gate, failure rule
+and limit.
 Verified end-to-end on a throwaway home with Hermes's own code.
 
 ## Phases 4 and 5 (done), and decrypting back
@@ -221,9 +226,9 @@ Verified end-to-end on a throwaway home with Hermes's own code.
 - `databases decrypt` (`_migrate.decrypt_all`) mirrors the conversion: prepare
   and verify every plaintext copy, journal, swap, then disarm. It refuses when
   a Hermes runtime holds the lock. Nothing writes `db-decryption.pending` today;
-  startup still honors a record retained from an earlier release.
-  An interrupted run is completed from the journal before anything else at
-  startup (no key needed). An unreadable database, including one encrypted
+  startup refuses a record retained from an earlier release, and an interrupted run's
+  journal, until they are resolved in Terminal. An unreadable database, including
+  one encrypted
   with a different key, refuses decryption before preparing copies or removing
   the marker. SQLCipher imports are optional on unsupported platforms; their
   monitor reports protected homes as unsupported instead of reporting success.

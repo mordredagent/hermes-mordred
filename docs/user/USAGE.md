@@ -637,8 +637,8 @@ hermes-mordred desktop uninstall
 > button that jumps there), running or in need of attention, and a "Why this
 > step?" block that explains the reason in plain words. The Telegram and mail
 > counts come from Mordred's encrypted store, so they are right after a restart
-> too. Linux shows its existing list, with databases and mail marked as not
-> available; Windows keeps its own page.
+> too. Linux shows its existing list with the database step, and mail marked as
+> not available; Windows keeps its own page with the same database step.
 >
 > **Tool calls from the page.** The **Tool calls** card under Maintenance has
 > one checkbox, "Let Hermes call Mordred's tools directly (recommended with a
@@ -670,23 +670,33 @@ hermes-mordred desktop uninstall
 > switches act only while the browser activity feature is enabled and never
 > stop recording. The Windows page is unchanged; use the CLI there.
 >
-> **Database encryption from the page.** The step "Encrypt Hermes databases"
-> lists the plaintext and unreadable (encrypted) database files it finds, and
-> warns when backup archives in the Hermes home may still hold plaintext copies.
+> **Database encryption from the page.** The step "Encrypt Hermes databases" is
+> on the macOS, Linux and Windows Server pages. On Windows 11 and other Windows
+> workstation editions it says database encryption is not supported and has no
+> button. It warns when backup archives in the Hermes home may still hold plaintext
+> copies; it does not list database files, because status never opens them.
 > The page never converts or arms anything itself: Hermes Desktop keeps its
 > databases open, so **Encrypt databases** only schedules the conversion, which
 > runs at the next restart before Hermes opens them, and the step offers
-> **Restart now**. The Telegram import and the mail step wait until the
-> databases are encrypted, because `mordred.db` only opens then. The outcomes
-> are: not armed yet, the conversion is scheduled (also when no file needs
-> converting, and asking again changes nothing); armed and no plaintext file, the
-> step is done and says "Database encryption: on"; armed but a plaintext file
-> appeared (a new or restored file), the page schedules nothing and tells you to
-> quit Hermes and run `hermes-mordred databases encrypt` in Terminal; a pending
-> conversion that did not run, a pending decryption or a leftover journal, the
-> page tells you to check `hermes-mordred databases status` in Terminal; armed but
-> this Hermes process not yet protected, the page asks you to restart Hermes
-> Desktop.
+> **Restart now**. On macOS, approve Touch ID if it asks during the restart; without
+> the approval nothing is converted and a later start asks again. The Telegram
+> import and the mail step wait until the databases are encrypted, because
+> `mordred.db` only opens then. The outcomes are: not armed yet, the conversion is
+> scheduled (asking again changes nothing); armed, the step is done and says
+> "Database encryption: on"; armed but this Hermes process not yet protected, the
+> page asks you to restart Hermes Desktop; a home too large to convert during a
+> restart, the page schedules nothing and tells you to quit Hermes and run
+> `hermes-mordred databases encrypt` in Terminal; a pending decryption, a leftover
+> journal or a pending conversion on an armed home, the page tells you to check
+> `hermes-mordred databases status` in Terminal.
+>
+> If a scheduled conversion could not run, Hermes starts on its plain databases and
+> the step says what to do, with **Cancel** to drop the schedule: Hermes was busy
+> (quit all Hermes processes, then restart); memory is not encrypted yet (go to the
+> memory step); the key was not available (restart and approve); anything else (run
+> `hermes-mordred databases encrypt` in Terminal). If a conversion stops partway,
+> Hermes refuses to start rather than open a half-converted home: a later start
+> tries again, and `hermes-mordred databases encrypt` in Terminal finishes it.
 >
 > The vault comes first. Its own step shows the eight-word recovery passphrase
 > BEFORE anything is created and asks you to tick "I have written it down"; only
@@ -768,8 +778,9 @@ hermes-mordred databases decrypt           # back to plain SQLite; encryption of
 > Hermes home are left alone. If any Hermes process is running, even before
 > opening a database, the command stops without changing anything. Quit all
 > Hermes processes and run it again. The
-> conversion is all-or-nothing and verified (same tables and row counts); an
-> interrupted one is completed on the next start. Old plaintext blocks are
+> conversion is all-or-nothing and verified (same tables and row counts); after
+> an interruption Hermes refuses to start until you run the command again, which
+> completes it. Old plaintext blocks are
 > replaced, not overwritten: on an SSD they can survive in free space or APFS
 > local snapshots until reused (FileVault keeps them unreadable). Tools outside
 > Hermes (a SQLite browser, the `sqlite3` command) can no longer open these
@@ -784,9 +795,13 @@ hermes-mordred databases decrypt           # back to plain SQLite; encryption of
 > removing the package or keys. `status` and `--dry-run` do not execute pending
 > conversions.
 >
+> The Mordred page in Hermes Desktop can schedule the same conversion for the next
+> restart ([`desktop`](#desktop--mordred-setup-page-in-hermes-desktop)); use this
+> command for a very large home.
+>
 > On Linux and Windows, ordinary homes continue using plain SQLite: memory
-> encryption does not encrypt `state.db`. Database encryption is supported only
-> on macOS. If you copy a home with its database-encryption marker or conversion
+> encryption does not encrypt `state.db`. Database encryption is admitted on macOS,
+> Linux and Windows Server, not on Windows workstation editions. If you copy a home with its database-encryption marker or conversion
 > journal to Linux/Windows, startup refuses to open it. Run `databases decrypt`
 > on macOS and let it finish before moving the home.
 
@@ -1826,7 +1841,8 @@ including under strict mode).
   Memory is machine-bound without portable recovery.
 - **Windows**: scoped native installer, CNG custody, memory/Telegram and Desktop
   consumers exist. Env/config file-vault seals and APFS workspace integration
-  are excluded; database encryption is also unsupported. Capability status and
+  are excluded; database encryption is admitted on Windows Server only, not on
+  workstation editions including Windows 11. Capability status and
   remaining native/live/Windows 11 gates govern readiness; see
   [`SPEC.md`](../dev/SPEC.md#platform-support-v1).
 - **Fallback behavior**: macOS can use a software P-256 key in the login

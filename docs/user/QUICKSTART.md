@@ -243,7 +243,8 @@ On macOS, steps 4 to 7, the database encryption of
 [Encrypt conversation databases](#encrypt-conversation-databases-macos) and the
 mail setup can also be run from the Mordred page in Hermes Desktop, in the same
 order, with the reasons shown inline (see
-[`desktop`](./USAGE.md#desktop--mordred-setup-page-in-hermes-desktop)).
+[`desktop`](./USAGE.md#desktop--mordred-setup-page-in-hermes-desktop)). The
+database step is also on the Linux and Windows Server pages.
 
 Final `hermes-mordred status` is outside the numbered steps. Linux skips
 step 6 and enables memory without a file vault or recovery-passphrase prompt.
@@ -310,9 +311,13 @@ hermes-mordred databases encrypt
 hermes-mordred databases status
 ```
 
-`setup` and `encryption enable all` do not enable this. If conversion is
-scheduled, quit all Hermes processes and restart, then check status again.
-Linux/Windows databases, session JSONL and text logs are outside this protection.
+`setup` and `encryption enable all` do not enable this. On macOS, Linux and
+Windows Server, the Mordred page in Hermes Desktop can instead schedule the
+conversion: press **Encrypt databases**, restart and, on macOS, approve Touch ID if
+asked. If the page says Hermes is busy, quit all Hermes processes and restart. For a
+very large home, quit Hermes and use the commands above in Terminal.
+Windows workstation editions including Windows 11, session JSONL and text logs are
+outside this protection.
 See [database operations](./USAGE.md#databases--encrypt-hermess-sqlite-databases-macos)
 for decryption, backups and migration.
 
