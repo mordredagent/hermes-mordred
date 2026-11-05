@@ -273,8 +273,9 @@ the source remains usable, and failure paths leave no partial destination.
 The macOS CLI, startup protection, monitor and uninstall lifecycle are implemented
 ([design](./STATE_DB_ENCRYPTION.md)). Remaining work:
 
-- [ ] Desktop acceptance: status and scheduled encryption exist in
-  `desktop/_databases.py` and the page. Finish the throwaway-home ceremony checks
+- [ ] Desktop acceptance: status and scheduling exist in `desktop/_databases.py` and
+  the page, with [startup conversion](SPEC.md#startup-conversion) still to land.
+  Finish the throwaway-home ceremony checks
   under Desktop operability below; decide whether a page-level decrypt control
   is required (the CLI already provides `databases decrypt`).
 - [ ] Logging: redact message previews (`msg=`) from `logs/agent.log`.
@@ -339,8 +340,9 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   ambiguous metadata and native outcomes remain fail-closed for explicit recovery.
 - [ ] macOS database-key load is not bound to the root helper store, so child profiles fail closed
   (`src/mordred_hermes/keyvault/_database_authority.py`).
-- [ ] macOS passive regressions: Desktop database step stuck in attention and `mail status --json` nulls;
-  decide on an authenticated path (`src/mordred_hermes/desktop/_databases.py`, `src/mordred_hermes/desktop/_status_v4.py`).
+- [ ] macOS passive regressions: `mail status --json` nulls; decide on an authenticated path
+  (`src/mordred_hermes/desktop/_status_v4.py`). The Desktop database step stuck in attention moves to
+  [startup conversion](SPEC.md#startup-conversion), which stays passive.
 - [ ] Windows DLL provenance: release CI ships only `py3-none-any`, the toolset is unpinned, there is
   no hash binding to `RECORD`, and source builds hard-fail without MSVC (`hatch_build.py`).
 - [ ] Acceptance `verify` self-attests `live_accepted`; synthetic tests now cover
@@ -938,8 +940,25 @@ compatibility with every downstream private-store reader.
   the Codex pass-11 review of PR #262 (2026-10-23; note retired from the tree),
   following the earlier API/page/mail reviews. Its SHIP verdict is scoped to
   that revision; it does not validate #270's later changes.
-  - [ ] Recheck passive database/mail status after #270; see the database
-    review follow-ups. Earlier Desktop evidence does not close that regression.
+  - [ ] Recheck passive mail status after #270; see the database review
+    follow-ups. Earlier Desktop evidence does not close that regression.
+  - [ ] Desktop **Encrypt databases** on macOS, Linux and Windows Server through
+    [startup conversion](SPEC.md#startup-conversion), in the
+    [PR order](PLAN.md#desktop-startup-conversion-slice); this replaces the passive
+    database recheck. Remaining live gates, each recorded in the
+    [validation log](VALIDATION_LOG.md#manual-live-device-validation-log) with an
+    isolated `HERMES_HOME`, never production `~/.hermes`:
+    - [ ] macOS Desktop with a default no-prompt key: button, restart, done; a home
+      near the size limit; measured throughput for `STARTUP_CONVERSION_MAX_BYTES`.
+    - [ ] macOS Desktop with an "ask every time" key: whether the backend can answer
+      a prompt, its prompt count and cancel text, and `auth_interrupted` after a kill
+      at the port deadline.
+    - [ ] Whether Desktop's restart stops gateway and profile processes, or the step
+      answers `startup_busy`.
+    - [ ] Linux on the AWS TPM host: `hermes` start, concurrent gateway and profile.
+    - [ ] Windows Server 2025 on AWS: ordinary-user CLI and gateway start.
+    - [ ] Windows 11 Desktop: "not supported" only, nothing scheduled.
+    - [ ] Hermes Desktop on Linux and Windows Server: remains unverified until run.
 
 - [ ] CLI counts after the Telegram archive moved to `mordred.db` (found during
   the production rollout, 2026-10-23). `hermes-mordred telegram status` prints

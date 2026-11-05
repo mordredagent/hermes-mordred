@@ -126,7 +126,8 @@ compatibility policy.
   [Windows dedicated custody and memory lifecycle](#windows-dedicated-custody-and-memory-lifecycle).
 - SQLite database encryption (`state.db` and sibling/profile stores) is
   admitted on macOS, Linux and Windows Server (workstation editions are refused
-  at runtime), enabled separately with `databases encrypt` after memory setup.
+  at runtime), enabled separately after memory setup with `databases encrypt` or
+  the Desktop step that schedules the same conversion.
   It derives its key from the memory key; `setup` and `encryption enable all`
   do not enable it. JSONL/text logs and existing ZIP backups are not converted.
   Protected homes must be decrypted on macOS before migration to Linux/Windows.
@@ -1836,8 +1837,9 @@ authority when hardware disappears or loses permissions after a status check.
 - No Linux screen or error remediation prescribes Xcode or Touch ID. Local
   model guidance says this host, not this Mac. Legacy client/server combinations
   must retain a safe unsupported/setup-incomplete state.
-- Desktop `/status?client_version=4` (macOS only) adds the keys `databases`,
-  `imports` and `mail`; requests with `client_version <= 3` keep their keys. A
+- Desktop `/status?client_version=4` adds the keys `databases`, `imports` and
+  `mail` ([`databases` on every platform](#databases-from-the-page)); requests
+  with `client_version <= 3` keep their keys. A
   page that receives none of them treats Mordred as older and offers an update
   ([Desktop mail and ceremony pages](#desktop-mail-and-ceremony-pages-2026-10-23)).
 
@@ -3536,7 +3538,8 @@ evidence is recorded separately in docs/dev/CI.md's manual validation log, and
 the Windows native acceptance matrix is still pending. Windows `databases status` uses the passive
 capability API to project intent, bounded dependency facts and reasons without
 SQL, native authentication or writes. Markers and driver presence do not prove
-usable authority, and no conversion is promised for the next startup. Retained
+usable authority, and status promises no conversion for the next startup; a
+scheduled one follows [startup conversion](#startup-conversion). Retained
 protection state blocks Windows uninstall before memory disable, custody purge
 or teardown while restoration is unavailable. Checked root/profile relationships
 and all-generation mutation guards apply again at the actual owning boundaries.
@@ -3770,7 +3773,9 @@ Page. `plugin.js` requests `client_version=3` and selects the Windows page by
 `hardware_kind === "cng"`. It renders each capability row through explicit
 label tables, shows the custody notice and both acknowledgements before the
 enable button, and renders the refusing step, reason and remedy from the
-refusal metadata. It labels the custody, Telegram store and shared pairing
+refusal metadata. Its database step follows
+[Databases from the page](#databases-from-the-page). It labels the custody,
+Telegram store and shared pairing
 codes (`storage_unavailable`, `storage_uncertain`, `storage_error`,
 `attestation_key_missing`) and hides erase-without-decrypt on Windows. A login
 expiry resets by code, never by matching message text.
@@ -6024,11 +6029,12 @@ mode, egress rules, what the Hermes tools return, and any new bundler or framewo
 
 ### Page structure and states
 
-- **Platform gating.** The new sections MUST render only when the API reports
-  `platform === "darwin"` and `hardware_kind === "secure_enclave"`. `hardware_kind
-  === "tpm"` keeps today's Linux list and the overview shows "Databases: not
-  available on Linux" and "Mail: not available on Linux". `hardware_kind === "cng"`
-  keeps `WindowsSetup` untouched. The layout MUST be chosen from these fields, never
+- **Platform gating.** The new sections other than step 1.3 MUST render only when the
+  API reports `platform === "darwin"` and `hardware_kind === "secure_enclave"`.
+  `hardware_kind === "tpm"` keeps today's Linux list plus step 1.3, and the overview
+  shows "Mail: not available on Linux". `hardware_kind === "cng"` keeps `WindowsSetup`
+  plus step 1.3 ([Databases from the page](#databases-from-the-page)). The layout
+  MUST be chosen from these fields, never
   from English text.
 - **Layout.** One column (max 760 px): an overview card, then four groups in a
   fixed order, each a `section` with an `h2` and `aria-labelledby`: **1 Protect this
@@ -6053,6 +6059,10 @@ mode, egress rules, what the Hermes tools return, and any new bundler or framewo
   API: `needs_hermes_model`, `needs_enclave`, `needs_memory`, `needs_databases`,
   `needs_restart`, `needs_login`, `needs_question_model`. Until the databases are
   armed after step 1.3, steps 2.4 and 2.5 MUST be `blocked` with `needs_restart`.
+  This applies to the macOS page. On Linux, step 1.3 is opt-in and step 2.4 is not
+  blocked by it: an unarmed import writes the Telegram archive. While a conversion
+  is pending or Hermes has not restarted, a Linux import with no archived dialogs
+  answers `import_store_unavailable`; restarting or cancelling the schedule clears it.
 - **Why blocks.** Every step has a native `<details>`/`<summary>` ("Why this
   step?"). The vault step offers "Ask for Touch ID every time Hermes unlocks the
   vault", off by default, and MUST send `{"unattended": !askEveryTime}` to
@@ -6084,7 +6094,9 @@ mode, egress rules, what the Hermes tools return, and any new bundler or framewo
   `invalid_selection`, `touch_id_policy_mismatch`, `invalid_body`, `job_not_found`,
   `vault_required`, `vault_exists`, `vault_flow_expired`, `passphrase_reused`,
   `env_optout`, `env_required`, `mail_setup_stale`, `stale_pending`, `decrypt_pending`,
-  `journal`, `disk_full`, `memory_operation_in_progress`, `plaintext_in_armed_home`, `store_uninitialised`,
+  `journal`, `startup_busy`, `startup_memory_required`, `startup_key_unavailable`,
+  `startup_refused`, `startup_too_large`, `startup_auth_interrupted`,
+  `disk_full`, `memory_operation_in_progress`, `plaintext_in_armed_home`, `store_uninitialised`,
   `profile_mismatch`, `schema_newer`, `unkeyed_connection`, `unsupported_platform`,
   `mail_fetch_busy`,
   `mail_not_configured`, `invalid_address`, `invalid_host`, `invalid_account`,
@@ -6319,43 +6331,85 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
 
 ### Databases from the page
 
-- `GET /status?client_version=4` on macOS adds `databases`, computed without a key, a
-  Touch ID prompt or a capture (outside a Hermes process by
-  `dbcrypt._migrate.discover(home, key=None)`; inside one, where that classifier is
-  refused because it opens the files directly, by probing each file through the
-  process's own SQLite library, `dbcrypt._monitor.is_plaintext`):
-  `{"supported", "armed" (persisted intent), "encrypt_pending",
-  "decrypt_pending", "journal", "runtime_protected", "databases": [{"relative",
-  "state": "plaintext" | "unreadable"}], "plaintext_backups"}`. With `key=None`
-  discovery yields `plaintext` or `unreadable` (ciphertext) and omits absent files.
-  `runtime_protected` is computed by the same non-unlocking checks as the imports
-  path (darwin, no pending conversion, armed, shim installed, valid key material),
-  not by `check_protection`. On Linux and Windows the object is `{"supported": false}`.
-  `GET /databases/status` returns that object alone.
+- `GET /status?client_version=4` adds `databases` on every platform. Status is
+  passive: no key, Touch ID prompt, capture, SQL or write. Where the shared capability
+  (`dbcrypt.database_status`) does not refuse, the object is `{"supported": true,
+  "armed", "encrypt_pending", "decrypt_pending", "journal", "runtime_protected",
+  "databases": [], "plaintext_backups", "startup_outcome"}`. Statically unavailable
+  homes answer `{"supported": false}`: Windows workstation editions including
+  Windows 11, an unqualified driver, a missing distribution-owned VFS asset, or no
+  `sqlcipher3`. This step never widens
+  [native admission](#cross-platform-database-encryption-proposed-2026-10-24).
+  `GET /databases/status` returns that object alone. The fields mean exactly:
+  - `armed` is the presence of `mordred/db-encryption.marker` only, never proof of
+    encryption.
+  - `encrypt_pending`, `decrypt_pending` and `journal` come from `lstat` of their
+    files under `mordred/`. These three and `armed` are `null` when the intent path
+    is unsafe; `null` never means absent.
+  - `runtime_protected` is observed from the authority installed in this process: a
+    native provider, a non-terminal authority, the same root and the installed shim.
+    It MUST NOT call `check()`, unwrap a key, run SQL or read an environment key.
+  - `databases` stays `[]`, meaning unknown: classifying a file needs SQL, which
+    status never runs. An empty list MUST NOT be read as "no plaintext".
+  - `plaintext_backups` is a metadata count of archives under `backups/`; no archive
+    is opened.
+  - `startup_outcome` is the `outcome` of the startup record, or `null` without one
+    or while nothing is scheduled.
+    `attempting` is never exposed: status reports it as `auth_interrupted`.
+- **The one exception to metadata-only polling** is a read of Mordred's own non-secret
+  record `mordred/startup-conversion.json`, bounded to 4096 bytes and made only while
+  a conversion is scheduled. Status reads no
+  other file content. A record that is oversized, malformed or carries an unknown
+  outcome counts as "any other" below.
 - **The Desktop route never converts or arms itself.** `POST /databases/encrypt`
   (`{"dry_run": bool}`, default false) MUST NOT call `migrate()`; it only schedules or
-  reports. It answers `databases_unsupported` (not macOS or no `sqlcipher3`) first;
-  `dry_run` answers `{"ok": true, "action": "dry_run"}`. The decision is total over
-  `armed`, `encrypt_pending`, `decrypt_pending`, `journal`, `plaintext` (any plaintext
-  file discovered) and `runtime_protected`:
+  reports, and [startup conversion](#startup-conversion) does the work. It answers
+  `databases_unsupported` for `supported: false` first; `dry_run` answers `{"ok": true,
+  "action": "dry_run"}`. The first matching row decides; the journal row precedes any
+  record, because a record can coexist with a journal:
 
-| armed | plaintext | pending / journal | answer and step state |
-|---|---|---|---|
-| no | any (even none) | none | `schedule(home)`, `{"ok": true, "action": "scheduled", "restart_required": true}` (startup converts what is plaintext and arms) |
-| no | any | `encrypt_pending` already | `scheduled` (idempotent) |
-| yes | none | none | done ("Database encryption: on") |
-| yes | some | none | `attention`, code `plaintext_in_armed_home` (Terminal, Hermes quit) |
-| yes | any | `encrypt_pending` | `attention`, code `stale_pending` (Terminal `databases status`) |
-| any | any | `decrypt_pending` | `attention`, code `decrypt_pending` |
-| any | any | `journal` | `attention`, code `journal` |
+| armed | encrypt_pending | decrypt / journal | startup record | runtime_protected | answer |
+|---|---|---|---|---|---|
+| any | any | `journal` | - | - | `attention`, code `journal` |
+| any | any | `decrypt_pending` | - | - | `attention`, code `decrypt_pending` |
+| no | no | none | - | - | home over the startup size limit: `attention`, code `startup_too_large`, nothing scheduled; otherwise `schedule(home)`, `{"ok": true, "action": "scheduled", "restart_required": true}` |
+| no | yes | none | none | - | `scheduled` (idempotent) |
+| no | yes | none | `busy` | - | `attention`, code `startup_busy` |
+| no | yes | none | `memory_not_enabled` | - | `attention`, code `startup_memory_required` |
+| no | yes | none | `source_unavailable` | - | `attention`, code `startup_key_unavailable` |
+| no | yes | none | `too_large` | - | `attention`, code `startup_too_large` |
+| no | yes | none | `auth_interrupted` | - | `attention`, code `startup_auth_interrupted` |
+| no | yes | none | any other | - | `attention`, code `startup_refused` |
+| yes | yes | none | - | - | `attention`, code `stale_pending` (Terminal `databases status`) |
+| yes | no | none | - | false | `needs_restart` ("restart Hermes Desktop") |
+| yes | no | none | - | true | done ("Database encryption: on") |
+| unknown (`null`) | | | | | `attention`, code `databases_failed` |
 
-- `runtime_protected` false while `armed` makes the step say "restart Hermes
-  Desktop" (`needs_restart`). An error from `schedule()` answers `databases_failed`,
-  and the page re-reads status rather than assuming "nothing changed". The page says
-  "Database encryption: on (N files encrypted or unreadable)" only when `armed &&
-  runtime_protected`, and never "N databases encrypted". Because the preview needs no
-  key, `databases_key_missing` applies only if a later release needs the key for the
-  act.
+- An error from `schedule()` answers `databases_failed`, and the page re-reads status
+  rather than assuming "nothing changed". The page says "Database encryption: on" only
+  when `armed && runtime_protected`, never with a file count, because `databases`
+  stays unknown. Because the preview needs no key, `databases_key_missing` applies only
+  if a later release needs the key for the act.
+- `plaintext_in_armed_home` stays a known code for compatibility. The page no longer
+  detects that state, because status cannot classify files; the runtime monitor does.
+- `POST /databases/cancel` removes `mordred/db-encryption.pending` through
+  `_migrate.unschedule`, and the startup record with it, so a new schedule starts
+  clean. It MUST never convert, and it refuses, changing nothing, while a journal or
+  the marker exists. It exists because a retained pending marker blocks memory disable
+  and reset, and because it is the only way out of `auth_interrupted`.
+- **Page.** Step 1.3 (`DatabasesStep`) renders on macOS, Linux and Windows, where
+  `WindowsSetup` places it after `WindowsMemoryStep`. On `supported: false` it says
+  database encryption is not supported on this system and shows no button. Every
+  `startup_*` code below also offers **Cancel** while `encrypt_pending` is true.
+
+| code | remedy on the page |
+|---|---|
+| `startup_busy` | Quit all Hermes processes, then restart |
+| `startup_memory_required` | Go to the memory step |
+| `startup_key_unavailable` | Restart, approving a key prompt if one appears; otherwise Terminal: `hermes-mordred databases encrypt` |
+| `startup_refused` | Terminal: `hermes-mordred databases encrypt` |
+| `startup_too_large` | Terminal: `hermes-mordred databases encrypt` |
+| `startup_auth_interrupted` | Cancel and press **Encrypt databases** again, or Terminal: `hermes-mordred databases encrypt` |
 
 ### Imports status
 
@@ -6730,8 +6784,10 @@ The proposal preserves the macOS database format and root-owned encryption
 domain. Linux TPM and Windows CNG memory-key custody supply the root database
 key without porting `.env` injection or the file vault. Profile memory custody
 remains distinct from the root database-key dependency. SQLCipher is mandatory;
-an unavailable key, driver, checked storage boundary or unresolved conversion
-must refuse rather than create or replace a plaintext database.
+an unavailable key, driver, checked storage boundary or interrupted conversion
+must refuse rather than create or replace a plaintext database. A scheduled
+conversion that has not started leaves the home plain; see
+[startup conversion](#startup-conversion).
 
 Root/profile ownership, authority generation, process-lifetime migration leases,
 checked Windows SQLite I/O, backup/restore, and key disable/reset/purge/uninstall
@@ -6754,6 +6810,102 @@ Windows Server evidence is separate from Windows 11/Desktop acceptance.
 Session JSONL and text logs remain outside SQLCipher coverage. Touch ID prompt
 reduction, portable key recovery and automatic cross-machine transfer are not
 part of this proposal.
+
+### Startup conversion
+
+`dbcrypt` MUST run a scheduled conversion (`mordred/db-encryption.pending`) at the
+start of the runtime bootstrap, before Hermes opens any database, on macOS, Linux and
+admitted Windows Server. It runs the same conversion body as `databases encrypt`
+(`dbcrypt._maintenance.convert_home`). Maintenance CLI processes skip it, so
+`databases status` and `--dry-run` never execute pending work.
+
+The gate touches no key and no database: `lstat`, plus the `direction` field when a
+journal exists. The first matching row decides:
+
+| State | Startup |
+|---|---|
+| `db-decryption.pending`, or a journal whose `direction` is not `encrypt` | Refuse; Terminal recovery |
+| Journal without a pending marker | Refuse; Terminal recovery |
+| Marker and pending marker, no journal (`stale_pending`) | Refuse; Terminal recovery |
+| Pending marker and `encrypt` journal, marker present or not | Resume the interrupted conversion, whatever the record says |
+| Pending marker, no marker, no journal | Convert |
+| No pending marker | Unchanged |
+
+Decrypt-pending, non-encrypt journals, armed plus pending, and a journal without
+pending stay Terminal-only: startup MUST never execute or clear them. Only the two
+unarmed checks may tolerate the pending marker; the armed path and `Authority`
+inspection stay strict.
+
+Conversion order is exclusive, release, shared:
+
+1. Without a key, require normal `database_status` capability, enabled root memory
+   (`require_database_memory_enabled`) and the size limit below. A refusal here MUST
+   happen before any native unwrap or custody access.
+2. Acquire EX within a bound (proposed 15 s), rechecking the marker and pending
+   marker while waiting. If another process converted, take the armed path.
+3. Under EX, apply the attempt rule below, write `attempting`, and only then make the
+   first custody call and run `convert_home`. On success remove the record, release
+   EX, and only then take SH through the armed path (`Authority.acquire`, then the
+   shim).
+
+**Busy.** A process that cannot get EX MUST NOT record `busy` yet. It takes SH and
+rechecks the marker under SH. With a marker, another process converted: release SH and
+take the armed path, with no record. Without one, record `busy` and continue plain.
+This replaces the "publication changed" refusal when pending was seen at entry. A
+process that sees pending while waiting for SH extends its wait from 120 s (proposed
+900 s).
+
+**Failure.** With no journal left, write the record, keep the pending marker and
+continue on plain SQLite: unarmed plus pending is safe, because
+`protected_state_present` excludes pending and the activity store refuses with
+`conversion_pending`. With a journal left, refuse startup and never open a
+half-converted state, on plain SQLite or otherwise. This rule applies to every
+outcome. The next start retries, and the refusal MUST name
+`hermes-mordred databases encrypt`, because the Desktop page cannot load then.
+
+**Record.** `<root>/mordred/startup-conversion.json` is written with private
+permissions through the checked private-directory transaction and holds exactly
+`{version, at, outcome, converted, platform}`: no path, key or exception text. Its name
+MUST NOT start with `db-`, which the inventory treats as an unknown dependency.
+`outcome` is one of `attempting`, `auth_interrupted`, `busy`, `memory_not_enabled`,
+`source_unavailable`, `holders_open`, `refused`, `unavailable`, `too_large`. It is
+removed on success, by `POST /databases/cancel` and by a start with nothing pending.
+
+**Attempt rule.** A start that finds `attempting` or `auth_interrupted` under EX with no
+journal knows the previous holder died, for example killed at Desktop's port deadline
+while waiting on a prompt nobody can answer. It writes `auth_interrupted`, makes no
+custody call and continues plain. `auth_interrupted` is sticky: there is no automatic
+retry until the schedule is cancelled, and `busy` or a preflight outcome never replaces
+it or `attempting`. A handled refusal such as `source_unavailable` replaces
+`attempting` and retries on the next restart.
+
+**Prompts.** Vault keys created from the Desktop page default to no prompt. An "ask every
+time" key may be unable to authenticate from the Desktop backend, and passive status
+cannot read that policy, which is why the attempt rule exists. Terminal
+`hermes-mordred databases encrypt` is the documented path for those keys. Whether the
+backend can answer a prompt is an open macOS live gate.
+
+**Size limit.** Hermes Desktop kills and respawns a backend that does not announce its
+port within 90 s (`apps/desktop/electron/backend-ready.ts` in hermes-agent; floor 45 s,
+changed only by an environment variable). Resuming may repeat the export from
+`prepared`, so a home whose export exceeds that deadline would never finish. Startup
+MUST NOT convert when the total stat size of `database_paths(root)` exceeds
+`STARTUP_CONVERSION_MAX_BYTES` (proposed 512 MiB, set from measured throughput recorded
+in the validation log): it records `too_large` and continues plain. Terminal
+`hermes-mordred databases encrypt` remains the path for oversized homes. Mordred MUST
+NOT print a string matching Desktop's `SOURCE_COMPLETION_BANNER_RE` to extend the
+deadline, because that misreports what is running, and sends no upstream PR.
+
+**Known limits.**
+
+- Hung authentication while a journal exists repeats on every respawn, and the page
+  cannot load; Terminal is the remedy. A journal means authentication succeeded
+  earlier, so this should be rare.
+- A crash between pending removal and journal removal leaves the marker and a journal,
+  which is Terminal-only.
+- A sibling process whose SH wait passes its limit exits, fail-closed.
+- A scheduled conversion runs on any non-maintenance Hermes invocation, not only
+  Hermes Desktop.
 
 ### Data-preserving uninstall
 
