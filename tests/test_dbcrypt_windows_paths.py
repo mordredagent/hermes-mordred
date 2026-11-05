@@ -561,6 +561,7 @@ def test_abandon_state_never_touches_remote_or_device_paths(monkeypatch, remote)
     assert backup._lexical_state(Path(remote)) == "unknown"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the native_root fixture uses POSIX custody")
 def test_abandon_with_remote_journal_paths_reports_unknown_without_io(monkeypatch, native_root):
     import json
 
