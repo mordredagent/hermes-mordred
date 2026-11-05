@@ -615,14 +615,14 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_recover.set_defaults(func=_handle_keyvault_recover)
     p_reset = ksub.add_parser(
         "reset",
-        help="Destroy all key material and remove the keyvault (irreversible)",
+        help="Destroy profile keys, Mail/Telegram credentials and all their local history (irreversible)",
     )
     p_reset.add_argument(
         "-y",
         "--yes",
         dest="assume_yes",
         action="store_true",
-        help="Skip the interactive confirmation (for scripted / non-interactive use).",
+        help="Confirm deletion of profile keys, Mail/Telegram credentials and all their local history.",
     )
     p_reset.set_defaults(func=_handle_keyvault_reset)
     p_enable_se = ksub.add_parser(

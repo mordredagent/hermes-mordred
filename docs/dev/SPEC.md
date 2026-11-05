@@ -1787,8 +1787,9 @@ re-enable. Purge deletes the Linux key only after successful disable and a
 rescan proving no sealed memory remains. Keep the current refusal on concurrent
 gateway resealing. Uninstall restores memory before removing the runtime hook;
 Telegram logout/forget never deletes the separate memory key. Keyvault reset
-takes the memory lifecycle lock before its own lock and refuses to remove the
-native store while independent memory custody remains. Uninstall with data
+retains independent memory custody and shared helper files, deleting only
+validated profile-owned keyvault and Mail/Telegram targets under root database
+exclusion. Uninstall with data
 purge restores or explicitly erases memory, then purges its key before resetting
 the native keyvault store.
 
@@ -6807,5 +6808,10 @@ configuration and synchronization; only profile/target-bound internal reset
 authority can resume cleanup. Recheck retained native material and database
 source before and after mutation. Ambiguous ownership, replaced paths, denied
 authentication or uncertain native deletion retains recovery evidence and fails.
+A later reset repeats a failed or uncertain native deletion under the same
+checked owner, because that deletion is idempotent. An absent target may be the
+earlier attempt's result; a replaced target still refuses.
+Uninstall `--purge-data` skips the SQL erasure under live delete authority: it
+has already restored the database to plaintext and retains it.
 Legacy v2 journals cannot authorize additional Mail/Telegram erasure: refuse
 them if that material remains. Windows retains its existing unported refusal.

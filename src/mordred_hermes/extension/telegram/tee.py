@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from ..._core._database_contracts import DatabaseRefused
+from ...keyvault._reset_authority import ResetAuthorization
 from ...keyvault._telegram_custody import (
     KEY_ID as KEY_ID,
 )
@@ -309,16 +310,16 @@ class TeeSecretStore:
         with telegram_credential_transaction(home=self._home(), backend=self._backend()) as custody:
             custody.write_metadata(json.dumps(_meta_document(value, self._read_meta())).encode("utf-8"))
 
-    def forget_from_snapshot(self, snapshot: Snapshot) -> None:
+    def forget_from_snapshot(self, snapshot: Snapshot, *, _reset: ResetAuthorization | None = None) -> None:
         from .store import _posix_archive_lock, _prepare_archive_wipe, _wipe_archive_locked
 
         home = self._home()
         _current, authentication = snapshot
         # Archive is first and nonblocking. Sync credential writes never take it.
         with (
-            _posix_archive_lock(self._dir(), allow_pending=True) as archive,
+            _posix_archive_lock(self._dir(), allow_pending=True, _reset=_reset) as archive,
             telegram_credential_transaction(
-                home=home, backend=self._backend(), authenticated=authentication, _resume=True
+                home=home, backend=self._backend(), authenticated=authentication, _resume=True, _reset=_reset
             ) as custody,
         ):
             journal = custody.forget_journal()
@@ -330,7 +331,8 @@ class TeeSecretStore:
                 custody.delete_native_key()
             custody.clean_source()
             _wipe_archive_locked(archive)
-            custody.finish_forget()
+            if _reset is None:
+                custody.finish_forget()
 
     def _read_meta(self) -> dict[str, Any] | None:
         from ...keyvault._telegram_custody import _read

@@ -129,14 +129,14 @@ def test_reset_preserves_helper_and_all_database_dependencies(tmp_path, monkeypa
     dependency = tmp_path / relative
     dependency.parent.mkdir(parents=True, exist_ok=True)
     dependency.write_bytes(b"retained source or dependency")
-    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
+    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
     assert helper_file.read_bytes() == b"native custody"
     assert dependency.read_bytes() == b"retained source or dependency"
     assert not _storage.reset_journal_path(root).exists()
-    assert calls == []
+    assert len(calls) == 1 and calls[0]["cmd"] == "delete"
 
 
-def test_reset_final_inventory_precedes_journal(tmp_path, monkeypatch):
+def test_independent_database_added_during_preflight_is_retained(tmp_path, monkeypatch):
     from mordred_hermes.wizard import keyvault_cli
 
     root, _, backend, calls = _owned(tmp_path, monkeypatch)
@@ -148,10 +148,11 @@ def test_reset_final_inventory_precedes_journal(tmp_path, monkeypatch):
         return result
 
     monkeypatch.setattr(keyvault_cli, "_collect_reset_key_ids", late_dependency)
-    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
-    assert root.exists()
+    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+    assert (tmp_path / "state.db").read_bytes() == b"new dependency"
+    assert not (root / "meta.json").exists()
     assert not _storage.reset_journal_path(root).exists()
-    assert calls == []
+    assert len(calls) == 1 and calls[0]["cmd"] == "delete"
 
 
 def test_real_reset_deletes_only_checked_targets(tmp_path, monkeypatch):
@@ -287,11 +288,12 @@ def test_valid_source_only_binding_survives_reset_after_source_is_lost(tmp_path,
     source = tmp_path / "mordred/db-key-source.json"
     before = source.read_bytes()
     memory.memory_key_path(tmp_path).unlink()
-    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
+    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
     assert source.read_bytes() == before
-    assert root.exists()
+    assert not (root / "meta.json").exists()
+    assert not any(op == "delete" for op, _ in memory_backend.calls)
     assert not _storage.reset_journal_path(root).exists()
-    assert calls == []
+    assert len(calls) == 1 and calls[0]["cmd"] == "delete"
 
 
 def test_pending_audit_duplicate_cleanup_uses_real_checked_owner(tmp_path, monkeypatch):

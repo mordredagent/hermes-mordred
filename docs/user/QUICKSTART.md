@@ -385,7 +385,18 @@ hermes-mordred keyvault reset         # asks you to type reset
 hermes-mordred keyvault reset --yes   # non-interactive and immediate
 ```
 
-This destroys profile-owned key material. Before reset, create a fresh snapshot
+This destroys profile-owned key material, Mail and Telegram credentials and
+all their local history, including previous accounts and synchronization cursors.
+The operation is local; remote messages are unchanged. Other profiles, shared
+database encryption, independent memory/file keys, imported originals and
+backups are retained. Shared helper directories can remain after reset. A
+pending reset blocks setup and sync until cleanup completes; retry reset after
+repairing the reported problem. A failed or interrupted native key deletion
+keeps its recovery journal, and retrying reset repeats it; a replaced key file
+still refuses. A keyvault backup does not restore Mail/Telegram credentials or
+their local history.
+
+Before reset, create a fresh snapshot
 in an existing private directory:
 
 ```sh
@@ -433,7 +444,9 @@ launcher, and finally uninstalls the package from Hermes's environment.
 On macOS/Linux, your Mordred data — vault, keyvault, Telegram archive, audit log,
 device keys — is **kept** and listed with its location. `--purge-data` deletes it too, after
 you type `delete my data`; keep your keyvault Seed Phrase / Passphrase and the
-vault recovery passphrase if you may want any of it back. Details:
+vault recovery passphrase if you may want any of it back. Databases restored to
+plaintext are not deleted, including imported Mail and Telegram history in
+`plugin-data/mordred/mordred.db`. Details:
 [`USAGE.md` § Uninstall safely](./USAGE.md#uninstall-safely).
 
 Windows restores memory; `--purge-data` removes only its memory custody key

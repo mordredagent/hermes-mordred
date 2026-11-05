@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import _native_key_id, _storage
 
@@ -30,6 +31,7 @@ class _ResetJournal:
     retained_legacy: list[str]
     metadata_incomplete: bool
     root_identity: tuple[int, int]
+    connected: dict[str, Any] | None = None
 
 
 def _encode_reset_journal(
@@ -37,6 +39,8 @@ def _encode_reset_journal(
     key_ids: dict[str, str],
     retained_legacy: list[str],
     metadata_incomplete: bool,
+    *,
+    connected: dict[str, Any] | None = None,
 ) -> tuple[_ResetJournal, bytes]:
     """Build the durable recovery record committed before native deletion."""
     root_meta = root.lstat()
@@ -45,9 +49,10 @@ def _encode_reset_journal(
         retained_legacy=sorted(set(retained_legacy)),
         metadata_incomplete=metadata_incomplete,
         root_identity=(root_meta.st_dev, root_meta.st_ino),
+        connected=connected,
     )
     payload = {
-        "version": _RESET_JOURNAL_VERSION,
+        "version": 3 if connected is not None else _RESET_JOURNAL_VERSION,
         "root_identity": {
             "device": journal.root_identity[0],
             "inode": journal.root_identity[1],
@@ -62,10 +67,12 @@ def _encode_reset_journal(
         "retained_legacy": journal.retained_legacy,
         "metadata_incomplete": journal.metadata_incomplete,
     }
+    if connected is not None:
+        payload["connected"] = connected
     return journal, json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _load_reset_journal(  # noqa: C901, PLR0912 - strict schema validation is intentionally explicit
+def _load_reset_journal(  # noqa: C901, PLR0912, PLR0915 - strict schema validation is intentionally explicit
     root: Path,
 ) -> _ResetJournal:
     """Read and strictly validate a pending stable-parent reset journal."""
@@ -83,9 +90,11 @@ def _load_reset_journal(  # noqa: C901, PLR0912 - strict schema validation is in
         "retained_legacy",
         "metadata_incomplete",
     }
+    if isinstance(payload, dict) and payload.get("version") == 3:
+        required_fields.add("connected")
     if not isinstance(payload, dict) or set(payload) != required_fields:
         raise _storage.KeyvaultCorruptError("reset journal has an invalid schema")
-    if type(payload["version"]) is not int or payload["version"] != _RESET_JOURNAL_VERSION:
+    if type(payload["version"]) is not int or payload["version"] not in {2, 3}:
         raise _storage.KeyvaultCorruptError("reset journal has an unsupported version")
 
     identity = payload["root_identity"]
@@ -133,9 +142,16 @@ def _load_reset_journal(  # noqa: C901, PLR0912 - strict schema validation is in
     if retained or metadata_incomplete:
         raise _storage.KeyvaultCorruptError("reset journal ownership is ambiguous; retained for explicit recovery")
 
+    connected = payload.get("connected")
+    if payload["version"] == 3:
+        from ._reset_files import validate_connected
+
+        validate_connected(root, connected, key_ids)
+
     return _ResetJournal(
         key_ids=dict(sorted(key_ids.items())),
         retained_legacy=sorted(retained),
         metadata_incomplete=metadata_incomplete,
         root_identity=(device, inode),
+        connected=connected,
     )

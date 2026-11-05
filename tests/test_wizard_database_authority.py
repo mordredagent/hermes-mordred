@@ -83,7 +83,7 @@ def test_disable_purge_reset_uninstall_dependencies_refuse(native_root, dependen
         )
         code = uninstall_cli.run_uninstall(ctx, uninstall_cli.UninstallOptions(yes=True))
         assert runner.uninstalls == []
-    assert code == 1
+    assert code == (0 if operation == "reset" else 1)
     # Restoration can complete before the final teardown guard refuses. Native
     # source/key material must remain exact even after that partial success.
     for name in ("mordred/memory-key.wrapped", "mordred/db-key-source.json"):

@@ -34,6 +34,7 @@ from ._native_deletion import (
     _NativeOwnerFacts,
     _owned_delete_scope,
 )
+from ._reset_authority import ResetAuthorization, check_reset_access
 from .wrap import NativeBackend
 
 KEY_ID = "mordred-hermes.telegram.credentials.v1"
@@ -462,8 +463,10 @@ def telegram_credential_transaction(
     authenticated: TelegramAuthentication | None = None,
     create: bool = False,
     _resume: bool = False,
+    _reset: ResetAuthorization | None = None,
 ) -> Iterator[PosixTelegramCustody]:
     """Lifecycle → credential lock, with live descriptor checks on every use."""
+    check_reset_access(home, _reset, component="telegram")
     try:
         checked_telegram_home(home, create=create)
         _backend(home, backend)
@@ -471,6 +474,7 @@ def telegram_credential_transaction(
         # Lazy lock initialization for an existing source is intentional. Unlike
         # key material these two stable locks survive every forget operation.
         with _storage.keyvault_lifecycle_lock(home / "mordred/keyvault"):
+            check_reset_access(home, _reset, component="telegram")
             credential_lock = home / "mordred/.telegram.credentials.lock"
             _storage.ensure_lock_file(credential_lock)
             with _storage._advisory_file_lock(credential_lock, label="Telegram credentials"):
@@ -504,13 +508,14 @@ def telegram_credential_transaction(
 
 
 def authenticate_telegram_source(
-    *, home: Path, backend: NativeBackend, audit_sink: AuditSink
+    *, home: Path, backend: NativeBackend, audit_sink: AuditSink, _reset: ResetAuthorization | None = None
 ) -> tuple[TelegramSecrets | None, TelegramAuthentication | None]:
+    check_reset_access(home, _reset, component="telegram")
     checked_telegram_home(home)
     assert_no_pending_forget(home)
     if _read(home / "mordred/telegram" / _SEALED_NAME) is None:
         return None, None
-    with telegram_credential_transaction(home=home, backend=backend) as custody:
+    with telegram_credential_transaction(home=home, backend=backend, _reset=_reset) as custody:
         observed, sealed = _observe(custody)
     if sealed is None:
         return None, None
@@ -532,7 +537,7 @@ def authenticate_telegram_source(
             raise TelegramSecretsError("tee_unavailable") from exc
         current = decode(_decrypt(dek, nonce, body))
         del dek
-        with telegram_credential_transaction(home=home, backend=backend) as custody:
+        with telegram_credential_transaction(home=home, backend=backend, _reset=_reset) as custody:
             if _observe(custody)[0] != observed:
                 raise DatabaseRefused("Telegram source changed during authentication")
             with _native_creation_handoff(KEY_ID):

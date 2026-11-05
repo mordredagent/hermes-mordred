@@ -330,8 +330,9 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   Windows custody locks; validate at admission and before commit only (`src/mordred_hermes/dbcrypt/_connection.py`).
 - [ ] Connection errors: an unprotected out-of-scope connection error invalidates the whole
   runtime; revoke only that connection (`src/mordred_hermes/dbcrypt/_connection.py`).
-- [ ] `keyvault reset`: `rmtree` of `mordred/keyvault` strips the mail/Telegram helper stores and
-  bypasses custody; it also refuses corrupt or legacy `meta.json` (`src/mordred_hermes/wizard/keyvault_cli.py`).
+- [x] `keyvault reset`: replace recursive removal with journaled, authenticated Mail/Telegram
+  retirement and selective keyvault cleanup. Preserve shared helper/database/memory custody;
+  ambiguous metadata and native outcomes remain fail-closed for explicit recovery.
 - [ ] macOS database-key load is not bound to the root helper store, so child profiles fail closed
   (`src/mordred_hermes/keyvault/_database_authority.py`).
 - [ ] macOS passive regressions: Desktop database step stuck in attention and `mail status --json` nulls;
@@ -1086,11 +1087,17 @@ the former claim that both platforms only use `.enc` archives is stale.
 
 ## Coordinated keyvault reset delivery (2026-11-05)
 
-- [ ] Publish the independent English contract/plan PR to `dev`.
-- [ ] Add bounded journal/authorization and selective keyvault cleanup.
-- [ ] Add transactional offline Mail/Telegram history erasure.
-- [ ] Integrate authenticated credential retirement and pending-reset guards.
-- [ ] Wire the wizard coordinator and explicit full-scope confirmation/help.
-- [ ] Verify failure/retry, preservation and complete affected modules; run
+- [x] Publish the independent English contract/plan PR to `dev` ([#299](https://github.com/mordredagent/hermes-mordred/pull/299)).
+- [x] Add bounded journal/authorization and selective keyvault cleanup.
+- [x] Add transactional offline Mail/Telegram history erasure.
+- [x] Integrate authenticated credential retirement and pending-reset guards.
+- [x] Wire the wizard coordinator and explicit full-scope confirmation/help.
+- [x] Verify failure/retry, preservation and complete affected modules; run
   critical feedback and final regression/static checks.
-- [ ] Record isolated real-helper macOS/Linux acceptance and Windows refusal.
+- [x] Allow reset to repeat a failed or interrupted native deletion, and let
+  uninstall purge skip SQL erasure for its restored plaintext database.
+- [ ] Decide whether uninstall `--purge-data` should also erase Mail and Telegram
+  history from the restored plaintext `plugin-data/mordred/mordred.db`. It is
+  retained, as it was before coordinated reset.
+- [ ] Complete Linux hardware acceptance. Isolated macOS real-helper acceptance and
+  the existing Windows refusal tests passed; see the dated validation-log entry.

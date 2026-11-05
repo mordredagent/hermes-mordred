@@ -2850,7 +2850,8 @@ keep component implementation changes in separate commits/review slices:
 
 1. Keyvault: extend strict reset recovery with explicit scope/progress, checked
    internal reset authorization and selective file cleanup; retain independent
-   native sources and refuse changed ownership.
+   native sources and refuse changed ownership. Repeat failed or interrupted
+   native deletion under the checked owner, tolerating only an absent target.
 2. Imports: expose bounded offline Mail/Telegram erasure using an existing
    exclusive lease and `maintenance_scope`, secure deletion and FTS cleanup;
    erase previous accounts, runs, references, cursor and retirement metadata.

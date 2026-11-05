@@ -680,6 +680,12 @@ class ImportStore:
                 conn.execute("PRAGMA secure_delete = ON")
             conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             try:
+                if write:
+                    from ..keyvault._reset_authority import check_reset_access
+
+                    meta = self._read_meta(conn)
+                    if meta is not None and meta.get("profile_home"):
+                        check_reset_access(Path(meta["profile_home"]))
                 if guard is not None:
                     guard()
                 yield conn
@@ -705,6 +711,9 @@ class ImportStore:
         An older schema bound to ``profile_home`` is upgraded in the same transaction.
         """
         bound = os.path.realpath(profile_home)
+        from ..keyvault._reset_authority import check_reset_access
+
+        check_reset_access(Path(bound))
         with self._transaction() as conn:
             meta = self._read_meta(conn)
             if meta is None:
