@@ -6808,5 +6808,10 @@ configuration and synchronization; only profile/target-bound internal reset
 authority can resume cleanup. Recheck retained native material and database
 source before and after mutation. Ambiguous ownership, replaced paths, denied
 authentication or uncertain native deletion retains recovery evidence and fails.
+A later reset repeats a failed or uncertain native deletion under the same
+checked owner, because that deletion is idempotent. An absent target may be the
+earlier attempt's result; a replaced target still refuses.
+Uninstall `--purge-data` skips the SQL erasure under live delete authority: it
+has already restored the database to plaintext and retains it.
 Legacy v2 journals cannot authorize additional Mail/Telegram erasure: refuse
 them if that material remains. Windows retains its existing unported refusal.

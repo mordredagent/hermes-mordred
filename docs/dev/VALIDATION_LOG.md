@@ -2225,6 +2225,25 @@ completion acceptance matrix track later work and current open gates.
   deployment. No production keyvault reset or account retirement was run.
   This does not extend the earlier Linux or full Python 3.14 acceptance claims.
 
+- **2026-11-05 — Coordinated reset retry and uninstall purge correction.** An
+  independent security review of the merged branch reported two defects, each
+  reproduced with synthetic backends before the fix. A failed native key deletion
+  left `deleting` in the journal and every later reset refused, with no repair
+  path. Uninstall `--purge-data` called the database stage after restoring
+  `mordred.db` to plaintext and failed with
+  `component SQL requires an adopted native marker`; by code order this follows
+  memory-key, vault-key and Telegram removal. The whole uninstall flow was not
+  run with the real reset. Retried deletion now repeats under the checked owner,
+  and a replaced target still refuses. Uninstall skips SQL erasure only under
+  live delete authority, and an expired permit refuses before any key deletion.
+
+  The previous `test_partial_native_delete_can_be_retried_from_retained_metadata`
+  behavior is restored. Python 3.11.15 / locked Hermes: affected modules
+  **1,947 passed, 7 skipped, 2 deselected**; critical preset **24 passed**. Ruff,
+  formatting, strict mypy (**420 files**), import-layer contracts and shellcheck
+  passed. The real-helper suite, Linux hardware and the full regression were not
+  rerun for this correction. The wheel in the previous entry predates it.
+
 - **2026-11-05 — E2E standalone tool/cron sender guard: automated candidate verification; live browser gate pending.**
   Candidate branch `fix/e2e-standalone-senders` protects Hermes's common
   `_send_to_platform` seam without changing Hermes, the extension or the v3

@@ -1094,5 +1094,10 @@ the former claim that both platforms only use `.enc` archives is stale.
 - [x] Wire the wizard coordinator and explicit full-scope confirmation/help.
 - [x] Verify failure/retry, preservation and complete affected modules; run
   critical feedback and final regression/static checks.
+- [x] Allow reset to repeat a failed or interrupted native deletion, and let
+  uninstall purge skip SQL erasure for its restored plaintext database.
+- [ ] Decide whether uninstall `--purge-data` should also erase Mail and Telegram
+  history from the restored plaintext `plugin-data/mordred/mordred.db`. It is
+  retained, as it was before coordinated reset.
 - [ ] Complete Linux hardware acceptance. Isolated macOS real-helper acceptance and
   the existing Windows refusal tests passed; see the dated validation-log entry.
