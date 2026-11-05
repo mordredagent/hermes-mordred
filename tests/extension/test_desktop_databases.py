@@ -234,6 +234,52 @@ def test_malformed_record_answers_startup_refused(db: Any, raw: bytes) -> None:
     assert db.scheduled == []
 
 
+def _shared_mordred(home: Path) -> Path:
+    directory = home / "mordred"
+    directory.mkdir(mode=0o755)
+    directory.chmod(0o755)  # a legacy Mordred directory: the private record read would refuse it
+    return directory
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a POSIX mode is what makes this directory legacy")
+def test_startup_outcome_is_not_read_when_nothing_is_scheduled(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(root: Path) -> str:
+        pytest.fail("polling read the startup record with nothing scheduled")
+
+    directory = _shared_mordred(db.home)
+    monkeypatch.setattr(_startup, "read_outcome", forbidden)
+    facts = db.desktop.get("/databases/status")
+    assert facts["armed"] is False and facts["encrypt_pending"] is False and facts["startup_outcome"] is None
+    # A legacy armed home, and a leftover record: neither is read without a schedule.
+    (directory / "db-encryption.marker").write_text("1\n", encoding="utf-8")
+    (directory / _startup.RECORD_NAME).write_text('{"version": 1, "outcome": "busy"}', encoding="utf-8")
+    facts = db.desktop.get("/databases/status")
+    assert facts["armed"] is True and facts["startup_outcome"] is None
+
+
+def test_startup_outcome_is_not_read_on_an_unsafe_path(
+    db: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if os.name != "posix":
+        pytest.skip("creating a symlink needs a privilege on Windows")
+
+    def forbidden(root: Path) -> str:
+        pytest.fail("polling read the startup record on an unsafe path")
+
+    _unsafe_home(db, tmp_path)
+    monkeypatch.setattr(_startup, "read_outcome", forbidden)
+    assert db.desktop.get("/databases/status")["startup_outcome"] is None
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a POSIX mode is what makes this directory legacy")
+def test_a_schedule_in_a_shared_directory_answers_startup_refused(db: Any) -> None:
+    # While something is scheduled an unverifiable absence still fails closed, as startup itself would.
+    directory = _shared_mordred(db.home)
+    (directory / "db-encryption.pending").write_text("1\n", encoding="utf-8")
+    assert db.desktop.get("/databases/status")["startup_outcome"] == "refused"
+    assert _encrypt(db) == _attention("startup_refused")
+
+
 def test_scheduled_without_a_record_answers_scheduled_with_no_write(db: Any) -> None:
     _marker(db.home, "db-encryption.pending")
     before = _tree(db.home)

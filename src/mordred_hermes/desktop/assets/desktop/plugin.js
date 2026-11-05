@@ -934,13 +934,11 @@ function firstBlocker(...rules) {
 }
 
 // Steps 2.4 and 2.5 write to mordred.db, which opens only once the databases are
-// armed (step 1.3) and Hermes restarted. null on Windows and from an older API.
+// armed (step 1.3) and Hermes restarted. null on Linux and from an older API: step 1.3 is
+// opt-in there, and an unarmed Linux import keeps writing its Telegram archive.
 function storeBlocker(status) {
-  const layout = pageLayout(status)
-  if (!((layout === 'macos' || layout === 'linux') && reportsV4(status))) return null
+  if (!(pageLayout(status) === 'macos' && reportsV4(status))) return null
   const db = status.databases
-  // A Linux host without the driver: step 1.3 cannot lift this, and Telegram keeps its archive.
-  if (layout === 'linux' && db.supported === false) return null
   if (db.armed == null && db.supported !== false) return null // unknown: the explicit operation performs admission
   if (!db.armed) return db.encrypt_pending && !startupCode(db.startup_outcome) ? 'needs_restart' : 'needs_databases'
   if (databaseFactsUnknown(db)) return null // the explicit foreground operation performs admission

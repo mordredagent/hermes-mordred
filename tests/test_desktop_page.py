@@ -542,12 +542,12 @@ STATE_CASES.update(
         "linux, v4, not armed": (
             linux(**v4(vault=None, armed=False, available=False, code="store_unavailable")),
             None,
-            ready_but(vault=None, databases="next", telegram_import="blocked:needs_databases", mail=None),
+            ready_but(vault=None, databases="next", telegram_import="todo", mail=None),
         ),
         "linux, v4, scheduled": (
             linux(**v4(vault=None, armed=False, encrypt_pending=True, available=False, code="store_unavailable")),
             None,
-            ready_but(vault=None, databases="next:restart", telegram_import="blocked:needs_restart", mail=None),
+            ready_but(vault=None, databases="next:restart", telegram_import="todo", mail=None),
         ),
         "linux, v4, startup refused": (
             linux(
@@ -561,17 +561,12 @@ STATE_CASES.update(
                 )
             ),
             None,
-            ready_but(
-                vault=None,
-                databases="attention:startup_refused",
-                telegram_import="blocked:needs_databases",
-                mail=None,
-            ),
+            ready_but(vault=None, databases="attention:startup_refused", telegram_import="next", mail=None),
         ),
         "linux, v4, armed before this start": (
             linux(**v4(vault=None, protected=False, available=False, code="store_unavailable")),
             None,
-            ready_but(vault=None, databases="next:restart", telegram_import="blocked:needs_restart", mail=None),
+            ready_but(vault=None, databases="next:restart", telegram_import="todo", mail=None),
         ),
         "linux, v4, on": (
             linux(**v4(vault=None, available=False, code="store_unavailable")),
@@ -590,7 +585,7 @@ STATE_CASES.update(
                 mail=None,
             ),
         ),
-        "linux, v4, no driver: the step cannot lift the import": (
+        "linux, v4, no driver": (
             linux(**v4(vault=None, armed=False, supported=False, available=False, code="store_unavailable")),
             SYNC_COUNTS,
             ready_but(vault=None, databases="attention:databases_unsupported", mail=None),
@@ -2308,6 +2303,10 @@ def test_databases_unsupported_text_makes_no_promise():
         assert promise not in text.lower(), promise
 
 
+BLOCKER_TEXT_DATABASES = "Encrypt the Hermes databases first."
+BLOCKER_TEXT_RESTART = "Restart Hermes Desktop to finish step 1.3."
+
+
 def test_linux_page_renders_the_databases_step_from_v4_status():
     status = linux(**v4(vault=None, armed=False, available=False, code="store_unavailable"))
     rendered = headings(status, None)
@@ -2336,12 +2335,46 @@ def test_linux_page_without_v4_has_no_databases_step_and_no_claim_of_support():
     assert "mordred-step-databases" not in rendered["steps"]
 
 
-def test_linux_import_is_not_blocked_by_a_step_that_cannot_lift_it():
-    # No SQLCipher driver: step 1.3 is unsupported and the import keeps its archive.
-    status = linux(**v4(vault=None, armed=False, supported=False, available=False, code="store_unavailable"))
-    assert render_page(f"console.log(JSON.stringify(storeBlocker({json.dumps(status)})))") is None
-    text = page_text(status)
-    assert "not supported on this system" in text and "Encrypt databases" not in text
+@pytest.mark.parametrize(
+    ("facts", "state"),
+    [
+        ({"armed": False}, "todo"),
+        ({"armed": False, "encrypt_pending": True}, "todo"),
+        ({"armed": False, "encrypt_pending": True, "startup_outcome": "refused"}, "next"),
+        ({"armed": False, "supported": False}, "next"),
+    ],
+    ids=["unarmed", "pending", "postponed", "unsupported"],
+)
+def test_linux_import_is_not_blocked_by_unencrypted_databases(facts, state):
+    """Step 1.3 is opt-in on Linux: an unarmed import writes the Telegram archive (``select_sink``)."""
+    status = linux(**v4(vault=None, available=False, code="store_unavailable", **facts))
+    result = render_page(
+        """
+const status = STATUS
+console.log(JSON.stringify({blocker: storeBlocker(status), step: stepStates(status).telegram_import,
+  text: treeText(PageBody({status, health: null, refresh: () => {}}))}))
+""".replace("STATUS", json.dumps(status))
+    )
+    assert result["blocker"] is None
+    assert result["step"] == {"state": state}
+    assert BLOCKER_TEXT_DATABASES not in result["text"] and BLOCKER_TEXT_RESTART not in result["text"]
+    assert "1.3  Encrypt Hermes databases" in result["text"], "the step stays on the page"
+
+
+def test_linux_import_still_needs_memory_before_the_databases_matter():
+    status = linux(memory=False, login=False, **v4(vault=None, armed=False, available=False))
+    states = render_page(f"console.log(JSON.stringify(stepStates({json.dumps(status)}).telegram_import))")
+    assert states == {"state": "blocked", "blocker": "needs_memory"}
+
+
+def test_macos_import_is_still_blocked_until_the_databases_are_armed():
+    for facts, blocker in (
+        ({"armed": False}, "needs_databases"),
+        ({"armed": False, "encrypt_pending": True}, "needs_restart"),
+        ({"protected": False}, "needs_restart"),
+    ):
+        status = mac(**v4(available=False, **facts))
+        assert render_page(f"console.log(JSON.stringify(storeBlocker({json.dumps(status)})))") == blocker
 
 
 # -- step 2.5: mail --------------------------------------------------------------------------------

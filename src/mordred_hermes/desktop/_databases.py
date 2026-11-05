@@ -80,7 +80,11 @@ def _runtime_protected(root: Path) -> bool:
 
 
 def _startup_outcome(root: Path) -> str | None:
-    """The startup record's code. This bounded read is the one exception to metadata-only polling."""
+    """The startup record's code. This bounded read is the one exception to metadata-only polling.
+
+    Only called while a conversion is scheduled: without a schedule no answer depends
+    on the record, and a legacy shared ``mordred/`` would read as a refusal.
+    """
     from ..dbcrypt import _startup
 
     try:
@@ -116,7 +120,7 @@ def status_object(
         intent,
         runtime_protected=_runtime_protected(root),
         plaintext_backups=_plaintext_backups(root) if known else None,
-        startup_outcome=_startup_outcome(root) if known else None,
+        startup_outcome=_startup_outcome(root) if known and intent.encrypt_pending else None,
     )
 
 
