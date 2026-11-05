@@ -6078,7 +6078,7 @@ mode, egress rules, what the Hermes tools return, and any new bundler or framewo
   `vault_required`, `vault_exists`, `vault_flow_expired`, `passphrase_reused`,
   `env_optout`, `env_required`, `mail_setup_stale`, `stale_pending`, `decrypt_pending`,
   `journal`, `startup_busy`, `startup_memory_required`, `startup_key_unavailable`,
-  `startup_refused`, `startup_too_large`,
+  `startup_refused`, `startup_too_large`, `startup_auth_interrupted`,
   `disk_full`, `memory_operation_in_progress`, `plaintext_in_armed_home`, `store_uninitialised`,
   `profile_mismatch`, `schema_newer`, `unkeyed_connection`, `unsupported_platform`,
   `mail_fetch_busy`,
@@ -6337,6 +6337,7 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
   - `plaintext_backups` is a metadata count of archives under `backups/`; no archive
     is opened.
   - `startup_outcome` is the `outcome` of the startup record, or `null` without one.
+    `attempting` is never exposed: status reports it as `auth_interrupted`.
 - **The one exception to metadata-only polling** is a read of Mordred's own non-secret
   record `mordred/startup-conversion.json`, bounded to 4096 bytes. Status reads no
   other file content. A record that is oversized, malformed or carries an unknown
@@ -6345,7 +6346,8 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
   (`{"dry_run": bool}`, default false) MUST NOT call `migrate()`; it only schedules or
   reports, and [startup conversion](#startup-conversion) does the work. It answers
   `databases_unsupported` for `supported: false` first; `dry_run` answers `{"ok": true,
-  "action": "dry_run"}`. The first matching row decides:
+  "action": "dry_run"}`. The first matching row decides; the journal row precedes any
+  record, because a record can coexist with a journal:
 
 | armed | encrypt_pending | decrypt / journal | startup record | runtime_protected | answer |
 |---|---|---|---|---|---|
@@ -6357,6 +6359,7 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
 | no | yes | none | `memory_not_enabled` | - | `attention`, code `startup_memory_required` |
 | no | yes | none | `source_unavailable` | - | `attention`, code `startup_key_unavailable` |
 | no | yes | none | `too_large` | - | `attention`, code `startup_too_large` |
+| no | yes | none | `auth_interrupted` | - | `attention`, code `startup_auth_interrupted` |
 | no | yes | none | any other | - | `attention`, code `startup_refused` |
 | yes | yes | none | - | - | `attention`, code `stale_pending` (Terminal `databases status`) |
 | yes | no | none | - | false | `needs_restart` ("restart Hermes Desktop") |
@@ -6371,9 +6374,10 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
 - `plaintext_in_armed_home` stays a known code for compatibility. The page no longer
   detects that state, because status cannot classify files; the runtime monitor does.
 - `POST /databases/cancel` removes `mordred/db-encryption.pending` through
-  `_migrate.unschedule`. It MUST never convert, and it refuses, changing nothing, while
-  a journal or the marker exists. It exists because a retained pending marker blocks
-  memory disable and reset.
+  `_migrate.unschedule`, and the startup record with it, so a new schedule starts
+  clean. It MUST never convert, and it refuses, changing nothing, while a journal or
+  the marker exists. It exists because a retained pending marker blocks memory disable
+  and reset, and because it is the only way out of `auth_interrupted`.
 - **Page.** Step 1.3 (`DatabasesStep`) renders on macOS, Linux and Windows, where
   `WindowsSetup` places it after `WindowsMemoryStep`. On `supported: false` it says
   database encryption is not supported on this system and shows no button. Every
@@ -6383,9 +6387,10 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
 |---|---|
 | `startup_busy` | Quit all Hermes processes, then restart |
 | `startup_memory_required` | Go to the memory step |
-| `startup_key_unavailable` | Restart and approve the key prompt |
+| `startup_key_unavailable` | Restart, approving a key prompt if one appears; otherwise Terminal: `hermes-mordred databases encrypt` |
 | `startup_refused` | Terminal: `hermes-mordred databases encrypt` |
 | `startup_too_large` | Terminal: `hermes-mordred databases encrypt` |
+| `startup_auth_interrupted` | Cancel and press **Encrypt databases** again, or Terminal: `hermes-mordred databases encrypt` |
 
 ### Imports status
 
@@ -6803,7 +6808,7 @@ journal exists. The first matching row decides:
 | `db-decryption.pending`, or a journal whose `direction` is not `encrypt` | Refuse; Terminal recovery |
 | Journal without a pending marker | Refuse; Terminal recovery |
 | Marker and pending marker, no journal (`stale_pending`) | Refuse; Terminal recovery |
-| Pending marker and `encrypt` journal, marker present or not | Resume the interrupted conversion; the pending marker is removed last, so Mordred's own crash always leaves it |
+| Pending marker and `encrypt` journal, marker present or not | Resume the interrupted conversion, whatever the record says |
 | Pending marker, no marker, no journal | Convert |
 | No pending marker | Unchanged |
 
@@ -6819,8 +6824,10 @@ Conversion order is exclusive, release, shared:
    happen before any native unwrap or custody access.
 2. Acquire EX within a bound (proposed 15 s), rechecking the marker and pending
    marker while waiting. If another process converted, take the armed path.
-3. Run `convert_home` under EX. On success remove the record, release EX, and only
-   then take SH through the armed path (`Authority.acquire`, then the shim).
+3. Under EX, apply the attempt rule below, write `attempting`, and only then make the
+   first custody call and run `convert_home`. On success remove the record, release
+   EX, and only then take SH through the armed path (`Authority.acquire`, then the
+   shim).
 
 **Busy.** A process that cannot get EX MUST NOT record `busy` yet. It takes SH and
 rechecks the marker under SH. With a marker, another process converted: release SH and
@@ -6841,9 +6848,23 @@ outcome. The next start retries, and the refusal MUST name
 permissions through the checked private-directory transaction and holds exactly
 `{version, at, outcome, converted, platform}`: no path, key or exception text. Its name
 MUST NOT start with `db-`, which the inventory treats as an unknown dependency.
-`outcome` is one of `busy`, `memory_not_enabled`, `source_unavailable`, `holders_open`,
-`refused`, `unavailable`, `too_large`. It is removed on success and by a start with
-nothing pending.
+`outcome` is one of `attempting`, `auth_interrupted`, `busy`, `memory_not_enabled`,
+`source_unavailable`, `holders_open`, `refused`, `unavailable`, `too_large`. It is
+removed on success, by `POST /databases/cancel` and by a start with nothing pending.
+
+**Attempt rule.** A start that finds `attempting` or `auth_interrupted` under EX with no
+journal knows the previous holder died, for example killed at Desktop's port deadline
+while waiting on a prompt nobody can answer. It writes `auth_interrupted`, makes no
+custody call and continues plain. `auth_interrupted` is sticky: there is no automatic
+retry until the schedule is cancelled, and `busy` or a preflight outcome never replaces
+it or `attempting`. A handled refusal such as `source_unavailable` replaces
+`attempting` and retries on the next restart.
+
+**Prompts.** Vault keys created from the Desktop page default to no prompt. An "ask every
+time" key may be unable to authenticate from the Desktop backend, and passive status
+cannot read that policy, which is why the attempt rule exists. Terminal
+`hermes-mordred databases encrypt` is the documented path for those keys. Whether the
+backend can answer a prompt is an open macOS live gate.
 
 **Size limit.** Hermes Desktop kills and respawns a backend that does not announce its
 port within 90 s (`apps/desktop/electron/backend-ready.ts` in hermes-agent; floor 45 s,
@@ -6854,9 +6875,18 @@ MUST NOT convert when the total stat size of `database_paths(root)` exceeds
 in the validation log): it records `too_large` and continues plain. Terminal
 `hermes-mordred databases encrypt` remains the path for oversized homes. Mordred MUST
 NOT print a string matching Desktop's `SOURCE_COMPLETION_BANNER_RE` to extend the
-deadline, because that misreports what is running, and sends no upstream PR. A kill
-while waiting for Touch ID precedes the journal, so only the pending marker remains and
-the next start prompts again.
+deadline, because that misreports what is running, and sends no upstream PR.
+
+**Known limits.**
+
+- Hung authentication while a journal exists repeats on every respawn, and the page
+  cannot load; Terminal is the remedy. A journal means authentication succeeded
+  earlier, so this should be rare.
+- A crash between pending removal and journal removal leaves the marker and a journal,
+  which is Terminal-only.
+- A sibling process whose SH wait passes its limit exits, fail-closed.
+- A scheduled conversion runs on any non-maintenance Hermes invocation, not only
+  Hermes Desktop.
 
 ### Data-preserving uninstall
 

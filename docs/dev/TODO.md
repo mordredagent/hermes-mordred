@@ -944,9 +944,11 @@ compatibility with every downstream private-store reader.
     database recheck. Remaining live gates, each recorded in the
     [validation log](VALIDATION_LOG.md#manual-live-device-validation-log) with an
     isolated `HERMES_HOME`, never production `~/.hermes`:
-    - [ ] macOS Desktop: button, restart, Touch ID, done; Touch ID cancel text and
-      prompt count; a home near the size limit; measured throughput for
-      `STARTUP_CONVERSION_MAX_BYTES`.
+    - [ ] macOS Desktop with a default no-prompt key: button, restart, done; a home
+      near the size limit; measured throughput for `STARTUP_CONVERSION_MAX_BYTES`.
+    - [ ] macOS Desktop with an "ask every time" key: whether the backend can answer
+      a prompt, its prompt count and cancel text, and `auth_interrupted` after a kill
+      at the port deadline.
     - [ ] Whether Desktop's restart stops gateway and profile processes, or the step
       answers `startup_busy`.
     - [ ] Linux on the AWS TPM host: `hermes` start, concurrent gateway and profile.

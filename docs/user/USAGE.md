@@ -678,8 +678,10 @@ hermes-mordred desktop uninstall
 > The page never converts or arms anything itself: Hermes Desktop keeps its
 > databases open, so **Encrypt databases** only schedules the conversion, which
 > runs at the next restart before Hermes opens them, and the step offers
-> **Restart now**. On macOS, approve Touch ID if it asks during the restart; without
-> the approval nothing is converted and a later start asks again. The Telegram
+> **Restart now**. Starting Hermes any other way, not only from Hermes Desktop, also
+> runs the scheduled conversion. A vault key created from the page needs no Touch ID by default. If
+> your key asks for Touch ID every time, the Desktop backend may be unable to get
+> that approval, so use `hermes-mordred databases encrypt` in Terminal. The Telegram
 > import and the mail step wait until the databases are encrypted, because
 > `mordred.db` only opens then. The outcomes are: not armed yet, the conversion is
 > scheduled (asking again changes nothing); armed, the step is done and says
@@ -693,8 +695,11 @@ hermes-mordred desktop uninstall
 > If a scheduled conversion could not run, Hermes starts on its plain databases and
 > the step says what to do, with **Cancel** to drop the schedule: Hermes was busy
 > (quit all Hermes processes, then restart); memory is not encrypted yet (go to the
-> memory step); the key was not available (restart and approve); anything else (run
-> `hermes-mordred databases encrypt` in Terminal). If a conversion stops partway,
+> memory step); the key was not available (restart, or use Terminal if it stays
+> unavailable); an earlier attempt was cut off while authenticating, which is not
+> retried on its own (press **Cancel** and **Encrypt databases** again, or use
+> Terminal); anything else (run `hermes-mordred databases encrypt` in Terminal). If a
+> conversion stops partway,
 > Hermes refuses to start rather than open a half-converted home: a later start
 > tries again, and `hermes-mordred databases encrypt` in Terminal finishes it.
 >
@@ -704,7 +709,7 @@ hermes-mordred desktop uninstall
 > The next step encrypts Hermes's memory, and if it fails you retry it without a
 > new passphrase. The vault step is also where you choose "Ask for Touch ID every
 > time Hermes unlocks the vault". It is off by default, because Hermes Desktop
-> starts its backend in the background and cannot answer a prompt; the page shows
+> starts its backend in the background and may be unable to answer a prompt; the page shows
 > the policy the key actually has, and your Telegram and mail keys keep their own
 > Touch ID setting. If an earlier vault was removed but its Keychain anchor was left
 > behind, the page shows the exact `security delete-generic-password` command to run
@@ -1500,7 +1505,7 @@ per-use Touch ID / passcode prompt?", or `--unattended-keys` /
 the keyvault key and the file-vault key. The default is attended. The Hermes
 Desktop setup page creates the file-vault key unattended unless "Ask for Touch
 ID every time Hermes unlocks the vault" is ticked, because Hermes Desktop
-starts its backend in the background and cannot answer a prompt. A key that
+starts its backend in the background and may be unable to answer a prompt. A key that
 already exists keeps the policy it was created with.
 
 `keyvault enable-se` may install or refresh the helper with an existing

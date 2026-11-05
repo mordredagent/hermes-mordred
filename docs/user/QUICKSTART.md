@@ -313,9 +313,9 @@ hermes-mordred databases status
 
 `setup` and `encryption enable all` do not enable this. On macOS, Linux and
 Windows Server, the Mordred page in Hermes Desktop can instead schedule the
-conversion: press **Encrypt databases**, restart and, on macOS, approve Touch ID if
-asked. If the page says Hermes is busy, quit all Hermes processes and restart. For a
-very large home, quit Hermes and use the commands above in Terminal.
+conversion: press **Encrypt databases** and restart. If the page says Hermes is busy,
+quit all Hermes processes and restart. For a very large home, or a key that asks for
+Touch ID every time, quit Hermes and use the commands above in Terminal.
 Windows workstation editions including Windows 11, session JSONL and text logs are
 outside this protection.
 See [database operations](./USAGE.md#databases--encrypt-hermess-sqlite-databases-macos)
