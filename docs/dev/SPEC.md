@@ -6754,3 +6754,29 @@ Windows deletion, Windows erase-encrypted and Windows 11 encrypted database
 restoration are outside this change. Mid-operation hardware or disk failures do
 not promise automatic rollback: preserve recovery records and report partial
 progress without claiming completion.
+
+## Coordinated keyvault reset (2026-11-05)
+
+`keyvault reset [--yes]` destroys the current profile's checked keyvault keys,
+Mail and Telegram credentials and their custody keys, and all local Mail and
+Telegram history, including previous accounts, cursors, search tokens and
+associated metadata. Confirmation explicitly covers this full scope. Reset is
+local: it performs no mail-server or Telegram API operation.
+
+Other profiles, unrelated history, the shared database and its encryption
+source, memory/file encryption keys, unknown helper files, imported originals
+and backups survive. Never recursively remove `mordred/keyvault`. Delete only
+validated owned selectors and known profile files; shared directories may remain.
+
+Acquire root database exclusion before credential/key custody. Journal exact
+targets and progress durably before the first deletion, without plaintext
+credentials or private keys. Erase only this profile's Mail/Telegram rows in one
+SQLCipher maintenance transaction outside custody, then use each component's
+authenticated retirement, then finish keyvault cleanup. Database failure keeps
+credentials and native keys. Pending reset blocks ordinary initialization,
+configuration and synchronization; only profile/target-bound internal reset
+authority can resume cleanup. Recheck retained native material and database
+source before and after mutation. Ambiguous ownership, replaced paths, denied
+authentication or uncertain native deletion retains recovery evidence and fails.
+Legacy v2 journals cannot authorize additional Mail/Telegram erasure: refuse
+them if that material remains. Windows retains its existing unported refusal.
