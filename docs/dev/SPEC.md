@@ -6046,6 +6046,10 @@ mode, egress rules, what the Hermes tools return, and any new bundler or framewo
   API: `needs_hermes_model`, `needs_enclave`, `needs_memory`, `needs_databases`,
   `needs_restart`, `needs_login`, `needs_question_model`. Until the databases are
   armed after step 1.3, steps 2.4 and 2.5 MUST be `blocked` with `needs_restart`.
+  This applies to the macOS page. On Linux, step 1.3 is opt-in and step 2.4 is not
+  blocked by it: an unarmed import writes the Telegram archive. While a conversion
+  is pending or Hermes has not restarted, a Linux import with no archived dialogs
+  answers `import_store_unavailable`; restarting or cancelling the schedule clears it.
 - **Why blocks.** Every step has a native `<details>`/`<summary>` ("Why this
   step?"). The vault step offers "Ask for Touch ID every time Hermes unlocks the
   vault", off by default, and MUST send `{"unattended": !askEveryTime}` to
@@ -6336,10 +6340,12 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
     status never runs. An empty list MUST NOT be read as "no plaintext".
   - `plaintext_backups` is a metadata count of archives under `backups/`; no archive
     is opened.
-  - `startup_outcome` is the `outcome` of the startup record, or `null` without one.
+  - `startup_outcome` is the `outcome` of the startup record, or `null` without one
+    or while nothing is scheduled.
     `attempting` is never exposed: status reports it as `auth_interrupted`.
 - **The one exception to metadata-only polling** is a read of Mordred's own non-secret
-  record `mordred/startup-conversion.json`, bounded to 4096 bytes. Status reads no
+  record `mordred/startup-conversion.json`, bounded to 4096 bytes and made only while
+  a conversion is scheduled. Status reads no
   other file content. A record that is oversized, malformed or carries an unknown
   outcome counts as "any other" below.
 - **The Desktop route never converts or arms itself.** `POST /databases/encrypt`
