@@ -99,6 +99,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol, TypeAlias
 from weakref import WeakKeyDictionary
 
+from ...keyvault._reset_authority import ResetAuthorization, check_reset_access
 from .imap import CancelToken, ImapError, ImapSession, ImapStopped, IoLimits
 from .secrets import MailCredentials, MailSecretsError, mail_dir
 from .source import MAX_MESSAGE_BYTES, TrustedBytes, TrustedMeta
@@ -505,7 +506,9 @@ def mail_writer_scope(home: Path) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def _windows_fetch_lock(home: Path, lease: FetchLease | None) -> Iterator[None]:
+def _windows_fetch_lock(
+    home: Path, lease: FetchLease | None, *, _reset: ResetAuthorization | None = None
+) -> Iterator[None]:
     from ..._private_fs import PrivateFSError, open_private_directory
 
     try:
@@ -525,6 +528,7 @@ def _windows_fetch_lock(home: Path, lease: FetchLease | None) -> Iterator[None]:
             _mail_writers.held = held
             _issued_writers[held] = _writer_facts(held)
             try:
+                check_reset_access(home, _reset, component="mail")
                 yield
             finally:
                 release.held = False
@@ -679,17 +683,20 @@ class WriterLock(Protocol):
 
 
 @contextlib.contextmanager
-def fetch_lock(home: Path, lease: FetchLease | None = None) -> Iterator[None]:
+def fetch_lock(  # noqa: PLR0915 - writer admission and cleanup stay in one scope
+    home: Path, lease: FetchLease | None = None, *, _reset: ResetAuthorization | None = None
+) -> Iterator[None]:
     """The per-home mail writer lock (``<home>/mordred/mail/.lock``); held elsewhere → ``sync_in_progress``.
 
     With a ``lease`` the lock's release is registered with it, so a caller that
     abandons the fetch can release the lock once the fetch is revoked; a lease
     already abandoned releases it before anything runs under it (:class:`_Abandoned`).
     """
+    check_reset_access(home, _reset, component="mail")
     if _held_mail_writer(home) is not None:
         raise FetchStop("sync_in_progress")
     if sys.platform == "win32":
-        with _windows_fetch_lock(home, lease):
+        with _windows_fetch_lock(home, lease, _reset=_reset):
             yield
         return
     import fcntl  # POSIX only
@@ -732,6 +739,7 @@ def fetch_lock(home: Path, lease: FetchLease | None = None) -> Iterator[None]:
             _mail_writers.held = held
             _issued_writers[held] = _writer_facts(held)
             try:
+                check_reset_access(home, _reset, component="mail")
                 yield
             finally:
                 _issued_writers.pop(held, None)
