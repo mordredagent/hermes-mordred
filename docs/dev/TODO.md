@@ -1083,3 +1083,14 @@ Later (not scheduled): see
 Linux and Windows store implementation and acceptance are tracked under
 [Hermes database encryption](#hermes-database-encryption). Native consumers exist;
 the former claim that both platforms only use `.enc` archives is stale.
+
+## Coordinated keyvault reset delivery (2026-11-05)
+
+- [ ] Publish the independent English contract/plan PR to `dev`.
+- [ ] Add bounded journal/authorization and selective keyvault cleanup.
+- [ ] Add transactional offline Mail/Telegram history erasure.
+- [ ] Integrate authenticated credential retirement and pending-reset guards.
+- [ ] Wire the wizard coordinator and explicit full-scope confirmation/help.
+- [ ] Verify failure/retry, preservation and complete affected modules; run
+  critical feedback and final regression/static checks.
+- [ ] Record isolated real-helper macOS/Linux acceptance and Windows refusal.

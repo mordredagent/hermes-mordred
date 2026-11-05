@@ -795,3 +795,116 @@ def test_cross_process_holder_still_refuses_immediately(private_home, held):
     assert busy.value.operation != "canonical_lock"
     assert elapsed < cio.IN_PROCESS_WAIT_SECONDS / 2
     assert cio.read_canonical_snapshot(paths) == EMPTY
+
+
+class RecordingLock:
+    """Observe admission arguments while retaining the real mutex behavior."""
+
+    def __init__(self, lock):
+        self.lock = lock
+        self.calls = []
+
+    def acquire(self, *args, **kwargs):
+        self.calls.append((threading.get_ident(), args, kwargs))
+        return self.lock.acquire(*args, **kwargs)
+
+    def release(self):
+        return self.lock.release()
+
+
+def test_passive_reader_refuses_in_process_holder_immediately(fs, monkeypatch):
+    _, paths = fs
+    release = threading.Event()
+    holder = _hold_in_thread(paths, release)
+    lock = RecordingLock(cio._lock)
+    monkeypatch.setattr(cio, "_lock", lock)
+    try:
+        start = time.monotonic()
+        with cio.passive_canonical_reads(), pytest.raises(PrivateFSError) as busy:
+            cio.read_canonical_snapshot(paths)
+        elapsed = time.monotonic() - start
+    finally:
+        release.set()
+        holder.join(timeout=10)
+    assert not holder.is_alive()
+    assert (busy.value.reason, busy.value.operation) == ("busy", "canonical_lock")
+    assert lock.calls == [(threading.get_ident(), (), {"blocking": False})]
+    assert elapsed < 1.0
+
+
+def test_passive_scope_nesting_and_exception_restore_admission(fs, monkeypatch):
+    _, paths = fs
+    lock = RecordingLock(cio._lock)
+    monkeypatch.setattr(cio, "_lock", lock)
+    with pytest.raises(ValueError, match="outer"), cio.passive_canonical_reads():
+        with pytest.raises(ValueError, match="inner"), cio.passive_canonical_reads():
+            assert cio.read_canonical_snapshot(paths) == EMPTY
+            raise ValueError("inner")
+        assert cio.read_canonical_snapshot(paths) == EMPTY
+        with cio.canonical_session(paths, scope="policy", blocking=True) as session:
+            assert session.read_pair() == EMPTY
+        raise ValueError("outer")
+    assert cio.read_canonical_snapshot(paths) == EMPTY
+    assert [(args, kwargs) for _, args, kwargs in lock.calls] == [
+        ((), {"blocking": False}),
+        ((), {"blocking": False}),
+        ((), {}),
+        ((), {"timeout": 2.0}),
+    ]
+
+
+def test_passive_scope_does_not_change_another_threads_bounded_admission(fs, monkeypatch):
+    _, paths = fs
+    release, entered = threading.Event(), threading.Event()
+    holder = _hold_in_thread(paths, release)
+    lock = RecordingLock(cio._lock)
+    monkeypatch.setattr(cio, "_lock", lock)
+    results = []
+
+    def reader():
+        entered.set()
+        results.append(cio.read_canonical_snapshot(paths))
+
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    timer = threading.Timer(0.3, release.set)
+    try:
+        with cio.passive_canonical_reads():
+            reader_thread.start()
+            assert entered.wait(10)
+            timer.start()
+            reader_thread.join(timeout=10)
+    finally:
+        release.set()
+        timer.cancel()
+        holder.join(timeout=10)
+        if reader_thread.ident is not None:
+            reader_thread.join(timeout=10)
+    assert not reader_thread.is_alive() and not holder.is_alive()
+    assert results == [EMPTY]
+    assert lock.calls == [(reader_thread.ident, (), {"timeout": 2.0})]
+
+
+def test_passive_scope_preserves_same_thread_nested_canonical_sessions(fs, monkeypatch):
+    backend, paths = fs
+    with cio.canonical_session(paths, scope="home"):
+        lock = RecordingLock(cio._lock)
+        monkeypatch.setattr(cio, "_lock", lock)
+        with cio.passive_canonical_reads():
+            assert cio.read_canonical_snapshot(paths) == EMPTY
+        assert lock.calls == []
+    assert backend.blocking == [True, False]
+
+
+def test_fork_reset_drops_passive_policy_even_when_inherited_scope_exits(fs, monkeypatch):
+    _, paths = fs
+    # Exercise the registered child hook without forking pytest's process.
+    # Exiting an inherited scope must not reintroduce its parent's policy.
+    with cio.passive_canonical_reads():
+        with cio.passive_canonical_reads():
+            cio._after_fork()
+            lock = RecordingLock(cio._lock)
+            monkeypatch.setattr(cio, "_lock", lock)
+            assert cio.read_canonical_snapshot(paths) == EMPTY
+        assert cio.read_canonical_snapshot(paths) == EMPTY
+    assert cio.read_canonical_snapshot(paths) == EMPTY
+    assert [(args, kwargs) for _, args, kwargs in lock.calls] == [((), {"timeout": 2.0})] * 3

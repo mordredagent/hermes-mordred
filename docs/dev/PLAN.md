@@ -2841,3 +2841,26 @@ archives and deletion dependencies. Preserve unknown state and require explicit
 recovery instead of guessing. Staged exports are verified against their source
 schema/count result and published only to an absent output. Retained backup
 registrations and native source bindings survive ordinary uninstall/reinstall.
+
+## Coordinated keyvault reset implementation (2026-11-05)
+
+Contract: [Coordinated keyvault reset](SPEC.md#coordinated-keyvault-reset-2026-11-05).
+Deliver this documentation contract as an independent PR to `dev` first, then
+keep component implementation changes in separate commits/review slices:
+
+1. Keyvault: extend strict reset recovery with explicit scope/progress, checked
+   internal reset authorization and selective file cleanup; retain independent
+   native sources and refuse changed ownership.
+2. Imports: expose bounded offline Mail/Telegram erasure using an existing
+   exclusive lease and `maintenance_scope`, secure deletion and FTS cleanup;
+   erase previous accounts, runs, references, cursor and retirement metadata.
+3. Mail/Telegram custody: block ordinary writers during reset and permit only
+   authorized authenticated local retirement, including legacy archives.
+4. Wizard: delegate reset orchestration, preserve CLI syntax and Windows gate,
+   explain confirmation scope, journal before mutation and resume completed
+   stages safely. Do not invoke CLI subprocesses or remote logout.
+5. Verify the reproduction and isolated/combined/empty/history-only setups,
+   previous accounts, preservation, cancellation and each failure/retry boundary.
+   Run complete affected modules, critical feedback, then one full regression
+   and static checks at integration. Record explicitly gated native acceptance
+   in the manual validation log; unavailable platforms remain unverified.
