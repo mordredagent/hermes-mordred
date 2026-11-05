@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from .._core._database_contracts import DatabaseRefused
+from .._core._database_contracts import BackupRecoveryRequired, DatabaseRefused
 from . import _schema
 from ._gate import ActivityRefused, Refusal, refusal
 from .contracts import COVERAGE_RANK, NormalizedEvent, canonical_digest
@@ -165,6 +165,8 @@ def _classify(exc: BaseException) -> Refusal:
 def _refusing() -> Iterator[None]:
     try:
         yield
+    except BackupRecoveryRequired:
+        raise ActivityRefused(refusal("backup_recovery_required")) from None
     except DatabaseRefused:
         raise ActivityRefused(refusal("store_unavailable")) from None
     except _db_errors() as exc:

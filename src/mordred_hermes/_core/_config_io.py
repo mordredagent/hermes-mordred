@@ -627,6 +627,11 @@ class _MordredTransaction:
             lambda: self._transaction.rename_file(name, destination, expected_identity=expected_identity), mutation=True
         )
 
+    def finish_interrupted_rename(self, name: str, destination: str) -> None:
+        self._leaf(name)
+        self._leaf(destination)
+        self._invoke(lambda: self._transaction.finish_interrupted_rename(name, destination), mutation=True)
+
 
 class PublicationReceipt:
     """Monotonic outcome reporting for a separately locked child; no IO authority."""

@@ -32,7 +32,7 @@ __all__ = [
 class Refusal:
     #: unsupported_platform | not_armed | unprotected_process | no_key | conversion_pending
     #: | unkeyed_connection | plaintext_store | profile_mismatch | schema_newer | busy
-    #: | disk_full | collection_disabled | store_unavailable | conflict
+    #: | disk_full | collection_disabled | store_unavailable | conflict | backup_recovery_required
     code: str
     #: Operator-facing and content-free: never a path fragment, URL, target or event text.
     detail: str
@@ -51,6 +51,10 @@ class ActivityRefused(Exception):
 _DETAILS = {
     "unsupported_platform": "activity storage requires qualified native database encryption",
     "conversion_pending": "a database encryption conversion is pending or interrupted",
+    "backup_recovery_required": (
+        "a database backup is running or was interrupted; if none is running, stop Hermes and run "
+        "`hermes-mordred databases backup recover`"
+    ),
     "not_armed": "database encryption is not enabled for this Hermes home",
     "unprotected_process": "this process did not load the SQLCipher database layer",
     "no_key": "the database key is not available",

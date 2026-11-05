@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import errno
+import json
+import os
+import shutil
+
 import pytest
 
 from mordred_hermes._core._database_contracts import DatabaseRefused
@@ -610,3 +615,772 @@ def test_uncertain_namespace_barrier_keeps_backup_intent_and_key_dependency(nati
             assert_mutation_safe(root, snapshot.generation, lease)
         _backup.recover_backups(root, lease=lease)
     assert not (root / "mordred/db-backups.journal.json").exists()
+
+
+def _crashed_backup(native_root, monkeypatch, phase, destination=None):
+    """Leave a durable journal at a real transition, as a crash would."""
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, _, key, _ = native_root
+    source = root / "state.db"
+    if not source.exists():
+        cipher(source, key)
+    destination = destination or root.parent / (root.name + "-backup.db")
+
+    def crash(point):
+        if point == phase:
+            raise RuntimeError("crash")
+
+    monkeypatch.setattr(_backup, "_transition", crash)
+    authority = Authority.acquire(root)
+    try:
+        with pytest.raises(RuntimeError, match="crash"):
+            _backup.backup_database(source, destination, authority=authority)
+    finally:
+        authority.close()
+    monkeypatch.setattr(_backup, "_transition", lambda phase: None)
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    return destination
+
+
+def _enospc(*_args, **_kwargs):
+    raise OSError(errno.ENOSPC, "no space")
+
+
+def test_backup_journal_refusal_names_recover_command(native_root, monkeypatch):
+    from mordred_hermes._core._database_contracts import BackupRecoveryRequired
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, _, _ = native_root
+    destination = _crashed_backup(native_root, monkeypatch, "published")
+    other = root.parent / (root.name + "-other.backup")
+    authority = Authority.acquire(root)
+    try:
+        with pytest.raises(BackupRecoveryRequired, match="databases backup recover"):
+            _backup.backup_database(root / "state.db", other, authority=authority)
+    finally:
+        authority.close()
+    with acquire_exclusive(root) as lease, pytest.raises(BackupRecoveryRequired, match="running or was interrupted"):
+        _backup.export_database(root, destination, root.parent / (root.name + "-plain.db"), lease=lease)
+
+
+def test_conversion_markers_keep_the_generic_refusal(native_root):
+    from mordred_hermes._core._database_contracts import BackupRecoveryRequired
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, _, _ = native_root
+    (root / "mordred/db-encryption.pending").write_bytes(b"")
+    (root / "mordred/db-backups.journal.json").write_bytes(b"{}")
+    with pytest.raises(DatabaseRefused, match="database maintenance requires recovery before backup") as refused:
+        _backup._no_pending(root)
+    assert not isinstance(refused.value, BackupRecoveryRequired)
+
+
+def test_recover_without_journal_is_noop_before_authentication(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, backend, _, _ = native_root
+    backend.calls.clear()
+    monkeypatch.setattr(_migrate, "_authenticate", lambda *a, **k: pytest.fail("authenticated"))
+    with acquire_exclusive(root) as lease:
+        result = _backup.recover_backups(root, lease=lease)
+        assert result.outcome == "none" and result.path is None
+        assert _backup.abandon_backup_journal(root, lease=lease, commit=True) is None
+    assert backend.calls == []
+
+
+def test_copy_failure_cleans_staging_and_journal_and_next_backup_succeeds(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    destination = root.parent / (root.name + "-clean.backup")
+    authority = Authority.acquire(root)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_backup, "_copy", _enospc)
+            with pytest.raises(OSError, match="no space"):
+                _backup.backup_database(root / "state.db", destination, authority=authority)
+        assert not (root / "mordred/db-backups.journal.json").exists()
+        assert not list(destination.parent.glob(destination.name + ".mordred-backup-*"))
+        assert not destination.exists()
+        assert not (root / "mordred/db-backups.json").exists()
+        _backup.backup_database(root / "state.db", destination, authority=authority)
+    finally:
+        authority.close()
+    assert any(e.path == destination and e.kind == "backup" for e in scan_dependencies(root).entries)
+
+
+@pytest.mark.parametrize("phase", ["verified", "published"])
+def test_abandon_preview_and_commit_remove_only_the_journal(native_root, monkeypatch, phase):
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, _, _ = native_root
+    destination = _crashed_backup(native_root, monkeypatch, phase)
+    journal = root / "mordred/db-backups.journal.json"
+    data = json.loads(journal.read_bytes())
+    staging = _backup.Path(data["prepared"])
+    kept = destination if phase == "published" else staging
+    before = kept.read_bytes()
+    with acquire_exclusive(root) as lease:
+        preview = _backup.abandon_backup_journal(root, lease=lease, commit=False)
+        assert preview is not None and preview.removed is False
+        assert journal.exists()
+        assert (preview.destination, preview.staging) == (destination, staging)
+        assert preview.phase == "verified"  # the journal phase stays verified once published
+        assert preview.destination_state == ("present" if phase == "published" else "absent")
+        assert preview.staging_state == ("absent" if phase == "published" else "present")
+        done = _backup.abandon_backup_journal(root, lease=lease, commit=True, accept_unmanaged_copy=True)
+    assert done is not None and done.removed is True
+    assert not journal.exists()
+    assert kept.read_bytes() == before
+    assert not (root / "mordred/db-backups.json").exists()
+
+
+def test_recover_reports_published_and_deleted_outcomes(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, _, _ = native_root
+    destination = _crashed_backup(native_root, monkeypatch, "published")
+    with acquire_exclusive(root) as lease:
+        result = _backup.recover_backups(root, lease=lease)
+    assert (result.outcome, result.path) == ("published", destination)
+
+    def crash(point):
+        if point == "deleted":
+            raise RuntimeError("crash")
+
+    monkeypatch.setattr(_backup, "_transition", crash)
+    authority = Authority.acquire(root)
+    try:
+        with pytest.raises(RuntimeError, match="crash"):
+            _backup.delete_backup(destination, authority=authority)
+    finally:
+        authority.close()
+    monkeypatch.setattr(_backup, "_transition", lambda point: None)
+    with acquire_exclusive(root) as lease:
+        result = _backup.recover_backups(root, lease=lease)
+    assert (result.outcome, result.path) == ("deleted", destination)
+
+
+def _backup_failing_during_copy(native_root, during_copy):
+    """Fail an ordinary copy after `during_copy(staged, journal)` disturbed the operation's state."""
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    parent = root.parent / (root.name + "-destinations")
+    parent.mkdir(mode=0o700)
+    journal = root / "mordred/db-backups.journal.json"
+    seen = {}
+
+    def failing_copy(_source, staged, _authority):
+        seen["staged"] = staged
+        during_copy(staged, journal)
+        _enospc()
+
+    authority = Authority.acquire(root)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_backup, "_copy", failing_copy)
+            with pytest.raises(OSError, match="no space"):
+                _backup.backup_database(root / "state.db", parent / "one.backup", authority=authority)
+    finally:
+        authority.close()
+    return journal, seen["staged"]
+
+
+def test_cleanup_never_deletes_a_swapped_staging_file(native_root):
+    def swap(staged, _journal):
+        other = staged.with_name("unrelated")
+        other.write_bytes(b"unrelated user data")
+        other.chmod(0o600)
+        os.replace(other, staged)  # same name, different inode
+
+    journal, staged = _backup_failing_during_copy(native_root, swap)
+    assert staged.read_bytes() == b"unrelated user data"
+    assert journal.exists()
+
+
+def test_cleanup_never_follows_a_staging_symlink_to_the_source(native_root):
+    source = native_root[0] / "state.db"
+    before = {}
+
+    def swap(staged, _journal):
+        before["source"] = source.read_bytes()
+        staged.unlink()
+        staged.symlink_to(source)
+
+    journal, staged = _backup_failing_during_copy(native_root, swap)
+    assert staged.is_symlink() and source.read_bytes() == before["source"]
+    assert journal.exists()
+
+
+def test_cleanup_retains_everything_when_the_journal_is_not_ours(native_root):
+    edited = {}
+
+    def edit(_staged, journal):
+        data = json.loads(journal.read_bytes())
+        data["transaction"] = "0" * 32
+        journal.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n")
+        edited["bytes"] = journal.read_bytes()
+
+    journal, staged = _backup_failing_during_copy(native_root, edit)
+    assert journal.read_bytes() == edited["bytes"]
+    assert staged.exists()
+
+
+def test_cleanup_leaves_a_replaced_destination_directory_alone(native_root):
+    moved = {}
+
+    def replace_parent(staged, _journal):
+        parent = staged.parent
+        moved["parent"] = parent.with_name(parent.name + "-moved")
+        os.rename(parent, moved["parent"])
+        parent.mkdir(mode=0o700)
+        (parent / staged.name).write_bytes(b"decoy")
+        (parent / staged.name).chmod(0o600)
+
+    journal, staged = _backup_failing_during_copy(native_root, replace_parent)
+    assert staged.read_bytes() == b"decoy"
+    assert (moved["parent"] / staged.name).exists()
+    assert journal.exists()
+
+
+def test_journal_under_a_non_directory_is_absent(tmp_path):
+    from mordred_hermes.dbcrypt import _backup
+
+    (tmp_path / "mordred").write_bytes(b"not a directory")
+    assert not _backup._journal_present(tmp_path)
+
+
+def test_cleanup_failure_retains_journal_and_original_error(native_root, monkeypatch, caplog):
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    destination = root.parent / (root.name + "-retained.backup")
+
+    def refuse(_path):
+        raise RuntimeError("cleanup refused")
+
+    authority = Authority.acquire(root)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_backup, "_copy", _enospc)
+            patch.setattr(_migrate, "_cleanup_sidecars", refuse)
+            with caplog.at_level("WARNING", logger="mordred.dbcrypt"), pytest.raises(OSError, match="no space"):
+                _backup.backup_database(root / "state.db", destination, authority=authority)
+    finally:
+        authority.close()
+    assert "databases backup recover" in caplog.text
+    assert "cleanup refused" not in caplog.text and str(destination.parent) not in caplog.text
+    assert (root / "mordred/db-backups.journal.json").exists()
+    assert len(list(destination.parent.glob(destination.name + ".mordred-backup-*"))) == 1
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    with acquire_exclusive(root) as lease:
+        assert _backup.recover_backups(root, lease=lease).outcome == "published"
+    assert destination.exists()
+
+
+def test_cleanup_skips_when_authority_is_invalid(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    destination = root.parent / (root.name + "-revoked.backup")
+    authority = Authority.acquire(root)
+
+    def revoked(*_args, **_kwargs):
+        authority.invalidate("test")
+        raise OSError(errno.ENOSPC, "no space")
+
+    try:
+        monkeypatch.setattr(_backup, "_copy", revoked)
+        with pytest.raises((OSError, DatabaseRefused)):
+            _backup.backup_database(root / "state.db", destination, authority=authority)
+    finally:
+        authority.close()
+    assert (root / "mordred/db-backups.journal.json").exists()
+    assert len(list(destination.parent.glob(destination.name + ".mordred-backup-*"))) == 1
+
+
+def test_keyboard_interrupt_during_copy_retains_journal(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    destination = root.parent / (root.name + "-interrupted.backup")
+
+    def interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    authority = Authority.acquire(root)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_backup, "_copy", interrupted)
+            with pytest.raises(KeyboardInterrupt):
+                _backup.backup_database(root / "state.db", destination, authority=authority)
+    finally:
+        authority.close()
+    assert (root / "mordred/db-backups.journal.json").exists()
+    assert len(list(destination.parent.glob(destination.name + ".mordred-backup-*"))) == 1
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    with acquire_exclusive(root) as lease:
+        assert _backup.recover_backups(root, lease=lease).outcome == "published"
+
+
+def test_uncertain_staging_flush_retains_journal(native_root, monkeypatch):
+    from contextlib import contextmanager
+
+    from mordred_hermes._private_fs import PrivateFSError
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    destination = root.parent / (root.name + "-flush.backup")
+    opened = _backup.open_private_directory
+
+    class Transaction:
+        def __init__(self, tx):
+            self.tx = tx
+
+        def __getattr__(self, name):
+            return getattr(self.tx, name)
+
+        def flush_file(self, *_args, **_kwargs):
+            raise PrivateFSError("io", "directory_flush", commit_state="uncertain")
+
+    class Directory:
+        def __init__(self, directory):
+            self.directory = directory
+
+        def __getattr__(self, name):
+            return getattr(self.directory, name)
+
+        @contextmanager
+        def transaction(self, **kwargs):
+            with self.directory.transaction(**kwargs) as tx:
+                yield Transaction(tx)
+
+    @contextmanager
+    def uncertain(path, **kwargs):
+        with opened(path, **kwargs) as directory:
+            yield Directory(directory) if path == destination.parent else directory
+
+    authority = Authority.acquire(root)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_backup, "open_private_directory", uncertain)
+            with pytest.raises(PrivateFSError) as failure:
+                _backup.backup_database(root / "state.db", destination, authority=authority)
+        assert failure.value.commit_state == "uncertain"
+    finally:
+        authority.close()
+    assert (root / "mordred/db-backups.journal.json").exists()
+    assert len(list(destination.parent.glob(destination.name + ".mordred-backup-*"))) == 1
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    with acquire_exclusive(root) as lease:
+        assert _backup.recover_backups(root, lease=lease).outcome == "published"
+
+
+def test_cleanup_crash_between_staging_and_journal_needs_abandon(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    destination = root.parent / (root.name + "-window.backup")
+    journal = root / "mordred/db-backups.journal.json"
+
+    def lost(_root, _name):
+        raise RuntimeError("crash window")
+
+    authority = Authority.acquire(root)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_backup, "_copy", _enospc)
+            patch.setattr(_migrate, "_remove_record", lost)
+            with pytest.raises(OSError, match="no space"):
+                _backup.backup_database(root / "state.db", destination, authority=authority)
+    finally:
+        authority.close()
+    assert journal.exists()
+    assert not list(destination.parent.glob(destination.name + ".mordred-backup-*"))
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    with acquire_exclusive(root) as lease:
+        with pytest.raises(DatabaseRefused, match="ownership is uncertain"):
+            _backup.recover_backups(root, lease=lease)
+        preview = _backup.abandon_backup_journal(root, lease=lease, commit=False)
+        assert preview is not None and preview.staging_state == "absent" and journal.exists()
+        assert _backup.abandon_backup_journal(root, lease=lease, commit=True) is not None
+    assert not journal.exists()
+    authority = Authority.acquire(root)
+    try:
+        _backup.backup_database(root / "state.db", destination, authority=authority)
+    finally:
+        authority.close()
+
+
+def test_abandon_refuses_delete_journal_and_recover_clears_it(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    destination = root.parent / (root.name + "-deleting.backup")
+    journal = root / "mordred/db-backups.journal.json"
+    authority = Authority.acquire(root)
+    try:
+        _backup.backup_database(root / "state.db", destination, authority=authority)
+
+        def crash(point):
+            if point == "deleted":
+                raise RuntimeError("crash")
+
+        monkeypatch.setattr(_backup, "_transition", crash)
+        with pytest.raises(RuntimeError, match="crash"):
+            _backup.delete_backup(destination, authority=authority)
+    finally:
+        authority.close()
+    monkeypatch.setattr(_backup, "_transition", lambda point: None)
+    before = journal.read_bytes()
+    with acquire_exclusive(root) as lease:
+        with pytest.raises(DatabaseRefused, match="deletion in progress"):
+            _backup.abandon_backup_journal(root, lease=lease, commit=True)
+        assert journal.read_bytes() == before
+        assert _backup.recover_backups(root, lease=lease).outcome == "deleted"
+    assert not journal.exists()
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "generation", "paths"])
+def test_abandon_and_recover_refuse_corrupt_or_foreign_journal(native_root, monkeypatch, damage):
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, _, _ = native_root
+    _crashed_backup(native_root, monkeypatch, "published")
+    journal = root / "mordred/db-backups.journal.json"
+    data = json.loads(journal.read_bytes())
+    if damage == "corrupt":
+        journal.write_bytes(b"{not json")
+    else:
+        if damage == "generation":
+            data["snapshot"]["generation"] = "0" * 32
+        else:
+            other = root.parent / (root.name + "-other-parent")
+            other.mkdir(mode=0o700)
+            data["prepared"] = str(other / _backup.Path(data["prepared"]).name)
+        journal.write_text(json.dumps(data))
+    before = journal.read_bytes()
+    with acquire_exclusive(root) as lease:
+        with pytest.raises(DatabaseRefused):
+            _backup.recover_backups(root, lease=lease)
+        for commit in (False, True):
+            with pytest.raises(DatabaseRefused):
+                _backup.abandon_backup_journal(root, lease=lease, commit=commit)
+    assert journal.read_bytes() == before
+
+
+def test_abandon_survives_removed_destination_directory(native_root, monkeypatch):
+    from mordred_hermes._private_fs import PrivateFSError
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, _, _ = native_root
+    gone = root.parent / (root.name + "-gone")
+    gone.mkdir(mode=0o700)
+    _crashed_backup(native_root, monkeypatch, "verified", destination=gone / "x.backup")
+    shutil.rmtree(gone)
+    journal = root / "mordred/db-backups.journal.json"
+    with acquire_exclusive(root) as lease:
+        with pytest.raises(PrivateFSError):
+            _backup.recover_backups(root, lease=lease)
+        preview = _backup.abandon_backup_journal(root, lease=lease, commit=False)
+        assert preview is not None
+        assert (preview.destination_state, preview.staging_state) == ("absent", "absent")
+        assert journal.exists()
+        assert _backup.abandon_backup_journal(root, lease=lease, commit=True) is not None
+    assert not journal.exists()
+    elsewhere = root.parent / (root.name + "-elsewhere.backup")
+    authority = Authority.acquire(root)
+    try:
+        _backup.backup_database(root / "state.db", elsewhere, authority=authority)
+    finally:
+        authority.close()
+    assert elsewhere.exists()
+
+
+def test_abandon_reports_embedded_nul_paths_as_unknown(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, _, _ = native_root
+    _crashed_backup(native_root, monkeypatch, "verified")
+    journal = root / "mordred/db-backups.journal.json"
+    data = json.loads(journal.read_bytes())
+    parent = root.parent
+    data["destination"] = str(parent / "x\x00y.backup")
+    data["prepared"] = str(parent / "x\x00y.backup.mordred-backup-ab")
+    journal.write_text(json.dumps(data))
+    with acquire_exclusive(root) as lease:
+        preview = _backup.abandon_backup_journal(root, lease=lease, commit=False)
+    assert preview is not None
+    assert (preview.destination_state, preview.staging_state) == ("unknown", "unknown")
+
+
+def _publish_interrupted_after_link(native_root, monkeypatch, destination):
+    """Really fail rename_file between its link and unlink, as a crash there would."""
+    import os
+
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    real_unlink = os.unlink
+
+    def interrupted(path, *args, **kwargs):
+        if ".mordred-backup-" in str(path):
+            raise OSError(errno.EIO, "crash window")
+        return real_unlink(path, *args, **kwargs)
+
+    authority = Authority.acquire(root)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "unlink", interrupted)
+            with pytest.raises(OSError):  # the transaction reports it as an uncertain commit
+                _backup.backup_database(root / "state.db", destination, authority=authority)
+    finally:
+        authority.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX rename is link then unlink")
+def test_recover_finishes_a_rename_interrupted_between_link_and_unlink(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, _, _, _ = native_root
+    destination = root.parent / (root.name + "-linked.backup")
+    _publish_interrupted_after_link(native_root, monkeypatch, destination)
+    journal = root / "mordred/db-backups.journal.json"
+    staged = _backup.Path(json.loads(journal.read_bytes())["prepared"])
+    assert destination.stat().st_ino == staged.stat().st_ino and destination.stat().st_nlink == 2
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    with acquire_exclusive(root) as lease:
+        result = _backup.recover_backups(root, lease=lease)
+    assert result.outcome == "published" and result.path == destination
+    assert not staged.exists() and destination.stat().st_nlink == 1 and not journal.exists()
+    assert any(e.path == destination and e.kind == "backup" for e in scan_dependencies(root).entries)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX rename is link then unlink")
+def test_recover_never_unlinks_a_two_name_inode_the_journal_does_not_record(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, _, _, _ = native_root
+    destination = root.parent / (root.name + "-unrecorded.backup")
+    _publish_interrupted_after_link(native_root, monkeypatch, destination)
+    journal = root / "mordred/db-backups.journal.json"
+    data = json.loads(journal.read_bytes())
+    staged = _backup.Path(data["prepared"])
+    data["identity"][1] += 1
+    journal.write_text(json.dumps(data))
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    with acquire_exclusive(root) as lease, pytest.raises(DatabaseRefused, match="proof failed"):
+        _backup.recover_backups(root, lease=lease)
+    assert staged.exists() and destination.exists() and journal.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX rename is link then unlink")
+@pytest.mark.parametrize("state", ["distinct", "third_link", "missing_destination"])
+def test_finish_interrupted_rename_refuses_anything_but_one_two_link_inode(tmp_path, state):
+    import os
+
+    from mordred_hermes._private_fs import PrivateFSError, open_private_directory
+
+    tmp_path.chmod(0o700)
+    source = tmp_path / "source"
+    with open_private_directory(tmp_path) as directory, directory.transaction() as tx:
+        tx.create_bytes("source", b"data")
+        if state == "distinct":
+            tx.create_bytes("target", b"other")
+    if state != "distinct" and state != "missing_destination":
+        os.link(source, tmp_path / "target")
+    if state == "third_link":
+        os.link(source, tmp_path / "third")
+    with (
+        open_private_directory(tmp_path) as directory,
+        directory.transaction() as tx,
+        pytest.raises(PrivateFSError),
+    ):
+        tx.finish_interrupted_rename("source", "target")
+    assert source.read_bytes() == b"data"
+
+
+def test_abandon_commit_keeps_the_journal_when_a_copy_may_remain(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, _, _ = native_root
+    destination = _crashed_backup(native_root, monkeypatch, "published")
+    journal = root / "mordred/db-backups.journal.json"
+    before = journal.read_bytes()
+    with acquire_exclusive(root) as lease:
+        refused = _backup.abandon_backup_journal(root, lease=lease, commit=True)
+        assert refused is not None and refused.removed is False and refused.copy_may_remain
+        assert journal.read_bytes() == before
+        accepted = _backup.abandon_backup_journal(root, lease=lease, commit=True, accept_unmanaged_copy=True)
+    assert accepted is not None and accepted.removed is True
+    assert not journal.exists() and destination.exists()
+
+
+def test_abandon_commit_keeps_the_journal_when_a_path_is_unknown(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, _, _ = native_root
+    _crashed_backup(native_root, monkeypatch, "verified")
+    journal = root / "mordred/db-backups.journal.json"
+    monkeypatch.setattr(_backup, "_lexical_state", lambda path: "unknown")
+    with acquire_exclusive(root) as lease:
+        plan = _backup.abandon_backup_journal(root, lease=lease, commit=True)
+    assert plan is not None and plan.removed is False and journal.exists()
+
+
+def test_abandon_after_registration_needs_no_acceptance_and_keeps_the_entry(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, _, _ = native_root
+    destination = _crashed_backup(native_root, monkeypatch, "registered")
+    journal = root / "mordred/db-backups.journal.json"
+    with acquire_exclusive(root) as lease:
+        plan = _backup.abandon_backup_journal(root, lease=lease, commit=True)
+    assert plan is not None and plan.registered and not plan.copy_may_remain and plan.removed
+    assert not journal.exists()
+    assert any(e.path == destination and e.kind == "backup" for e in scan_dependencies(root).entries)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        {"drop": "destination"},
+        {"drop": "prepared"},
+        {"drop": "identity"},
+        {"drop": "verification"},
+        {"drop": "source"},
+        {"drop": "source_identity"},
+        {"set": ("destination", 7)},
+        {"set": ("identity", "x")},
+        {"set": ("verification", None)},
+    ],
+)
+def test_recover_refuses_malformed_journal_fields(native_root, monkeypatch, damage):
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, _, _ = native_root
+    _crashed_backup(native_root, monkeypatch, "verified")
+    journal = root / "mordred/db-backups.journal.json"
+    data = json.loads(journal.read_bytes())
+    if "drop" in damage:
+        del data[damage["drop"]]
+    else:
+        data[damage["set"][0]] = damage["set"][1]
+    journal.write_text(json.dumps(data))
+    before = journal.read_bytes()
+    with acquire_exclusive(root) as lease, pytest.raises(DatabaseRefused, match="malformed"):
+        _backup.recover_backups(root, lease=lease)
+    assert journal.read_bytes() == before
+
+
+def test_backup_refuses_a_path_registered_to_a_removed_file_before_publishing(native_root):
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    destination = root.parent / (root.name + "-stale.backup")
+    authority = Authority.acquire(root)
+    try:
+        _backup.backup_database(root / "state.db", destination, authority=authority)
+        destination.unlink()
+        with pytest.raises(DatabaseRefused, match="already registered"):
+            _backup.backup_database(root / "state.db", destination, authority=authority)
+    finally:
+        authority.close()
+    assert not destination.exists()
+    assert not (root / "mordred/db-backups.journal.json").exists()
+    assert not list(destination.parent.glob(destination.name + ".mordred-backup-*"))
+
+
+def test_recover_refuses_a_stale_registration_before_publishing(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, _, _, _ = native_root
+    destination = _crashed_backup(native_root, monkeypatch, "verified")
+    journal = root / "mordred/db-backups.journal.json"
+    data = json.loads(journal.read_bytes())
+    entry = {"path": str(destination), "identity": [0, 0, 0, 0], "format": _backup._FORMAT, "verification": {}}
+    with _backup._registry(root):
+        _migrate._put_json(root, _backup._INVENTORY, {"version": 1, "snapshot": data["snapshot"], "entries": [entry]})
+    with acquire_exclusive(root) as lease, pytest.raises(DatabaseRefused, match="already registered"):
+        _backup.recover_backups(root, lease=lease)
+    assert not destination.exists() and _backup.Path(data["prepared"]).exists() and journal.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="patches the POSIX private-directory transaction")
+def test_failure_creating_staging_releases_the_journal(native_root):
+    from mordred_hermes._private_fs import _posix
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    destination = root.parent / (root.name + "-nospace.backup")
+    real_create = _posix._Transaction.create_bytes
+
+    def create(self, name, data):
+        if ".mordred-backup-" in name:
+            _enospc()
+        return real_create(self, name, data)
+
+    authority = Authority.acquire(root)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_posix._Transaction, "create_bytes", create)
+            with pytest.raises(OSError):  # the transaction wraps the failure as not committed
+                _backup.backup_database(root / "state.db", destination, authority=authority)
+        assert not (root / "mordred/db-backups.journal.json").exists()
+        _backup.backup_database(root / "state.db", destination, authority=authority)
+    finally:
+        authority.close()
+
+
+def test_unrecorded_staging_keeps_the_journal(native_root, caplog):
+    from mordred_hermes.dbcrypt import _backup
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    destination = root.parent / (root.name + "-unrecorded-staging.backup")
+
+    def lost(*_args):
+        raise RuntimeError("journal update failed")
+
+    authority = Authority.acquire(root)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_backup, "_update_pending", lost)
+            with (
+                caplog.at_level("WARNING", logger="mordred.dbcrypt"),
+                pytest.raises(RuntimeError, match="update failed"),
+            ):
+                _backup.backup_database(root / "state.db", destination, authority=authority)
+    finally:
+        authority.close()
+    assert (root / "mordred/db-backups.journal.json").exists()
+    assert list(destination.parent.glob(destination.name + ".mordred-backup-*"))
+    assert "backup cleanup stopped" in caplog.text
+
+
+def test_cleanup_removes_the_staging_sidecars(native_root):
+    sidecars = []
+
+    def plant(staged, _journal):
+        for suffix in ("-journal", "-wal", "-shm"):
+            sidecar = staged.with_name(staged.name + suffix)
+            sidecar.write_bytes(b"")
+            sidecar.chmod(0o600)
+            sidecars.append(sidecar)
+
+    _backup_failing_during_copy(native_root, plant)
+    assert sidecars and not any(path.exists() for path in sidecars)
+    assert not (native_root[0] / "mordred/db-backups.journal.json").exists()

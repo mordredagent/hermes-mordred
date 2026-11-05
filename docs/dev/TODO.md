@@ -312,8 +312,11 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   and later operations refuse them as unknown sidecars (`src/mordred_hermes/dbcrypt/_migrate.py`).
 - [ ] Monitor: `monitor_runtime` invalidates authority over non-database files such as `state.db.malformed-backup-*`;
   the inventory and policy name classifiers disagree (`src/mordred_hermes/dbcrypt/_monitor.py`, `src/mordred_hermes/_core/_database_inventory.py`, `src/mordred_hermes/dbcrypt/_policy.py`).
-- [ ] Backup journal: a failed backup journal is never cleared in production, because
-  `recover_backups`/`delete_backup` have no non-test caller (`src/mordred_hermes/dbcrypt/_backup.py`).
+- [x] Backup journal: `databases backup recover [--abandon]` clears a failed backup journal, and
+  ordinary copy failures clean up automatically (`src/mordred_hermes/dbcrypt/_backup.py`).
+- [ ] `delete_backup` still has no non-test caller; add `databases backup delete`. Delete journals
+  then become reachable and abandon keeps refusing them. A registered backup whose file was removed
+  by hand makes the inventory incomplete and needs an explicit way to unregister it.
 - [x] Uninstall: move known refusals before restoration and separate verified
   package-removal authority from key deletion. Cover every profile, retain
   recoverable backups, and export them after reinstalling. See
@@ -324,7 +327,8 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   ordinary UID 1000. Windows and the final macOS recheck include the two native
   fixes discovered after the Linux run. Exact builds are recorded in CI. Keep
   unresolved keyvault-reset ownership and backup-journal recovery outside this
-  change; these states refuse before restoration. See
+  change; these states refuse before restoration (backup-journal recovery landed
+  later as `databases backup recover`). See
   [the validation log](VALIDATION_LOG.md#manual-live-device-validation-log).
 - [ ] Authority checks: `Authority.check()` runs on every authorizer/progress callback and takes
   Windows custody locks; validate at admission and before commit only (`src/mordred_hermes/dbcrypt/_connection.py`).

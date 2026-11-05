@@ -229,6 +229,7 @@ def test_without_exclusions_events_without_a_page_host_keep_their_page_content(t
         ("disk_full", "store_full"),
         ("not_armed", "store_unavailable"),
         ("no_key", "store_unavailable"),
+        ("backup_recovery_required", "store_unavailable"),
     ],
 )
 def test_store_refusals_map_to_wire_reasons(tmp_path: Path, code: str, reason: str) -> None:

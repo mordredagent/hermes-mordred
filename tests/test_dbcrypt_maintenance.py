@@ -321,3 +321,28 @@ def test_registered_identity_survives_registry_to_sql_handoff(native_root, monke
         scope.connection(backup, readonly=True),
     ):
         pytest.fail("a replacement inode was admitted using the original inode's registration")
+
+
+def test_backup_journal_refusal_is_not_masked_by_scope(native_root):
+    from mordred_hermes._core._database_contracts import BackupRecoveryRequired
+    from mordred_hermes.dbcrypt._maintenance import maintenance_scope
+
+    root, _, _, _ = native_root
+    path = seed(root)
+    journal = root / "mordred/db-backups.journal.json"
+    with acquire_exclusive(root) as lease:
+        # The scope's own exit check refuses too: the refusal stays terminal.
+        with (
+            pytest.raises(DatabaseRefused, match="owner is closed or changed"),
+            maintenance_scope(root, lease=lease) as scope,
+        ):
+            journal.write_bytes(b"{}")  # only lstat'ed by the admission check
+            with pytest.raises(BackupRecoveryRequired, match="databases backup recover"), scope.connection(path):
+                pytest.fail("connection admitted")
+            with pytest.raises(DatabaseRefused, match="owner is closed or changed"), scope.connection(path):
+                pytest.fail("terminal scope admitted")
+        with (
+            pytest.raises(BackupRecoveryRequired, match="databases backup recover"),
+            maintenance_scope(root, lease=lease),
+        ):
+            pytest.fail("scope admitted")

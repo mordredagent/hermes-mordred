@@ -36,6 +36,10 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/db-encryption.pending` | Hermes Desktop **Encrypt databases** | converts the databases at the next Hermes start |
 | `<home>/mordred/db-decryption.pending` | none today; retained from an earlier release | turns the databases back into plain SQLite at the next Hermes start |
 | `<home>/mordred/db-encryption.journal.json` | database conversion | swaps still to do after an interrupted conversion |
+| `<root>/mordred/db-backups.json` | registered backup publication | inventory of registered encrypted backups; each entry keeps its native key generation in use |
+| `<root>/mordred/db-backups.journal.json` | registered backup publication/deletion | interrupted step to finish (`databases backup recover`) or forget (`--abandon --yes`, plus `--accept-unmanaged-copy` when a copy may remain) |
+| `<root>/mordred/backup-registry/` | registered backup operations | metadata lock for the inventory and journal |
+| `<destination>.mordred-backup-<hex>` | registered backup publication | staging copy beside the destination; encrypted and unmanaged once its journal is abandoned |
 | `<home>/mordred/db-encryption.lock` | database runtime / maintenance | shared runtime leases until exit; exclusive conversion and protected-home uninstall; stable inode retained after purge |
 | `<db>.mordred-enc` | database conversion | the verified converted copy (encrypted, or plain when decrypting), renamed over `<db>` |
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |

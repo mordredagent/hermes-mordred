@@ -174,6 +174,19 @@ def _add_databases(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     export.add_argument("--output", required=True, help="New plaintext database path; never overwritten")
     export.add_argument("--member", help="Exact database member name inside a ZIP backup")
     export.set_defaults(func=_handle_databases)
+    recover = bsub.add_parser("recover", help="Finish or abandon an interrupted backup operation; stop Hermes first")
+    recover.add_argument(
+        "--abandon",
+        action="store_true",
+        help="Forget the interrupted publication instead of finishing it; no file is deleted (preview unless --yes)",
+    )
+    recover.add_argument("--yes", action="store_true", help="With --abandon: remove the journal")
+    recover.add_argument(
+        "--accept-unmanaged-copy",
+        action="store_true",
+        help="With --abandon --yes: proceed although a copy that key teardown will not detect may remain",
+    )
+    recover.set_defaults(func=_handle_databases)
 
 
 def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
