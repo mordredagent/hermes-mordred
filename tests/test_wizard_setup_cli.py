@@ -726,6 +726,44 @@ class TestNetworkStep:
         complete, _ = setup_cli._probe_network(config_path=tmp_path / "config.yaml")
         assert complete is False
 
+    @pytest.mark.parametrize(
+        "data",
+        [
+            b"plugins: [\n  TOP-SECRET-SENTINEL: {",
+            b"- TOP-SECRET-SENTINEL\n",
+            b"plugins: [TOP-SECRET-SENTINEL]\n",
+            b"plugins:\n  mordred_network: TOP-SECRET-SENTINEL\n",
+            b"a: !!bool TOP-SECRET-SENTINEL\n",
+        ],
+        ids=["malformed-yaml", "non-mapping-root", "non-mapping-plugins", "non-mapping-section", "keyerror"],
+    )
+    def test_unreadable_config_blocks_before_prompting(self, tmp_path: Path, data: bytes) -> None:
+        class NoPrompts:
+            def __getattr__(self, name: str) -> Any:
+                pytest.fail(f"an unreadable config must block before prompting ({name})")
+
+        pw = _policy_writer(tmp_path)
+        seed_private_file(pw.config_path, data)
+
+        result = setup_cli._resolve_step_network(home=tmp_path, prompt_io=NoPrompts(), policy_writer=pw)
+
+        assert result.action == "blocked"
+        assert "could not be safely read" in result.detail
+        assert "TOP-SECRET-SENTINEL" not in result.detail
+        assert "not configured" not in result.detail
+        assert pw.config_path.read_bytes() == data
+
+    @pytest.mark.parametrize(
+        "data",
+        [b"plugins:\n", b"plugins:\n  mordred_network:\n"],
+        ids=["blank-plugins", "blank-section"],
+    )
+    def test_blank_keys_are_unconfigured_not_blocked(self, tmp_path: Path, data: bytes) -> None:
+        pw = _policy_writer(tmp_path)
+        seed_private_file(pw.config_path, data)
+        result = setup_cli._resolve_step_network(home=tmp_path, prompt_io=_RefusingPromptIO(), policy_writer=pw)
+        assert result.action == "manual"
+
     def test_non_interactive_incomplete_is_manual_and_continues(self, tmp_path: Path) -> None:
         pw = _policy_writer(tmp_path)
         result = setup_cli._resolve_step_network(home=tmp_path, prompt_io=_RefusingPromptIO(), policy_writer=pw)

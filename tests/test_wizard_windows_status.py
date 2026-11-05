@@ -8,10 +8,12 @@ excluded artifacts, copied profiles and held locks print a classified reason.
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -20,9 +22,11 @@ from mordred_hermes._core import _config_io as cio
 from mordred_hermes._core import _yaml_io
 from mordred_hermes.keyvault import _seckey_helper, wrap
 from mordred_hermes.network import _windows_policy, settings
-from mordred_hermes.wizard import encryption_cli, keyvault_windows_cli, memory_cli, setup_cli, status_cli
+from mordred_hermes.privacy_check import _runtime
+from mordred_hermes.wizard import encryption_cli, keyvault_windows_cli, memory_cli, network_cli, setup_cli, status_cli
 from mordred_hermes.wizard._encryption_status import status_mark
 from mordred_hermes.wizard._workspace_paths import WorkspacePaths
+from mordred_hermes.wizard.policy_writer import PolicyWriter
 from tests.test_config_io import RecordingLock
 from tests.test_windows_custody import fs as fs
 from tests.test_windows_memory_lifecycle import ORIGINALS, put
@@ -42,8 +46,9 @@ ORDER = (
     "per-use presence",
     "secret store",
 )
-# The autouse fixture below pins this; the held-lock network test needs the real reader.
+# The autouse fixture below pins these; the held-lock reader tests need the real ones.
 REAL_NETWORK_STATE = status_cli._network_state
+REAL_POLICY_MODE = status_cli._policy_mode
 
 
 def forbid_native(monkeypatch, env):
@@ -251,18 +256,40 @@ def test_held_lock_is_reported_not_awaited(seeded, monkeypatch, capsys):
     assert native_attempts == [] and mutations == []
 
 
-def test_held_lock_reports_network_unavailable_not_the_clearnet_default(win, monkeypatch):
-    env = win
+TOR_POLICY_OFF = (
+    b"plugins:\n"
+    b"  mordred_network:\n"
+    b"    default_path: tor\n"
+    b"    tor_binary_path: /opt/custom/tor\n"
+    b"  mordred_privacy_check:\n"
+    b"    policy: 'off'\n"
+)
+
+
+class NoPrompts:
+    def __getattr__(self, name):
+        raise AssertionError(f"an unreadable network configuration must refuse before prompting ({name})")
+
+
+def put_config(env, data):
     paths = cio.CanonicalPaths(env.home)
     with cio.canonical_session(paths, scope="policy", create=True) as session, session.policy_update() as update:
-        update.put_config(b"plugins:\n  mordred_network:\n    default_path: tor\n")
+        update.put_config(data)
         update.commit()
-    monkeypatch.setattr(_yaml_io, "_platform", "nt")
-    windows = SimpleNamespace(platform="win32")
-    monkeypatch.setattr(settings, "sys", windows)
-    monkeypatch.setattr(_windows_policy, "sys", windows)
-    monkeypatch.setattr(status_cli, "_network_state", REAL_NETWORK_STATE)
-    assert REAL_NETWORK_STATE(env.home)[0] == "tor"
+
+
+def home_files(env):
+    return {p.relative_to(env.home): p.read_bytes() for p in env.home.rglob("*") if p.is_file()}
+
+
+def policy_writer(env):
+    mordred = env.home / "mordred"
+    return PolicyWriter(env.home / "config.yaml", mordred / "policy.json", mordred)
+
+
+@contextmanager
+def held_canonical_lock(env):
+    paths = cio.CanonicalPaths(env.home)
     holding, release = threading.Event(), threading.Event()
 
     def holder():
@@ -274,16 +301,166 @@ def test_held_lock_reports_network_unavailable_not_the_clearnet_default(win, mon
     thread.start()
     try:
         assert holding.wait(30)
-        collected = status_cli.collect(
-            home=env.home, root=env.home / "vault", platform="win32", workspace=workspace(env.home.parent)
-        )
+        yield
     finally:
         release.set()
         thread.join(30)
     assert not thread.is_alive()
+
+
+@pytest.fixture
+def checked_readers(win, monkeypatch):
+    """Route the config readers through their Windows paths; the real readers are exercised."""
+    monkeypatch.setattr(_yaml_io, "_platform", "nt")
+    monkeypatch.setattr(_runtime, "_platform", "nt")
+    windows = SimpleNamespace(platform="win32")
+    monkeypatch.setattr(settings, "sys", windows)
+    monkeypatch.setattr(_windows_policy, "sys", windows)
+    monkeypatch.setattr(status_cli, "_network_state", REAL_NETWORK_STATE)
+    monkeypatch.setattr(status_cli, "_policy_mode", REAL_POLICY_MODE)
+    return win
+
+
+@pytest.fixture
+def tor_home(checked_readers):
+    put_config(checked_readers, TOR_POLICY_OFF)
+    return checked_readers
+
+
+def test_held_lock_reports_network_unavailable_not_the_clearnet_default(tor_home):
+    env = tor_home
+    assert REAL_NETWORK_STATE(env.home)[0] == "tor"
+    with held_canonical_lock(env):
+        collected = status_cli.collect(
+            home=env.home, root=env.home / "vault", platform="win32", workspace=workspace(env.home.parent)
+        )
     assert collected.network_configured_path == "unavailable"
     rendered = status_cli.render_text(collected)
     assert "network     : unavailable (" in rendered and "clearnet" not in rendered
+
+
+def test_held_lock_network_status_is_unavailable_not_the_clearnet_default(tor_home, capsys):
+    env = tor_home
+    config = env.home / "config.yaml"
+    assert network_cli.handle_status(argparse.Namespace(config_path=config)) == 0
+    assert "configured default_path = tor " in capsys.readouterr().out
+    with held_canonical_lock(env):
+        assert network_cli.handle_status(argparse.Namespace(config_path=config)) == 0
+        text = capsys.readouterr().out
+        assert network_cli.handle_status(argparse.Namespace(config_path=config, json=True)) == 0
+        body = json.loads(capsys.readouterr().out)
+    assert text == "configured default_path = unavailable  (configuration could not be safely read)\n"
+    assert body == {"live": False, "configured_path": "unavailable"}
+
+
+def test_held_lock_blocks_the_setup_network_step_before_prompting(tor_home):
+    env = tor_home
+    before = home_files(env)
+    with held_canonical_lock(env):
+        result = setup_cli._resolve_step_network(home=env.home, prompt_io=NoPrompts(), policy_writer=policy_writer(env))
+    assert result.action == "blocked"
+    assert "could not be safely read" in result.detail and "not configured" not in result.detail
+    assert home_files(env) == before
+    released = setup_cli._resolve_step_network(home=env.home, prompt_io=NoPrompts(), policy_writer=policy_writer(env))
+    assert (released.action, released.detail) == ("done", "default path = tor")
+
+
+@pytest.mark.parametrize("mode", ["interactive", "non-interactive"])
+def test_held_lock_refuses_network_init_without_replacing_saved_settings(tor_home, monkeypatch, capsys, mode):
+    env = tor_home
+
+    def never(*args, **kwargs):
+        raise AssertionError("an unreadable seed must refuse before writing")
+
+    monkeypatch.setattr(PolicyWriter, "merge_mordred_sections", never)
+    monkeypatch.setattr(network_cli.DotEnvFileWriter, "upsert", never)
+    monkeypatch.setattr(network_cli.JSONCredentialsWriter, "write_network", never)
+    before = home_files(env)
+    with held_canonical_lock(env):
+        if mode == "interactive":
+            rc = network_cli.run_init(
+                prompt_io=NoPrompts(),
+                policy_writer=policy_writer(env),
+                env_writer=network_cli.DotEnvFileWriter(),
+                credentials_writer=network_cli.JSONCredentialsWriter(),
+            )
+        else:
+            rc = network_cli.handle_init(
+                argparse.Namespace(config_path=env.home / "config.yaml", non_interactive=True, clear_mullvad=False)
+            )
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "invalid or unavailable network configuration" in captured.err and captured.out == ""
+    assert home_files(env) == before
+
+
+def test_checked_network_path_without_config_is_the_clearnet_default(checked_readers):
+    env = checked_readers
+    assert REAL_NETWORK_STATE(env.home)[0] == "clearnet"
+    assert REAL_NETWORK_STATE(env.home.parent / "never-created")[0] == "clearnet"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"plugins: [\n  TOP-SECRET-SENTINEL: {",
+        b"plugins:\n  mordred_network:\n    default_path: TOP-SECRET-SENTINEL\n",
+    ],
+    ids=["malformed-yaml", "invalid-path"],
+)
+def test_checked_damaged_config_is_network_unavailable(checked_readers, caplog, data):
+    env = checked_readers
+    put_config(env, data)
+    assert REAL_NETWORK_STATE(env.home)[0] == "unavailable"
+    assert "TOP-SECRET-SENTINEL" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"- a\n", b"plugins: [1]\n", b"plugins:\n  mordred_network: tor\n"],
+    ids=["non-mapping-root", "non-mapping-plugins", "non-mapping-section"],
+)
+def test_checked_shape_damage_refuses_setup_and_network_init(checked_readers, capsys, data):
+    env = checked_readers
+    put_config(env, data)
+    before = home_files(env)
+    result = setup_cli._resolve_step_network(home=env.home, prompt_io=NoPrompts(), policy_writer=policy_writer(env))
+    assert result.action == "blocked"
+    rc = network_cli.run_init(
+        prompt_io=NoPrompts(),
+        policy_writer=policy_writer(env),
+        env_writer=network_cli.DotEnvFileWriter(),
+        credentials_writer=network_cli.JSONCredentialsWriter(),
+    )
+    assert rc == 1
+    assert "invalid or unavailable network configuration" in capsys.readouterr().err
+    assert home_files(env) == before
+
+
+def test_setup_is_not_done_when_the_checked_reader_refuses_the_section(checked_readers):
+    env = checked_readers
+    put_config(env, b"plugins:\n  mordred_network:\n    default_path: tor\n    tor_socks_port: bad\n")
+    assert REAL_NETWORK_STATE(env.home)[0] == "unavailable"
+    result = setup_cli._resolve_step_network(home=env.home, prompt_io=NoPrompts(), policy_writer=policy_writer(env))
+    assert result.action == "blocked"
+    assert "could not be safely read" in result.detail
+
+
+@pytest.mark.parametrize("data", [b"plugins:\n", b"plugins:\n  mordred_network:\n"], ids=["plugins", "section"])
+def test_checked_blank_keys_seed_network_init_as_unconfigured(checked_readers, data):
+    env = checked_readers
+    put_config(env, data)
+    assert network_cli._read_network_seed(env.home / "config.yaml") == {}
+
+
+def test_held_lock_policy_line_fails_closed_to_strict(tor_home):
+    env = tor_home
+    assert REAL_POLICY_MODE(env.home) == "off"
+    with held_canonical_lock(env):
+        collected = status_cli.collect(
+            home=env.home, root=env.home / "vault", platform="win32", workspace=workspace(env.home.parent)
+        )
+    assert collected.policy_mode == "strict"
 
 
 def test_retained_secret_store_and_excluded_artifacts_are_reported(win, monkeypatch, capsys):

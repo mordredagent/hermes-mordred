@@ -97,7 +97,7 @@ class NetworkAnswers:
 
         Key remap: ``default_network_path`` becomes ``default_path`` on disk so
         the network reader (``mordred_hermes.network`` /
-        :func:`_read_default_path_from_config`) keeps working unchanged.
+        :func:`._network_status.read_configured_network_path`) keeps working unchanged.
 
         Provider-specific keys are emitted only when set, so a Mullvad config
         stays free of empty wireguard/custom entries.

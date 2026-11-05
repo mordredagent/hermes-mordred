@@ -207,6 +207,14 @@ hermes-mordred network use tor              # or: vpn, clearnet
 hermes-mordred network status               # active path + liveness
 ```
 
+If `config.yaml` is damaged or another Mordred process holds it on Windows,
+`network status` and `status` report the configured path as `unavailable`
+(`configured_path` in `--json`) rather than the `clearnet` default, while
+`network init` and `setup` stop without prompting or changing your settings.
+An invalid `default_path` or a blank `plugins` / `mordred_network` key is the
+exception: those two commands prompt, keep your other saved settings, and your
+answers repair it.
+
 ### `install` — policy-gated skill install
 ```sh
 hermes-mordred install <skill-name>         # or a path to a dir containing SKILL.md

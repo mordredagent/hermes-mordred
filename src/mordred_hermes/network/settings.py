@@ -17,7 +17,7 @@ from typing import Any, Final, Literal, cast
 
 from .._core._policy_io import read_policy_mode_fail_closed
 from .._core._policy_types import VALID_ACTIVE_PATHS, ActivePath, PolicyMode
-from .._core._yaml_io import load_plugin_section
+from .._core._yaml_io import _parse_yaml, load_plugin_section
 from .provider_transport_flagger import ProviderEntry, TransportClass
 
 DEFAULT_NETWORK_PATH: Final[ActivePath] = "clearnet"
@@ -94,7 +94,7 @@ def _posix_default_path_strict(config_path: Path) -> ActivePath:
     except FileNotFoundError:
         return DEFAULT_NETWORK_PATH
     with f:
-        data = YAML(typ="safe", pure=True).load(f)
+        data = _parse_yaml(YAML(typ="safe", pure=True), f)
     if data is None:
         return DEFAULT_NETWORK_PATH
     if not isinstance(data, dict):
