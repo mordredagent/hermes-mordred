@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 from . import _storage, wrap
 from ._exceptions import WrapKeyNotFound
 from ._native_deletion import _backend_binding, _issue_native_owner, _NativeOwnerFacts, _owned_delete_scope
+from ._reset_authority import ResetAuthorization, check_reset_access
 from .wrap import NativeBackend
 
 SEALED = "credentials.sealed"
@@ -313,7 +314,7 @@ class PosixMailCustody(_Opaque):
     def transaction(self) -> PrivateTransaction:
         return _record(self).tx
 
-    def retire(self) -> None:
+    def retire(self, *, _reset: ResetAuthorization | None = None) -> None:
         from ._presence import revoke
 
         revoke()
@@ -344,7 +345,7 @@ class PosixMailCustody(_Opaque):
         with _owned_delete_scope(owner, backend=r.backend, database_lease=None) as permit:
             wrap.delete_wrapping_key(KEY_ID, backend=r.backend, deletion=permit)
         publish(r.tx, JOURNAL, json.dumps({**journal, "phase": "deleted"}, sort_keys=True).encode())
-        self.cleanup()
+        self.cleanup(keep_journal=_reset is not None)
 
     def retire_orphan(self, *, linux: bool) -> None:
         """The explicit ``mail forget --yes --force-orphan`` repair; never a source authentication.
@@ -446,7 +447,7 @@ class PosixMailCustody(_Opaque):
                 raise DatabaseRefused("mail source changed during orphan repair")
             r.tx.delete_file(name, expected_identity=item[1].identity)
 
-    def cleanup(self) -> None:
+    def cleanup(self, *, keep_journal: bool = False) -> None:
         r = _record(self)
         item = read(r.tx, JOURNAL)
         if item is None:
@@ -476,7 +477,8 @@ class PosixMailCustody(_Opaque):
             raise DatabaseRefused("mail retirement journal/source changed; evidence retained") from exc
         for name in (SEALED, META, KEY_RECORD):
             remove(r.tx, name)
-        remove(r.tx, JOURNAL)
+        if not keep_journal:
+            remove(r.tx, JOURNAL)
 
 
 def _file_document(item: tuple[bytes, FileMetadata]) -> list[object]:
@@ -517,7 +519,9 @@ def mail_credential_transaction(
     authenticated: MailAuthentication | None = None,
     create: bool = False,
     resume: bool = False,
+    _reset: ResetAuthorization | None = None,
 ) -> Iterator[PosixMailCustody]:
+    check_reset_access(home, _reset, component="mail")
     root = home / "mordred/mail"
     if authenticated is not None:
         issued = _proofs.get(authenticated) if type(authenticated) is MailAuthentication else None
@@ -531,6 +535,7 @@ def mail_credential_transaction(
     roots = _roots(home)
     _backend(home, backend)
     with _storage.keyvault_lifecycle_lock(home / "mordred/keyvault"):
+        check_reset_access(home, _reset, component="mail")
         if create:
             import sys
 
@@ -568,10 +573,10 @@ def mail_credential_transaction(
 
 
 def authenticate_mail_source(
-    *, home: Path, backend: NativeBackend, entries: list[dict[str, Any]]
+    *, home: Path, backend: NativeBackend, entries: list[dict[str, Any]], _reset: ResetAuthorization | None = None
 ) -> tuple[MailCredentials | None, MailAuthentication | None]:
     """Authenticate MMC1 ownership for retirement; this is not a presence-policy proof."""
-    with mail_credential_transaction(home=home, backend=backend) as custody:
+    with mail_credential_transaction(home=home, backend=backend, _reset=_reset) as custody:
         item = read(custody.transaction, SEALED)
         if item is None:
             return None, None
@@ -580,7 +585,7 @@ def authenticate_mail_source(
 
     with credential_scope(home, "mail", (observed.roots, observed.files, observed.public, observed.locks)):
         value = decrypt(item[0], backend, entries)
-        with mail_credential_transaction(home=home, backend=backend) as custody:
+        with mail_credential_transaction(home=home, backend=backend, _reset=_reset) as custody:
             if _observe(custody) != observed:
                 raise DatabaseRefused("mail source changed during authentication")
             proof = object.__new__(MailAuthentication)
@@ -614,7 +619,7 @@ def require_linux_no_presence_policy(tx: PrivateTransaction, public: str) -> tup
 
 
 def load_linux_mail_credentials(
-    *, home: Path, backend: NativeBackend, entries: list[dict[str, Any]]
+    *, home: Path, backend: NativeBackend, entries: list[dict[str, Any]], _reset: ResetAuthorization | None = None
 ) -> MailCredentials | None:
     """Refuse legacy policy before unwrap and recheck against the issued source afterward."""
     with mail_credential_transaction(home=home, backend=backend) as custody:
