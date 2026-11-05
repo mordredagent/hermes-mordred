@@ -72,6 +72,13 @@ PAGE_CODES = (
     "databases_key_missing",
     "databases_failed",
     "databases_busy",
+    "databases_cancel_refused",
+    "startup_busy",
+    "startup_memory_required",
+    "startup_key_unavailable",
+    "startup_refused",
+    "startup_too_large",
+    "startup_auth_interrupted",
     "vault_anchor_stale",
     "mail_already_configured",
     "mail_setup_flow_expired",
@@ -201,6 +208,7 @@ def v4(
     mail_messages: int = 0,
     mail: dict[str, Any] | None = None,
     supported: bool = True,
+    startup_outcome: str | None = None,
 ) -> dict[str, Any]:
     sources = {
         "telegram": {"conversations": telegram[0], "messages": telegram[1], "parts": telegram[1]},
@@ -219,6 +227,7 @@ def v4(
             "runtime_protected": armed if protected is None else protected,
             "databases": [{"relative": relative, "state": state} for relative, state in rows],
             "plaintext_backups": backups,
+            "startup_outcome": startup_outcome,
         },
         "imports": {"available": available, "code": code, "sources": sources if available else {}},
         "mail": mail if mail is not None else {"configured": False},
@@ -479,10 +488,10 @@ STATE_CASES.update(
 # Step 1.3 over the databases facts (the second design revision's total table).
 STATE_CASES.update(
     {
-        "v4, databases armed in a home with a new plaintext file": (
+        "v4, armed and protected whatever a row says: status cannot classify files": (
             mac(**v4(rows=(("state.db", "unreadable"), ("kanban.db", "plaintext")))),
             None,
-            ready_but(databases="attention:plaintext_in_armed_home"),
+            ready_but(),
         ),
         "v4, databases armed with a stale encrypt request": (
             mac(**v4(encrypt_pending=True)),
@@ -503,6 +512,83 @@ STATE_CASES.update(
             mac(**v4(armed=False, rows=(), available=False, code="not_armed")),
             None,
             ready_but(databases="next", telegram_import="blocked:needs_databases", mail="todo"),
+        ),
+        "v4, a journal outranks a decrypt marker": (
+            mac(**v4(journal=True, decrypt_pending=True)),
+            None,
+            ready_but(databases="attention:journal"),
+        ),
+        "v4, a record never outranks a journal": (
+            mac(**v4(armed=False, encrypt_pending=True, journal=True, startup_outcome="busy", available=False)),
+            None,
+            ready_but(databases="attention:journal", telegram_import="blocked:needs_databases"),
+        ),
+        "v4, startup postponed by a holder": (
+            mac(**v4(armed=False, encrypt_pending=True, startup_outcome="busy", available=False)),
+            None,
+            ready_but(databases="attention:startup_busy", telegram_import="blocked:needs_databases"),
+        ),
+        "v4, memory off cannot hide the Cancel of a schedule": (
+            mac(memory=False, login=False, **v4(armed=False, encrypt_pending=True, available=False)),
+            None,
+            ready_but(
+                memory="next",
+                databases="todo:restart",
+                telegram="blocked:needs_memory",
+                telegram_import="blocked:needs_memory",
+                mail="todo",
+            ),
+        ),
+        "linux, v4, not armed": (
+            linux(**v4(vault=None, armed=False, available=False, code="store_unavailable")),
+            None,
+            ready_but(vault=None, databases="next", telegram_import="todo", mail=None),
+        ),
+        "linux, v4, scheduled": (
+            linux(**v4(vault=None, armed=False, encrypt_pending=True, available=False, code="store_unavailable")),
+            None,
+            ready_but(vault=None, databases="next:restart", telegram_import="todo", mail=None),
+        ),
+        "linux, v4, startup refused": (
+            linux(
+                **v4(
+                    vault=None,
+                    armed=False,
+                    encrypt_pending=True,
+                    startup_outcome="refused",
+                    available=False,
+                    code="store_unavailable",
+                )
+            ),
+            None,
+            ready_but(vault=None, databases="attention:startup_refused", telegram_import="next", mail=None),
+        ),
+        "linux, v4, armed before this start": (
+            linux(**v4(vault=None, protected=False, available=False, code="store_unavailable")),
+            None,
+            ready_but(vault=None, databases="next:restart", telegram_import="todo", mail=None),
+        ),
+        "linux, v4, on": (
+            linux(**v4(vault=None, available=False, code="store_unavailable")),
+            SYNC_COUNTS,
+            ready_but(vault=None, mail=None),
+        ),
+        "linux, v4, memory first": (
+            linux(memory=False, login=False, **v4(vault=None, armed=False, available=False, code="store_unavailable")),
+            None,
+            ready_but(
+                vault=None,
+                memory="next",
+                databases="blocked:needs_memory",
+                telegram="blocked:needs_memory",
+                telegram_import="blocked:needs_memory",
+                mail=None,
+            ),
+        ),
+        "linux, v4, no driver": (
+            linux(**v4(vault=None, armed=False, supported=False, available=False, code="store_unavailable")),
+            SYNC_COUNTS,
+            ready_but(vault=None, databases="attention:databases_unsupported", mail=None),
         ),
     }
 )
@@ -1344,11 +1430,28 @@ def test_overview_from_an_older_api_asks_for_an_update_and_uses_in_process_count
     assert rows(mac())["telegram"] == ("done", "connected")
 
 
-def test_overview_on_linux_says_databases_and_mail_are_not_available():
-    result = rows(linux(memory=False, login=False))
-    assert result["protection"] == ("partial", "TPM 2.0 · memory not encrypted · Databases: not available on Linux")
-    assert result["mail"] == ("not_started", "not available on Linux")
-    assert result["telegram"] == ("not_started", "not connected")
+def test_overview_on_linux_reports_databases_from_v4_and_mail_is_not_available():
+    base = {"vault": None, "available": False, "code": "store_unavailable"}
+    off = rows(linux(memory=False, login=False, **v4(armed=False, **base)))
+    assert off["protection"] == ("partial", "TPM 2.0 · memory not encrypted · databases off")
+    assert off["mail"] == ("not_started", "not available on Linux")
+    assert off["telegram"] == ("not_started", "not connected")
+    on = rows(linux(**v4(**base)))
+    assert on["protection"] == ("done", "TPM 2.0 · memory encrypted · databases on")
+    assert on["mail"] == ("not_started", "not available on Linux")
+    scheduled = rows(linux(**v4(armed=False, encrypt_pending=True, **base)))
+    assert scheduled["protection"] == ("partial", "TPM 2.0 · memory encrypted · databases: converting at next restart")
+    refused = rows(linux(**v4(armed=False, encrypt_pending=True, startup_outcome="refused", **base)))
+    assert refused["protection"] == ("attention", "TPM 2.0 · memory encrypted · databases: needs attention")
+    unsupported = rows(linux(**v4(armed=False, supported=False, **base)))
+    assert unsupported["protection"] == ("attention", "TPM 2.0 · memory encrypted · databases: not available")
+    # No claim about databases on Linux from an API that does not report them.
+    older = rows(linux(memory=False, login=False))
+    assert older["protection"] == (
+        "attention",
+        "TPM 2.0 · memory not encrypted · databases: Update Mordred to use this",
+    )
+    assert older["mail"] == ("not_started", "not available on Linux")
 
 
 def test_overview_from_version_4_reads_the_store_and_the_mailbox_label():
@@ -1894,8 +1997,10 @@ def test_databases_table_is_the_preview():
     assert "Encrypt databases" in result["buttons"]
     single = component(databases_step(mac(**v4(armed=False, backups=1, available=False))), [])
     assert "1 backup archive in your Hermes home" in single["text"]
+    # `databases: []` is what status always answers, and means unknown: never "no files".
     empty = component(databases_step(mac(**v4(armed=False, rows=(), available=False))), [])
-    assert "No Hermes database files were found yet." in empty["text"]
+    assert "No Hermes database files" not in empty["text"] and "not checked" not in empty["text"]
+    assert "Encrypt databases" in empty["buttons"]
 
 
 def test_encrypt_databases_schedules_and_offers_the_restart():
@@ -1907,8 +2012,9 @@ def test_encrypt_databases_schedules_and_offers_the_restart():
     assert SCHEDULED_TEXT in result["text"]
     assert "Restart Hermes Desktop" in result["buttons"] and "Encrypt databases" not in result["buttons"]
     assert result["refreshes"] == 1
+    # Armed since the status was read (the Terminal command): the route's answer decides.
     restart = component(
-        databases_step(mac(**v4(protected=False))),
+        databases_step(PLAINTEXT_HOME),
         [{"ok": True, "action": "needs_restart", "restart_required": True}],
         script,
     )
@@ -1933,7 +2039,7 @@ def test_encrypt_databases_schedules_and_offers_the_restart():
         ({"ok": False, "error": "decrypt_pending"}, "Database decryption is pending"),
         ({"ok": False, "error": "journal"}, "left its journal. Run hermes-mordred databases status"),
         ({"ok": False, "error": "databases_failed"}, "The step shows the current state again"),
-        ({"ok": False, "error": "databases_unsupported"}, "Protected storage is unavailable for this runtime"),
+        ({"ok": False, "error": "databases_unsupported"}, "not supported on this system"),
     ],
 )
 def test_encrypt_databases_failures_are_explained_and_the_status_is_read_again(answer, phrase):
@@ -1949,17 +2055,21 @@ def test_encrypt_databases_failures_are_explained_and_the_status_is_read_again(a
 
 
 @pytest.mark.parametrize(
-    "status,text",
+    "status,text,buttons",
     [
-        (mac(**v4(armed=False, encrypt_pending=True, available=False)), SCHEDULED_TEXT),
-        (mac(**v4(protected=False)), ARMED_TEXT),
+        (
+            mac(**v4(armed=False, encrypt_pending=True, available=False)),
+            SCHEDULED_TEXT,
+            ["Cancel", "Restart Hermes Desktop"],
+        ),
+        (mac(**v4(protected=False)), ARMED_TEXT, ["Restart Hermes Desktop"]),
     ],
     ids=["scheduled", "armed-before-this-start"],
 )
-def test_databases_waiting_for_a_restart_offer_only_the_restart(status, text):
+def test_databases_waiting_for_a_restart_offer_only_the_restart(status, text, buttons):
     result = component(databases_step(status, restart=True), [])
     assert text in result["text"]
-    assert result["buttons"] == ["Restart Hermes Desktop"]
+    assert result["buttons"] == buttons
 
 
 @pytest.mark.parametrize("code", ["plaintext_in_armed_home", "stale_pending", "decrypt_pending", "journal"])
@@ -1970,11 +2080,301 @@ def test_databases_attention_from_status_points_to_terminal_without_an_encrypt_b
     assert '"role": "alert"' in json.dumps(result["tree"])
 
 
-def test_databases_done_says_encrypted_or_unreadable_never_databases_encrypted():
-    status = mac(**v4(rows=(("state.db", "unreadable"), ("kanban.db", "unreadable"))))
-    result = component(databases_step(status, "done"), [])
-    assert "Database encryption: on (2 files encrypted or unreadable)." in result["text"]
-    assert "databases encrypted" not in result["text"].lower()
+def test_databases_done_says_on_with_no_file_count():
+    # A count would be false: `databases` stays unknown, so nothing was counted.
+    for status in (mac(**v4(rows=())), mac(**v4(rows=(("state.db", "unreadable"), ("kanban.db", "unreadable"))))):
+        result = component(databases_step(status, "done"), [])
+        assert "Database encryption: on" in result["text"]
+        assert "file" not in result["text"].split("Database encryption: on")[1].split("Why this step")[0]
+        assert "encrypted or unreadable" not in result["text"] and "databases encrypted" not in result["text"].lower()
+    assert rows(mac(**v4(rows=(("a.db", "plaintext"),))))["protection"][1].endswith("databases on")
+
+
+def derived_databases_step(status: dict[str, Any]) -> str:
+    return (
+        "(() => {const status = (globalThis.dbStatus ??= " + json.dumps(status) + ");"
+        "return DatabasesStep({id:'databases', n:'1.3', ...stepStates(status).databases, status, refresh})})()"
+    )
+
+
+REMEDIES = {
+    "startup_busy": ["Quit all Hermes processes"],
+    "startup_memory_required": ["memory"],
+    "startup_key_unavailable": ["hermes-mordred databases encrypt", "if one appears"],
+    "startup_refused": ["hermes-mordred databases encrypt"],
+    "startup_too_large": ["hermes-mordred databases encrypt"],
+    "startup_auth_interrupted": ["Cancel", "Encrypt databases", "hermes-mordred databases encrypt"],
+}
+OUTCOMES = {
+    "busy": "startup_busy",
+    "memory_not_enabled": "startup_memory_required",
+    "source_unavailable": "startup_key_unavailable",
+    "auth_interrupted": "startup_auth_interrupted",
+    "too_large": "startup_too_large",
+    "holders_open": "startup_refused",
+    "refused": "startup_refused",
+    "unavailable": "startup_refused",
+    "not_a_known_outcome": "startup_refused",
+}
+
+
+@pytest.mark.parametrize(("outcome", "code"), sorted(OUTCOMES.items()))
+def test_startup_outcome_codes_point_to_their_remedy(outcome, code):
+    """On page load after a restart, from status alone: no press needed."""
+    status = mac(**v4(armed=False, encrypt_pending=True, startup_outcome=outcome, available=False))
+    result = component(derived_databases_step(status), [])
+    assert result["requests"] == []
+    assert '"role": "alert"' in json.dumps(result["tree"], ensure_ascii=False)
+    for phrase in REMEDIES[code]:
+        assert phrase in result["text"], (code, phrase)
+    assert "Touch ID" not in result["text"], code
+    assert "Encrypt databases" not in result["buttons"], "the button would only answer the same code"
+    assert "Cancel" in result["buttons"], "every startup code offers Cancel while pending"
+
+
+def test_startup_codes_retried_by_a_restart_offer_it():
+    for outcome, offered in (("busy", True), ("source_unavailable", True), ("memory_not_enabled", True)):
+        status = mac(**v4(armed=False, encrypt_pending=True, startup_outcome=outcome, available=False))
+        assert ("Restart Hermes Desktop" in component(derived_databases_step(status), [])["buttons"]) is offered
+    for outcome in ("auth_interrupted", "too_large", "refused"):
+        status = mac(**v4(armed=False, encrypt_pending=True, startup_outcome=outcome, available=False))
+        assert "Restart Hermes Desktop" not in component(derived_databases_step(status), [])["buttons"]
+
+
+@pytest.mark.parametrize(
+    ("facts", "encrypt", "cancel"),
+    [
+        ({"armed": False}, True, False),
+        ({"armed": False, "encrypt_pending": True}, False, True),
+        ({"armed": False, "encrypt_pending": True, "startup_outcome": "busy"}, False, True),
+        ({"armed": False, "encrypt_pending": True, "journal": True}, False, False),
+        ({"armed": False, "journal": True}, False, False),
+        ({"armed": False, "decrypt_pending": True}, False, False),
+        ({"armed": False, "decrypt_pending": True, "encrypt_pending": True}, False, True),
+        ({"protected": False}, False, False),
+        ({"encrypt_pending": True}, False, False),  # armed: cancelling would be refused
+        ({}, False, False),
+        ({"armed": False, "supported": False}, False, False),
+    ],
+    ids=[
+        "unarmed",
+        "scheduled",
+        "postponed",
+        "scheduled-with-journal",
+        "journal",
+        "decrypting",
+        "decrypting-and-scheduled",
+        "armed-before-this-start",
+        "stale",
+        "on",
+        "unsupported",
+    ],
+)
+def test_encrypt_and_cancel_are_visible_only_where_they_can_act(facts, encrypt, cancel):
+    status = mac(**v4(available=False, **facts))
+    result = component(derived_databases_step(status), [])
+    assert ("Encrypt databases" in result["buttons"]) is encrypt, result["buttons"]
+    assert ("Cancel" in result["buttons"]) is cancel, result["buttons"]
+
+
+def _unknown_facts() -> dict[str, Any]:
+    status = mac(**v4(available=False))
+    status["databases"].update(armed=None, encrypt_pending=None, decrypt_pending=None, journal=None)
+    status["databases"].update(plaintext_backups=None, databases=[])
+    return status
+
+
+def test_unknown_facts_show_neither_control_and_name_a_next_step():
+    result = component(derived_databases_step(_unknown_facts()), [])
+    assert "Encrypt databases" not in result["buttons"] and "Cancel" not in result["buttons"]
+    assert "hermes-mordred databases status" in result["text"]
+    assert "not checked" in result["text"]
+
+
+def test_not_checked_is_only_said_when_the_facts_are_unknown():
+    for facts in ({"armed": False}, {"armed": False, "encrypt_pending": True}, {"protected": False}, {}):
+        result = component(derived_databases_step(mac(**v4(available=False, rows=(), **facts))), [])
+        assert "not checked" not in result["text"], facts
+        assert "unknown" not in result["text"].lower(), facts
+
+
+def test_cancel_goes_through_the_route_and_reads_the_status_again():
+    status = mac(**v4(armed=False, encrypt_pending=True, startup_outcome="auth_interrupted", available=False))
+    after = mac(**v4(armed=False, available=False))
+    script = "await press(tree, 'Cancel'); globalThis.dbStatus = " + json.dumps(after) + "; tree = view()\n"
+    result = component(derived_databases_step(status), [{"ok": True, "action": "cancelled"}], script)
+    assert result["requests"] == [["/databases/cancel", {}]]
+    assert result["refreshes"] == 1
+    assert "Encrypt databases" in result["buttons"] and "Cancel" not in result["buttons"]
+    assert "cancelled" in result["text"].lower()
+    assert '"role": "alert"' not in json.dumps(result["tree"])
+
+
+@pytest.mark.parametrize(
+    ("answer", "phrase"),
+    [
+        ({"ok": True, "action": "attention", "code": "databases_cancel_refused"}, "cannot be cancelled"),
+        ({"ok": True, "action": "attention", "code": "journal"}, "left its journal"),
+        ({"ok": True, "action": "nothing"}, "does not understand"),
+        ({"ok": False, "error": "databases_failed"}, "hermes-mordred databases status"),
+        ({"ok": False, "error": "databases_unsupported"}, "not supported on this system"),
+    ],
+)
+def test_cancel_failures_are_explained_and_the_status_is_read_again(answer, phrase):
+    status = mac(**v4(armed=False, encrypt_pending=True, available=False))
+    result = component(derived_databases_step(status), [answer], "await press(tree, 'Cancel'); tree = view()\n")
+    assert '"role": "alert"' in json.dumps(result["tree"]) and phrase in result["text"]
+    assert result["refreshes"] == 1
+    assert "The scheduled encryption is cancelled" not in result["text"]
+
+
+def test_the_scheduled_notice_keeps_a_cancel_and_cancel_then_press_schedules_again():
+    status = mac(**v4(armed=False, available=False))
+    pending = mac(**v4(armed=False, encrypt_pending=True, available=False))
+    script = (
+        "await press(tree, 'Encrypt databases'); globalThis.dbStatus = "
+        + json.dumps(pending)
+        + "; tree = view(); out.first = labels(tree)\n"
+        "await press(tree, 'Cancel'); globalThis.dbStatus = "
+        + json.dumps(status)
+        + "; tree = view(); out.second = labels(tree)\n"
+        "await press(tree, 'Encrypt databases'); tree = view()\n"
+    )
+    answers = [
+        {"ok": True, "action": "scheduled", "restart_required": True},
+        {"ok": True, "action": "cancelled"},
+        {"ok": True, "action": "scheduled", "restart_required": True},
+    ]
+    result = component(derived_databases_step(status), answers, script)
+    assert [request[0] for request in result["requests"]] == [
+        "/databases/encrypt",
+        "/databases/cancel",
+        "/databases/encrypt",
+    ]
+    assert "Cancel" in result["out"]["first"] and "Restart Hermes Desktop" in result["out"]["first"]
+    assert "Encrypt databases" in result["out"]["second"] and "Restart Hermes Desktop" not in result["out"]["second"]
+    assert SCHEDULED_TEXT in result["text"]
+
+
+def test_too_large_at_the_press_is_explained_with_nothing_scheduled():
+    answer = {"ok": True, "action": "attention", "code": "startup_too_large"}
+    result = component(
+        databases_step(PLAINTEXT_HOME), [answer], "await press(tree, 'Encrypt databases'); tree = view()\n"
+    )
+    assert "hermes-mordred databases encrypt" in result["text"]
+    assert SCHEDULED_TEXT not in result["text"] and result["refreshes"] == 1
+    assert '"role": "alert"' in json.dumps(result["tree"])
+
+
+def test_no_database_copy_promises_a_prompt():
+    table = block("MESSAGES")
+    for code in REMEDIES:
+        line = re.search(rf"^\s*{code}:\s*\n?\s*'([^']*)'", table, re.M)
+        assert line, code
+        assert "Touch ID" not in line.group(1), code
+        assert "will prompt" not in line.group(1).lower(), code
+    assert "if one appears" in re.search(r"startup_key_unavailable:\s*\n?\s*'([^']*)'", table).group(1)
+    assert "Takes effect the next time Hermes Desktop starts." in source()
+
+
+def test_page_and_route_answer_the_same_code_for_every_outcome():
+    pytest.importorskip("fastapi")
+    from mordred_hermes.desktop import _databases
+
+    for outcome, code in OUTCOMES.items():
+        assert _databases._OUTCOME_CODES.get(outcome, "startup_refused") == code
+    assert set(_databases._OUTCOME_CODES.values()) <= set(REMEDIES)
+    assert set(REMEDIES) == set(OUTCOMES.values())
+
+
+def test_every_database_code_of_the_api_has_a_message():
+    pytest.importorskip("fastapi")
+    from mordred_hermes.desktop._projections import DATABASE_CODES
+
+    table = block("MESSAGES")
+    for code in DATABASE_CODES:
+        assert re.search(rf"^\s*{code}:", table, re.M), code
+
+
+def test_databases_unsupported_text_makes_no_promise():
+    text = re.search(r"databases_unsupported:\s*\n?\s*'([^']*)'", block("MESSAGES")).group(1)
+    assert "not supported on this system" in text
+    for promise in ("yet", "later", "soon", "future", "will be", "coming"):
+        assert promise not in text.lower(), promise
+
+
+BLOCKER_TEXT_DATABASES = "Encrypt the Hermes databases first."
+BLOCKER_TEXT_RESTART = "Restart Hermes Desktop to finish step 1.3."
+
+
+def test_linux_page_renders_the_databases_step_from_v4_status():
+    status = linux(**v4(vault=None, armed=False, available=False, code="store_unavailable"))
+    rendered = headings(status, None)
+    assert rendered["steps"]["mordred-step-memory"]["text"].startswith("1.2  ")
+    assert rendered["steps"]["mordred-step-databases"]["text"].startswith("1.3  Encrypt Hermes databases")
+    assert "mordred-step-mail" not in rendered["steps"] and "mordred-step-vault" not in rendered["steps"]
+    text = page_text(status)
+    assert "Encrypt databases" in text
+    pressed = render_page(
+        """
+const requests = []
+rest = async (path, options) => { requests.push(path); return {ok: true, action: 'scheduled', restart_required: true} }
+const tree = PageBody({status: STATUS, health: null, refresh: () => {}})
+await find(tree, n => n.type === 'button' && n.props.children === 'Encrypt databases').props.onClick()
+console.log(JSON.stringify(requests))
+""".replace("STATUS", json.dumps(status))
+    )
+    assert pressed == ["/databases/encrypt"]
+    # Blocked on Linux's own step numbers.
+    blocked = page_text(linux(memory=False, login=False, **v4(vault=None, armed=False, available=False)))
+    assert "Go to step 1.2" in blocked
+
+
+def test_linux_page_without_v4_has_no_databases_step_and_no_claim_of_support():
+    rendered = headings(linux(memory=False, login=False), None)
+    assert "mordred-step-databases" not in rendered["steps"]
+
+
+@pytest.mark.parametrize(
+    ("facts", "state"),
+    [
+        ({"armed": False}, "todo"),
+        ({"armed": False, "encrypt_pending": True}, "todo"),
+        ({"armed": False, "encrypt_pending": True, "startup_outcome": "refused"}, "next"),
+        ({"armed": False, "supported": False}, "next"),
+    ],
+    ids=["unarmed", "pending", "postponed", "unsupported"],
+)
+def test_linux_import_is_not_blocked_by_unencrypted_databases(facts, state):
+    """Step 1.3 is opt-in on Linux: an unarmed import writes the Telegram archive (``select_sink``)."""
+    status = linux(**v4(vault=None, available=False, code="store_unavailable", **facts))
+    result = render_page(
+        """
+const status = STATUS
+console.log(JSON.stringify({blocker: storeBlocker(status), step: stepStates(status).telegram_import,
+  text: treeText(PageBody({status, health: null, refresh: () => {}}))}))
+""".replace("STATUS", json.dumps(status))
+    )
+    assert result["blocker"] is None
+    assert result["step"] == {"state": state}
+    assert BLOCKER_TEXT_DATABASES not in result["text"] and BLOCKER_TEXT_RESTART not in result["text"]
+    assert "1.3  Encrypt Hermes databases" in result["text"], "the step stays on the page"
+
+
+def test_linux_import_still_needs_memory_before_the_databases_matter():
+    status = linux(memory=False, login=False, **v4(vault=None, armed=False, available=False))
+    states = render_page(f"console.log(JSON.stringify(stepStates({json.dumps(status)}).telegram_import))")
+    assert states == {"state": "blocked", "blocker": "needs_memory"}
+
+
+def test_macos_import_is_still_blocked_until_the_databases_are_armed():
+    for facts, blocker in (
+        ({"armed": False}, "needs_databases"),
+        ({"armed": False, "encrypt_pending": True}, "needs_restart"),
+        ({"protected": False}, "needs_restart"),
+    ):
+        status = mac(**v4(available=False, **facts))
+        assert render_page(f"console.log(JSON.stringify(storeBlocker({json.dumps(status)})))") == blocker
 
 
 # -- step 2.5: mail --------------------------------------------------------------------------------

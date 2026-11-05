@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ import pytest
 pytest.importorskip("fastapi")
 
 from mordred_hermes import dbcrypt
+from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.desktop import _seams
 from tests._activity_protection import native_root as native_root
 from tests._activity_protection import protected_runtime as protected_runtime
@@ -50,34 +52,212 @@ def test_desktop_poll_does_not_prompt_or_enroll(desktop: Any, monkeypatch: pytes
     assert _snapshot(desktop.home) == before
 
 
+def test_poll_reads_outcome_without_prompt_sql_or_write(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bounded record read and backup listing are the only additions; nothing else moves."""
+    import sqlite3
+
+    from mordred_hermes.dbcrypt import _migrate, _startup
+    from mordred_hermes.dbcrypt._authority import Authority
+
+    home = desktop.home
+    with open_private_directory(home / "mordred", create=True) as directory, directory.transaction() as tx:
+        tx.create_bytes("db-encryption.pending", b"1\n")
+        tx.create_bytes(_startup.RECORD_NAME, json.dumps({"version": 1, "outcome": "busy"}).encode())
+    (home / "state.db").write_bytes(b"plain or not: polling never looks")
+    (home / "backups").mkdir()
+    (home / "backups" / "hermes-1.zip").write_bytes(b"not even a zip: opening it would fail")
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("passive status may not obtain authority, open SQL, walk for size, schedule or cancel")
+
+    monkeypatch.setattr("mordred_hermes.dbcrypt._key.KeyProvider", forbidden)
+    monkeypatch.setattr(Authority, "acquire", forbidden)
+    monkeypatch.setattr(Authority, "check", forbidden)
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    monkeypatch.setattr("sqlcipher3.dbapi2.connect", forbidden)
+    monkeypatch.setattr(_seams, "open_store_readonly", forbidden)
+    monkeypatch.setattr(_seams, "imap_status", forbidden)
+    monkeypatch.setattr(_migrate, "discover", forbidden)
+    monkeypatch.setattr(_migrate, "database_paths", forbidden)
+    monkeypatch.setattr(_migrate, "schedule", forbidden)
+    monkeypatch.setattr(_migrate, "unschedule", forbidden)
+    monkeypatch.setattr(_startup, "conversion_too_large", forbidden)
+    monkeypatch.setattr(dbcrypt, "arm", forbidden)
+    monkeypatch.setattr(dbcrypt._runtime, "arm", forbidden)
+    before = _snapshot(home)
+    for _ in range(3):
+        status = desktop.get("/status?client_version=4")["databases"]
+        assert desktop.get("/databases/status") == {"ok": True, **status}
+        assert status == {
+            "supported": True,
+            "armed": False,
+            "encrypt_pending": True,
+            "decrypt_pending": False,
+            "journal": False,
+            "runtime_protected": False,
+            "databases": [],
+            "plaintext_backups": 1,
+            "startup_outcome": "busy",
+        }
+    assert _snapshot(home) == before
+
+
+def _intent(**fields: bool) -> dbcrypt.DatabaseIntent:
+    return dbcrypt.DatabaseIntent(
+        **{
+            "armed": False,
+            "encrypt_pending": False,
+            "decrypt_pending": False,
+            "journal": False,
+            "unsafe": False,
+            **fields,
+        }
+    )
+
+
+OBSERVED = {"runtime_protected": False, "plaintext_backups": 3, "startup_outcome": None}
+
+
 @pytest.mark.parametrize(
-    ("configured", "capability", "authenticated", "expected"),
+    ("configured", "capability", "authenticated", "intent", "observed", "expected"),
     [
-        (False, "unknown", False, {"supported": True, "armed": False, "runtime_protected": False}),
-        (True, "unknown", True, {"supported": True, "armed": True, "runtime_protected": False}),
-        (True, "available", True, {"supported": True, "armed": True, "runtime_protected": True}),
-        (True, "available", False, {"supported": True, "armed": True, "runtime_protected": False}),
-        (True, "unavailable", True, {"supported": False}),
+        # `configured` (any record) and `authenticated` never decide armed or protected.
+        (False, "unknown", False, _intent(), OBSERVED, {"armed": False, "encrypt_pending": False}),
+        (True, "unknown", True, _intent(encrypt_pending=True), OBSERVED, {"armed": False, "encrypt_pending": True}),
+        (True, "available", True, _intent(armed=True), OBSERVED, {"armed": True, "encrypt_pending": False}),
+        (
+            True,
+            "available",
+            False,
+            _intent(armed=True),
+            {**OBSERVED, "runtime_protected": True, "startup_outcome": "busy"},
+            {"armed": True, "encrypt_pending": False, "runtime_protected": True, "startup_outcome": "busy"},
+        ),
     ],
 )
 def test_database_status_projection_preserves_exact_v4_schema(
-    configured: bool, capability: Any, authenticated: bool, expected: dict[str, object]
+    configured: bool, capability: Any, authenticated: bool, intent: Any, observed: Any, expected: dict[str, object]
 ) -> None:
     from mordred_hermes.desktop import _databases
 
     status = dbcrypt.DatabaseStatus(configured, None, capability, authenticated, "private arbitrary reason")
-    projected = _databases.database_status_projection(status)
-    if capability != "unavailable":
-        expected = {
-            **expected,
-            "encrypt_pending": None,
-            "decrypt_pending": None,
-            "journal": None,
-            "databases": [],
-            "plaintext_backups": None,
-        }
-    assert projected == expected
+    projected = _databases.database_status_projection(status, intent, **observed)
+    assert projected == {
+        "supported": True,
+        "decrypt_pending": False,
+        "journal": False,
+        "runtime_protected": False,
+        "databases": [],
+        "plaintext_backups": 3,
+        "startup_outcome": None,
+        **expected,
+    }
     assert "private arbitrary reason" not in repr(projected)
+
+
+def test_database_status_projection_only_unavailable_is_unsupported() -> None:
+    from mordred_hermes.desktop import _databases
+
+    gone = dbcrypt.DatabaseStatus(True, None, "unavailable", True, "private arbitrary reason")
+    assert _databases.database_status_projection(gone) == {"supported": False}
+    assert _databases.database_status_projection(gone, _intent(armed=True), **OBSERVED) == {"supported": False}
+
+
+@pytest.mark.parametrize("fields", [{}, {"armed": True}, {"encrypt_pending": True, "journal": True}])
+def test_database_status_projection_unsafe_intent_is_unknown_never_absent(fields: dict[str, bool]) -> None:
+    from mordred_hermes.desktop import _databases
+
+    status = dbcrypt.DatabaseStatus(True, None, "unknown", False, "private arbitrary reason")
+    projected = _databases.database_status_projection(status, _intent(unsafe=True, **fields), **OBSERVED)
+    assert projected["supported"] is True
+    assert [projected[key] for key in ("armed", "encrypt_pending", "decrypt_pending", "journal")] == [None] * 4
+
+
+def test_runtime_protected_observes_installed_authority_without_check_or_unwrap(
+    protected_runtime: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes.dbcrypt._authority import Authority
+    from mordred_hermes.desktop import _databases
+
+    root, provider, backend = protected_runtime
+    assert _databases._runtime_protected(root) is False  # a provider without an authority proves nothing
+    assert backend.calls == [] and provider.current_authority is None
+    authority = provider.authority
+    calls = list(backend.calls)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("runtime protection is observed, never re-authenticated")
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr(Authority, "check", forbidden)
+        guarded.setattr(Authority, "acquire", forbidden)
+        guarded.setattr(Authority, "key", property(forbidden))
+        guarded.delenv("HERMES_MEMORY_KEY", raising=False)
+        assert _databases._runtime_protected(root) is True
+        assert _databases.status_object(root)["runtime_protected"] is True
+        guarded.setattr("mordred_hermes.dbcrypt._shim.is_installed", lambda: False)
+        assert _databases._runtime_protected(root) is False  # the connection would be plain
+    assert backend.calls == calls and provider.current_authority is authority
+
+
+def test_terminal_authority_is_not_runtime_protected(protected_runtime: Any) -> None:
+    from mordred_hermes.desktop import _databases
+
+    root, provider, _ = protected_runtime
+    authority = provider.authority
+    assert _databases._runtime_protected(root) is True
+    authority.invalidate("terminal for the test")
+    assert authority.terminal and _databases._runtime_protected(root) is False
+
+
+def test_inherited_authority_is_not_runtime_protected(protected_runtime: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A forked child inherits the provider, but its authority only goes terminal on next use."""
+    from mordred_hermes.desktop import _databases
+
+    root, provider, _ = protected_runtime
+    authority = provider.authority
+    assert _databases._runtime_protected(root) is True
+    parent = authority._pid
+    monkeypatch.setattr(_databases.os, "getpid", lambda: parent + 1)
+    assert not authority.terminal and _databases._runtime_protected(root) is False
+
+
+def test_authority_for_another_root_is_not_runtime_protected(protected_runtime: Any, tmp_path_factory: Any) -> None:
+    from mordred_hermes.desktop import _databases
+
+    root, provider, _ = protected_runtime
+    assert provider.authority.root == root
+    other = tmp_path_factory.mktemp("another-root").resolve()
+    assert _databases._runtime_protected(other) is False
+    assert _databases._runtime_protected(root) is True
+
+
+def test_a_profile_home_observes_the_authority_of_its_root(protected_runtime: Any) -> None:
+    from mordred_hermes.desktop import _databases
+
+    root, provider, _ = protected_runtime
+    assert provider.authority.root == root
+    assert _databases.status_object(root / "profiles" / "work")["runtime_protected"] is True
+
+
+def test_a_provider_that_is_not_native_is_not_runtime_protected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from mordred_hermes.desktop import _databases
+
+    # A non-native provider's key (an environment key) is exactly what must not count.
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", SimpleNamespace(runtime_native=False))
+    monkeypatch.setattr("mordred_hermes.dbcrypt._shim.is_installed", lambda: True)
+    assert _databases._runtime_protected(tmp_path) is False
+
+
+def test_a_broken_provider_observation_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mordred_hermes.desktop import _databases
+
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", object())  # raises rather than answers
+    assert _databases._runtime_protected(tmp_path) is False
 
 
 def test_server_acceptance_does_not_claim_windows11_support(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,15 +289,15 @@ def test_server_edition_proceeds_past_admission(tmp_path: Path, monkeypatch: pyt
     assert dbcrypt.database_status(tmp_path).capability == "unknown"
 
 
-def test_unknown_database_status_never_schedules(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("intent", [None, _intent(unsafe=True)], ids=["not-observed", "unsafe"])
+def test_unknown_database_status_never_schedules(desktop: Any, monkeypatch: pytest.MonkeyPatch, intent: Any) -> None:
     from mordred_hermes.desktop import _databases
 
-    facts = _databases.database_status_projection(dbcrypt.DatabaseStatus(False, 0, "unknown", False, None))
-    assert _databases.encrypt_answer(desktop.home, facts) == {
-        "ok": True,
-        "action": "attention",
-        "code": "databases_failed",
-    }
+    status = dbcrypt.DatabaseStatus(False, 0, "unknown", False, None)
+    facts = _databases.database_status_projection(status, intent)
+    unknown = {"ok": True, "action": "attention", "code": "databases_failed"}
+    assert _databases.encrypt_answer(desktop.home, facts) == unknown
+    assert _databases.cancel_answer(desktop.home, facts) == unknown
     assert not (desktop.home / "mordred" / "db-encryption.pending").exists()
 
 
@@ -125,8 +305,9 @@ def test_unknown_database_status_is_not_ready_or_empty_on_page() -> None:
     from tests._desktop_page import render_page
 
     result = render_page("""
-const db = {supported: true, armed: true, runtime_protected: false,
-  encrypt_pending: null, decrypt_pending: null, journal: null, databases: [], plaintext_backups: null}
+const db = {supported: true, armed: null, runtime_protected: false,
+  encrypt_pending: null, decrypt_pending: null, journal: null, databases: [], plaintext_backups: null,
+  startup_outcome: null}
 const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
   : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
   : text(node.props && node.props.children)
@@ -140,6 +321,19 @@ console.log(JSON.stringify({state: databaseState(db), table: text(DatabaseTable(
     assert "unknown" in result["step"].lower()
     assert "No Hermes database files" not in result["step"]
     assert "Database encryption: on" not in result["step"]
+    assert "Encrypt databases" not in result["step"] and "Cancel" not in result["step"]
+
+
+def test_a_failed_status_read_is_unknown_on_the_page_and_does_not_block_the_store() -> None:
+    from tests._desktop_page import render_page
+
+    result = render_page("""
+const status = {platform:'darwin', hardware_kind:'secure_enclave', telegram_supported:true,
+  databases:{supported:true, code:'databases_failed'},
+  imports:{available:false, code:'store_unavailable', sources:{}}, mail:{configured:false}}
+console.log(JSON.stringify({state: databaseState(status.databases), blocker: storeBlocker(status)}))
+""")
+    assert result == {"state": {"code": "databases_failed"}, "blocker": None}
 
 
 def test_passive_unknown_does_not_block_foreground_or_claim_zero_mail() -> None:
@@ -166,7 +360,6 @@ def test_activity_mail_tools_refuse_lost_authority(
 ) -> None:
     """Real Authority/SQLCipher plus synthetic custody: terminal loss returns no records or new rows."""
     import asyncio
-    import json
     from types import SimpleNamespace
 
     from mordred_hermes._core._database_contracts import DatabaseRefused
@@ -254,13 +447,14 @@ def test_native_platform_status_consumes_shared_projection_without_authenticatio
     result = asyncio.run(_status_v4.sections(platform, desktop.home))
     assert result["databases"] == {
         "supported": True,
-        "armed": True,
-        "encrypt_pending": None,
-        "decrypt_pending": None,
-        "journal": None,
+        "armed": False,  # the marker alone: `configured` above is not intent to report
+        "encrypt_pending": False,
+        "decrypt_pending": False,
+        "journal": False,
         "runtime_protected": False,
         "databases": [],
-        "plaintext_backups": None,
+        "plaintext_backups": 0,
+        "startup_outcome": None,
     }
     assert result["imports"] == {"available": False, "code": "store_unavailable", "sources": {}}
 
@@ -276,12 +470,35 @@ def test_database_operation_uses_shared_unavailability_and_never_schedules_unkno
     monkeypatch.setattr(
         dbcrypt, "database_status", lambda home: dbcrypt.DatabaseStatus(True, 1, "available", False, None)
     )
-    assert desktop.post("/databases/encrypt") == {"ok": True, "action": "attention", "code": "databases_failed"}
+    with monkeypatch.context() as unknown:
+        unknown.setattr(dbcrypt, "database_intent", lambda home: _intent(unsafe=True))
+        assert desktop.post("/databases/encrypt") == {"ok": True, "action": "attention", "code": "databases_failed"}
     monkeypatch.setattr(
         dbcrypt, "database_status", lambda home: dbcrypt.DatabaseStatus(True, 1, "unavailable", False, None)
     )
     assert desktop.post("/databases/encrypt") == {"ok": False, "error": "databases_unsupported"}
     assert not (desktop.home / "mordred/db-encryption.pending").exists()
+
+
+def test_linux_page_renders_what_the_linux_api_answers(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from mordred_hermes.dbcrypt import _capability
+    from mordred_hermes.desktop import api
+    from tests._desktop_page import render_page
+
+    monkeypatch.setattr(api, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(_capability, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(_capability, "_driver_present", lambda: True)
+    status = desktop.get("/status?client_version=4")
+    assert status["hardware_kind"] == "tpm" and status["databases"]["supported"] is True
+    text = render_page(
+        "console.log(JSON.stringify(treeText(PageBody({status: STATUS, health: null, refresh: () => {}}))))".replace(
+            "STATUS", json.dumps(status)
+        )
+    )
+    assert "1.3  Encrypt Hermes databases" in text and "databases off" in text
+    assert "Mail over IMAP" not in text and "not available on Linux" in text
 
 
 def test_mail_tool_visibility_never_authenticates_or_opens_sql(
