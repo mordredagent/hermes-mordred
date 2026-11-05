@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import shutil
 import threading
 from collections.abc import Sequence
 from functools import partial
@@ -22,7 +23,7 @@ from mordred_hermes.keyvault import _native_key_id, _reset_journal, _storage
 from mordred_hermes.keyvault._exceptions import WrapError
 from mordred_hermes.keyvault.api import _DEFAULT_KEY_ID
 from mordred_hermes.keyvault.log_encryption import AUDIT_LOG_KEY_ID, EncryptedWriter
-from mordred_hermes.wizard import keyvault_cli
+from mordred_hermes.wizard import _keyvault_reset, keyvault_cli
 from tests._keyvault_fakes import FakeBackend
 
 
@@ -323,9 +324,9 @@ class TestResetDegradedPaths:
         assert root.is_dir()
         assert _deleted(backend) == set()
         assert not _storage.reset_journal_path(root).exists()
-        assert "no native keys were deleted" in capsys.readouterr().err
+        assert "incomplete" in capsys.readouterr().err
 
-    def test_partial_native_delete_can_be_retried_from_retained_metadata(self, tmp_path: Path) -> None:
+    def test_unknown_native_delete_outcome_refuses_replay_from_retained_metadata(self, tmp_path: Path) -> None:
         root = _build_keyvault(tmp_path, ["default", "payments"])
         backend = _FailsOneDeleteOnceBackend(_physical(root, "payments"))
 
@@ -337,8 +338,9 @@ class TestResetDegradedPaths:
 
         second_rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
-        assert second_rc == 0
-        assert not root.exists()
+        assert second_rc == 1
+        assert root.exists()
+        assert _storage.reset_journal_path(root).exists()
 
     def test_rmtree_failure_reports_cleanly_without_traceback(
         self,
@@ -374,7 +376,7 @@ class TestResetDegradedPaths:
             raise OSError("simulated rmtree failure")
 
         monkeypatch.setattr(backend, "delete_enclave_key", _delete_after_journal)
-        monkeypatch.setattr(keyvault_cli.shutil, "rmtree", _boom)
+        monkeypatch.setattr(_keyvault_reset, "remove_known_files", _boom)
         rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
         # The SE keys were already deleted; a directory-removal failure must
@@ -390,7 +392,7 @@ class TestResetDegradedPaths:
         with pytest.raises(_storage.KeyvaultResetInProgressError, match="reset"):
             writer.append({"event": "after-failed-reset"})
         assert log_path.stat().st_size == size_before
-        assert "could not be removed" in capsys.readouterr().err.lower()
+        assert "incomplete" in capsys.readouterr().err.lower()
 
     def test_reset_resumes_from_parent_journal_after_root_was_removed(
         self,
@@ -399,13 +401,13 @@ class TestResetDegradedPaths:
     ) -> None:
         root = _build_keyvault(tmp_path, ["default", "payments"])
         backend = FakeBackend()
-        real_rmtree = keyvault_cli.shutil.rmtree
+        real_rmtree = _keyvault_reset.remove_known_files
 
-        def _remove_then_report_failure(path: Path) -> None:
-            real_rmtree(path)
+        def _remove_then_report_failure(path: Path, *args: object) -> None:
+            real_rmtree(path, *args)
             raise OSError("simulated crash after directory removal")
 
-        monkeypatch.setattr(keyvault_cli.shutil, "rmtree", _remove_then_report_failure)
+        monkeypatch.setattr(_keyvault_reset, "remove_known_files", _remove_then_report_failure)
         assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
         assert not root.exists()
         assert _storage.reset_journal_path(root).is_file()
@@ -414,9 +416,9 @@ class TestResetDegradedPaths:
         # stable journal. Native deletion is idempotently retried, then the
         # journal is unlinked and its parent directory is flushed.
         backend.calls.clear()
-        monkeypatch.setattr(keyvault_cli.shutil, "rmtree", real_rmtree)
+        monkeypatch.setattr(_keyvault_reset, "remove_known_files", real_rmtree)
         assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
-        assert ("delete", _physical(root, "payments")) in backend.calls
+        assert not any(op == "delete" for op, _ in backend.calls)
         assert not _storage.reset_journal_path(root).exists()
 
     def test_root_removal_flush_failure_retains_journal_for_retry(
@@ -431,7 +433,7 @@ class TestResetDegradedPaths:
 
         def fail_once(root_arg: Path) -> None:
             nonlocal failed
-            if not failed and not root_arg.exists():
+            if not failed and root_arg == root and not root_arg.exists():
                 failed = True
                 raise OSError("simulated root-removal flush failure")
             real_flush(root_arg)
@@ -448,7 +450,7 @@ class TestResetDegradedPaths:
         root = _build_keyvault(tmp_path, ["default"])
         with _storage.keyvault_lifecycle_lock(root):
             _storage.write_reset_journal(root, b"pending reset")
-        keyvault_cli.shutil.rmtree(root)
+        shutil.rmtree(root)
 
         with pytest.raises(_storage.KeyvaultResetInProgressError, match="reset"):
             _storage.ensure_layout(root)
@@ -480,7 +482,7 @@ class TestResetDegradedPaths:
         assert root.is_symlink()
         assert external.is_dir()
         assert _deleted(backend) == set()
-        assert "unsafe keyvault root" in capsys.readouterr().err.lower()
+        assert "symbolic link" in capsys.readouterr().err.lower()
 
     def test_symlinked_lifecycle_lock_is_refused_before_native_delete(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -499,7 +501,7 @@ class TestResetDegradedPaths:
         assert root.is_dir()
         assert victim.read_bytes() == b"unchanged"
         assert _deleted(backend) == set()
-        assert "cannot lock keyvault lifecycle" in capsys.readouterr().err.lower()
+        assert "symbolic link" in capsys.readouterr().err.lower()
 
     def test_reset_waits_for_active_keyvault_transaction(self, tmp_path: Path) -> None:
         root = _build_keyvault(tmp_path, ["default"])
@@ -546,12 +548,12 @@ class TestResetDegradedPaths:
         creator_finished = threading.Event()
         reset_result: list[int] = []
         creator_errors: list[BaseException] = []
-        real_rmtree = keyvault_cli.shutil.rmtree
+        real_rmtree = _keyvault_reset.remove_known_files
 
-        def paused_rmtree(path: Path) -> None:
+        def paused_rmtree(path: Path, *args: object) -> None:
             removal_entered.set()
             assert release_removal.wait(timeout=5)
-            real_rmtree(path)
+            real_rmtree(path, *args)
 
         def resetter() -> None:
             reset_result.append(keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True))
@@ -565,7 +567,7 @@ class TestResetDegradedPaths:
             finally:
                 creator_finished.set()
 
-        monkeypatch.setattr(keyvault_cli.shutil, "rmtree", paused_rmtree)
+        monkeypatch.setattr(_keyvault_reset, "remove_known_files", paused_rmtree)
         reset_thread = threading.Thread(target=resetter)
         creator_thread = threading.Thread(target=creator)
         reset_thread.start()
@@ -582,7 +584,9 @@ class TestResetDegradedPaths:
         assert not reset_thread.is_alive()
         assert not creator_thread.is_alive()
         assert reset_result == [0]
-        assert creator_errors == []
+        assert all(isinstance(exc, _storage.KeyvaultResetInProgressError) for exc in creator_errors)
+        if creator_errors:
+            _storage.ensure_layout(root)
         # The creator runs strictly after reset and therefore produces a
         # complete new layout, never a tree interleaved with rmtree.
         assert _storage.load_meta(root) == {"version": 1, "keys": {}}
@@ -683,7 +687,7 @@ class TestResetConfirmation:
     ) -> None:
         root = _build_keyvault(tmp_path, ["default"])
         _write_current_reset_journal(root)
-        keyvault_cli.shutil.rmtree(root)
+        shutil.rmtree(root)
         backend = FakeBackend()
         prompt = _ScriptedPrompt("no")
 

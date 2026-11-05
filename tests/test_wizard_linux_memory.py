@@ -181,7 +181,7 @@ def test_inaccessible_memory_directory_preserves_key_and_ciphertext(linux, opera
     assert path.read_bytes() == ciphertext
 
 
-def test_keyvault_reset_refuses_while_tpm_memory_key_is_retained(linux, capsys):
+def test_keyvault_reset_preserves_independent_tpm_memory_key(linux):
     from mordred_hermes.keyvault import _storage
     from mordred_hermes.wizard import keyvault_cli
 
@@ -193,13 +193,14 @@ def test_keyvault_reset_refuses_while_tpm_memory_key_is_retained(linux, capsys):
     native.parent.mkdir(mode=0o700)
     native.write_bytes(b"synthetic opaque TPM material")
     wrapped = mk.memory_key_path(home).read_bytes()
-    assert keyvault_cli.reset_keyvault(home=home, backend=backend, assume_yes=True) == 1
+    assert keyvault_cli.reset_keyvault(home=home, backend=backend, assume_yes=True) == 0
     assert native.read_bytes() == b"synthetic opaque TPM material"
     assert mk.memory_key_path(home).read_bytes() == wrapped
-    assert "encryption purge memory" in capsys.readouterr().err
+    assert not (root / "meta.json").exists()
     assert memory_cli.purge(home=home, root=home / "vault") == 0
     assert keyvault_cli.reset_keyvault(home=home, backend=backend, assume_yes=True) == 0
-    assert not root.exists()
+    assert native.read_bytes() == b"synthetic opaque TPM material"
+    assert not (root / "meta.json").exists()
 
 
 def test_uninstall_data_purge_removes_memory_custody_before_keyvault(linux):

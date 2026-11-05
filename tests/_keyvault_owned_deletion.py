@@ -17,11 +17,13 @@ def install_fake_owned_deletion(monkeypatch: pytest.MonkeyPatch) -> None:
     original_delete = keyvault_cli._delete_wrapping_keys
     original_rollback = _keyvault_init._rollback_new_audit_key
 
-    def delete(key_ids, *, root, backend, database_lease):
+    def delete(key_ids, *, root, backend, database_lease, _prepared=False):
         if not isinstance(backend, FakeBackend):
-            return original_delete(key_ids, root=root, backend=backend, database_lease=database_lease)
+            return original_delete(
+                key_ids, root=root, backend=backend, database_lease=database_lease, _prepared=_prepared
+            )
         journal = _reset_journal._load_reset_journal(root)
-        assert journal.key_ids == key_ids
+        assert all(journal.key_ids.get(key) == value for key, value in key_ids.items())
         assert not journal.metadata_incomplete and not journal.retained_legacy
         failures = []
         for logical, selector in key_ids.items():
