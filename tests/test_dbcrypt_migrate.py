@@ -216,14 +216,20 @@ def test_a_scheduled_conversion_runs_at_startup_then_the_shim_is_installed(
     assert sqlite3.connect(str(home / "state.db")).execute("SELECT count(*) FROM messages").fetchone() == (3,)
 
 
+def _private_file(home: Path, name: str, raw: bytes) -> Path:
+    from mordred_hermes._private_fs import open_private_directory
+
+    with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
+        tx.create_bytes(name, raw)
+    return home / "mordred" / name
+
+
 def test_unschedule_removes_only_the_schedule_and_its_record(home: Path) -> None:
     from mordred_hermes.dbcrypt._startup import RECORD_NAME
 
     before = (home / "state.db").read_bytes()
     _migrate.schedule(home)
-    record = home / "mordred" / RECORD_NAME
-    record.write_text('{"version":1,"outcome":"busy"}')
-    record.chmod(0o600)
+    record = _private_file(home, RECORD_NAME, b'{"version":1,"outcome":"busy"}')
     _migrate.unschedule(home)
     assert not _migrate.pending_path(home).exists()
     assert not record.exists()
@@ -242,12 +248,9 @@ def test_unschedule_refuses_when_a_journal_or_marker_exists(home: Path, name: st
     from mordred_hermes.dbcrypt._startup import RECORD_NAME
 
     _migrate.schedule(home)
-    record = home / "mordred" / RECORD_NAME
-    record.write_text('{"version":1,"outcome":"busy"}')
-    record.chmod(0o600)
-    path = _migrate.journal_path(home) if name == "journal" else dbcrypt.marker_path(home)
-    path.write_bytes(b"{}\n")
-    path.chmod(0o600)
+    record = _private_file(home, RECORD_NAME, b'{"version":1,"outcome":"busy"}')
+    target = _migrate.journal_path(home) if name == "journal" else dbcrypt.marker_path(home)
+    path = _private_file(home, target.name, b"{}\n")
     with pytest.raises(_migrate.MigrationError):
         _migrate.unschedule(home)
     assert _migrate.pending_path(home).exists()

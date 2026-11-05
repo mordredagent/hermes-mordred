@@ -714,6 +714,7 @@ def test_default_startup_without_marker_preserves_recovery_state(tmp_path, monke
             dbcrypt._runtime._PROVIDER.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes; Windows native proof is explicit")
 def test_default_startup_without_marker_retains_a_scheduled_conversion_it_cannot_run(tmp_path, monkeypatch):
     """Encrypt-pending now reaches the startup seam, whose refusal keeps the files untouched."""
     from mordred_hermes import dbcrypt

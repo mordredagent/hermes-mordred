@@ -19,7 +19,12 @@ after a conversion, which needs EX and removes the record.
 ``attempting`` is written under EX before the first custody call. Hermes Desktop
 kills a backend that has not announced its port, and a prompt nobody can answer
 would otherwise hang every respawn. It can only be judged under EX: there, the OS
-has released the previous holder's lock, so that holder died.
+has released the previous holder's lock, so that holder died. That becomes
+``auth_interrupted``, which is sticky: no start retries it and no other outcome
+replaces it until :func:`._migrate.unschedule` clears it, so cancelling and
+scheduling again is the only retry. The name is neutral because the kill may also
+have landed in the checkpoint or discovery that follow authentication. A handled
+``source_unavailable``, such as a cancelled prompt, is retried by a normal restart.
 """
 
 from __future__ import annotations
@@ -43,9 +48,20 @@ RECORD_NAME: Final = "startup-conversion.json"
 
 #: What callers can see. ``attempting`` exists only in the file.
 OUTCOMES: Final = frozenset(
-    {"busy", "memory_not_enabled", "source_unavailable", "holders_open", "too_large", "refused", "unavailable"}
+    {
+        "auth_interrupted",
+        "busy",
+        "memory_not_enabled",
+        "source_unavailable",
+        "holders_open",
+        "too_large",
+        "refused",
+        "unavailable",
+    }
 )
 _ATTEMPTING: Final = "attempting"
+_AUTH_INTERRUPTED: Final = "auth_interrupted"
+_STICKY: Final = frozenset({_ATTEMPTING, _AUTH_INTERRUPTED})
 _RECORD_MAX_BYTES: Final = 4096
 _POLL_SECONDS: Final = 0.05
 _NORMAL_REASON: Final = "native database authority has not been authenticated"
@@ -85,11 +101,11 @@ def _read_record(root: Path) -> str | None:
 def read_outcome(root: Path) -> str | None:
     """Why startup postponed the conversion, from :data:`OUTCOMES`; ``None`` when no record exists.
 
-    A leftover ``attempting`` reads as ``source_unavailable``: its holder died
-    during native authentication, or is authenticating right now.
+    A leftover ``attempting`` reads as ``auth_interrupted``: its holder died during
+    the attempt, or is still inside it.
     """
     outcome = _read_record(root)
-    return "source_unavailable" if outcome == _ATTEMPTING else outcome
+    return _AUTH_INTERRUPTED if outcome == _ATTEMPTING else outcome
 
 
 def conversion_too_large(root: Path) -> bool:
@@ -199,11 +215,11 @@ def _attempt(root: Path) -> str | None:
                 _remove_record(root)
             return None
         resuming = database_intent(root).journal
-        if _read_record(root) == _ATTEMPTING and not resuming:
-            # The OS released the previous holder's lock, so it died during
-            # authentication. Retrying here would hang every respawn.
-            _write_record(root, "source_unavailable")
-            return "source_unavailable"
+        if _read_record(root) in _STICKY and not resuming:
+            # The OS released the previous holder's lock, so it died during its
+            # attempt. Retrying here would hang every respawn.
+            _write_record(root, _AUTH_INTERRUPTED)
+            return _AUTH_INTERRUPTED
         if not _write_record(root, _ATTEMPTING) and not resuming:
             return "refused"  # Without the guard a hung prompt could never be detected.
         try:
@@ -223,6 +239,17 @@ def _refuse_incomplete(root: Path) -> None:
         raise DatabaseRefused(_INCOMPLETE) from None
 
 
+def _record_postponed(root: Path, outcome: str) -> None:
+    """Publish a code under SH, where no attempt can be in flight, without losing a better one."""
+    existing = _read_record(root)
+    # A sticky code is only ever cleared by unschedule: replacing it would re-enable
+    # the hang. Busy says less than any remedy already on record, and a stale
+    # source_unavailable is replaced by the restart that retries it anyway.
+    if existing in _STICKY or (outcome == "busy" and existing is not None):
+        return
+    _write_record(root, outcome)
+
+
 def _postpone(root: Path, outcome: str, *, recorded: bool) -> bool:
     """Continue plain holding SH if that is safe. ``False`` selects the strict/armed path."""
     if outcome != "busy":
@@ -236,11 +263,8 @@ def _postpone(root: Path, outcome: str, *, recorded: bool) -> bool:
             if intent.armed or intent.decrypt_pending:
                 raise _LeaveSharedLease
             if intent.encrypt_pending:
-                # Under SH no attempt can be in flight, so a leftover attempting is
-                # dead. Keep it: overwriting it with busy would re-enable the retry.
-                keep = recorded or (outcome == "busy" and _read_record(root) == _ATTEMPTING)
-                if not keep:
-                    _write_record(root, outcome)
+                if not recorded:
+                    _record_postponed(root, outcome)
                 sys.stderr.write(f"mordred: database encryption postponed ({outcome}); continuing without it\n")
             return True
     except _LeaveSharedLease:
@@ -249,6 +273,9 @@ def _postpone(root: Path, outcome: str, *, recorded: bool) -> bool:
 
 
 def _convert_scheduled(root: Path, *, resuming: bool) -> bool:
+    # Durable, unlike attempting, so it needs no EX to judge and no wait for one.
+    if not resuming and _read_record(root) == _AUTH_INTERRUPTED:
+        return _postpone(root, _AUTH_INTERRUPTED, recorded=True)
     outcome = _precheck(root, resuming=resuming)
     if outcome is not None:
         return _postpone(root, outcome, recorded=False)

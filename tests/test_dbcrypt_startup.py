@@ -4,6 +4,9 @@ Real leases, marker, journal, SQLCipher conversion and shim run here. Hardware i
 the software ``FakeBackend``. ``linux``/``win32``/``darwin`` simulate each OS's
 policy view on a POSIX host: Windows custody and its checked VFS are exercised by
 the explicit native proofs, not by this module.
+
+Tests that use ``native_root`` are POSIX-only. The gate and record tests need no
+custody and use the real private filesystem on every OS.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from mordred_hermes import _runtime_bootstrap, dbcrypt
 from mordred_hermes._core._database_contracts import DatabaseBusy, DatabaseRefused
 from mordred_hermes._core._database_inventory import scan_dependencies
 from mordred_hermes._core._database_lifecycle import acquire_exclusive
+from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.dbcrypt import _capability, _locking, _migrate, _shim, _startup, _windows_vfs
 from mordred_hermes.dbcrypt._key import derive
 from mordred_hermes.dbcrypt._maintenance import convert_home
@@ -35,12 +39,21 @@ from tests._dbcrypt_platform_support import policy_sys
 from tests.test_dbcrypt_authority import native_root as native_root
 from tests.test_dbcrypt_marker import encoded, put
 
-pytestmark = pytest.mark.skipif(
-    os.name != "posix", reason="uses the POSIX authority fixture; Windows native proof is explicit"
-)
-
 REPOSITORY = Path(__file__).resolve().parents[1]
 SECRET = "private 日本語"
+
+
+@pytest.fixture(autouse=True)
+def _posix_authority_only(request: pytest.FixtureRequest) -> None:
+    if os.name != "posix" and "native_root" in request.fixturenames:
+        pytest.skip("uses the POSIX authority fixture; Windows native proof is explicit")
+
+
+def _private_file(root: Path, name: str, raw: bytes) -> Path:
+    """Create a leaf through the checked filesystem, so it is private on every OS."""
+    with open_private_directory(root / "mordred", create=True) as directory, directory.transaction() as tx:
+        tx.create_bytes(name, raw)
+    return root / "mordred" / name
 
 
 def _plain_db(path: Path) -> None:
@@ -720,9 +733,8 @@ def test_startup_outcome_record_is_private_non_secret_and_not_a_dependency(home)
 
 def _record(root: Path, outcome: str) -> Path:
     path = root / "mordred" / _startup.RECORD_NAME
-    path.write_text(json.dumps({"version": 1, "outcome": outcome}))
-    path.chmod(0o600)
-    return path
+    path.unlink(missing_ok=True)
+    return _private_file(root, _startup.RECORD_NAME, json.dumps({"version": 1, "outcome": outcome}).encode())
 
 
 def _raw_outcome(root: Path) -> str:
@@ -744,14 +756,11 @@ def _raw_outcome(root: Path) -> str:
     ],
 )
 def test_read_outcome_fails_closed_on_a_present_but_invalid_record(tmp_path, raw):
-    directory = tmp_path / "mordred"
-    directory.mkdir(mode=0o700)
-    path = directory / _startup.RECORD_NAME
-    path.write_bytes(raw)
-    path.chmod(0o600)
+    _private_file(tmp_path, _startup.RECORD_NAME, raw)
     assert _startup.read_outcome(tmp_path) == "refused"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="creating a symlink needs a Windows privilege")
 def test_read_outcome_fails_closed_on_an_unsafe_record(tmp_path):
     directory = tmp_path / "mordred"
     directory.mkdir(mode=0o700)
@@ -761,35 +770,105 @@ def test_read_outcome_fails_closed_on_an_unsafe_record(tmp_path):
 
 
 def test_read_outcome_never_returns_attempting(tmp_path):
-    (tmp_path / "mordred").mkdir(mode=0o700)
     _record(tmp_path, "attempting")
     assert "attempting" not in _startup.OUTCOMES
-    assert _startup.read_outcome(tmp_path) == "source_unavailable"
+    assert _startup.read_outcome(tmp_path) == "auth_interrupted"
 
 
 def test_read_outcome_accepts_each_closed_code_and_ordinary_absence(tmp_path):
     assert _startup.read_outcome(tmp_path) is None
     assert not (tmp_path / "mordred").exists()
-    directory = tmp_path / "mordred"
-    directory.mkdir(mode=0o700)
+    with open_private_directory(tmp_path / "mordred", create=True):
+        pass
     assert _startup.read_outcome(tmp_path) is None
-    closed = {"busy", "memory_not_enabled", "source_unavailable", "holders_open", "too_large", "refused", "unavailable"}
-    assert set(_startup.OUTCOMES) == closed
-    path = directory / _startup.RECORD_NAME
+    assert set(_startup.OUTCOMES) == {
+        "auth_interrupted",
+        "busy",
+        "memory_not_enabled",
+        "source_unavailable",
+        "holders_open",
+        "too_large",
+        "refused",
+        "unavailable",
+    }
     for code in _startup.OUTCOMES:
-        path.write_text(json.dumps({"version": 1, "outcome": code}))
-        path.chmod(0o600)
+        _record(tmp_path, code)
         assert _startup.read_outcome(tmp_path) == code
 
 
-def test_stale_record_removed_when_nothing_is_pending(tmp_path, monkeypatch):
-    directory = tmp_path / "mordred"
-    directory.mkdir(mode=0o700)
-    path = directory / _startup.RECORD_NAME
-    path.write_text(json.dumps({"version": 1, "outcome": "busy"}))
-    path.chmod(0o600)
+def test_written_record_round_trips_privately_and_is_not_a_dependency(tmp_path):
+    with open_private_directory(tmp_path / "mordred", create=True):
+        pass
+    entries = scan_dependencies(tmp_path).entries
+    assert _startup._write_record(tmp_path, "busy") is True
+    # The checked reader refuses a leaf whose mode or Windows ACL is not private.
+    assert _startup.read_outcome(tmp_path) == "busy"
+    with open_private_directory(tmp_path / "mordred") as directory:
+        raw = directory.read_bytes(_startup.RECORD_NAME, max_bytes=4096)
+    assert str(tmp_path).encode() not in raw
+    assert set(json.loads(raw)) == {"version", "at", "outcome", "converted", "platform"}
+    after = scan_dependencies(tmp_path)
+    assert after.complete is True
+    assert after.entries == entries
+
+
+def test_stale_record_removed_when_nothing_is_pending(tmp_path):
+    path = _record(tmp_path, "busy")
     assert _startup.run_scheduled_conversion(tmp_path) is False
     assert not path.exists()
+
+
+_V2_ENCRYPT = json.dumps({"version": 2, "direction": "encrypt"}).encode()
+_PENDING = "db-encryption.pending"
+_DECRYPT_PENDING = "db-decryption.pending"
+_MARKER = "db-encryption.marker"
+_JOURNAL = "db-encryption.journal.json"
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {_PENDING: b"1\n", _DECRYPT_PENDING: b"1\n"},
+        {_PENDING: b"1\n", _MARKER: b"1\n"},
+        {_JOURNAL: _V2_ENCRYPT},
+        {_PENDING: b"1\n", _JOURNAL: json.dumps({"version": 2, "direction": "decrypt"}).encode()},
+        {_PENDING: b"1\n", _JOURNAL: json.dumps({"version": 2, "direction": "adopt"}).encode()},
+        {_PENDING: b"1\n", _JOURNAL: json.dumps({"version": 1, "direction": "encrypt"}).encode()},
+        {_PENDING: b"1\n", _JOURNAL: b"not json"},
+    ],
+    ids=["decrypt-pending", "stale-pending", "orphan-journal", "decrypt", "adopt", "legacy", "garbage"],
+)
+def test_gate_leaves_every_foreign_state_to_the_strict_path(tmp_path, monkeypatch, state):
+    for name, raw in state.items():
+        _private_file(tmp_path, name, raw)
+    monkeypatch.setattr(_startup, "_convert_scheduled", lambda *a, **k: pytest.fail("the gate claimed foreign state"))
+    assert _startup.run_scheduled_conversion(tmp_path) is False
+    for name, raw in state.items():
+        with open_private_directory(tmp_path / "mordred") as directory:
+            assert directory.read_bytes(name, max_bytes=4096) == raw
+
+
+@pytest.mark.parametrize(
+    ("state", "resuming"),
+    [
+        ({_PENDING: b"1\n"}, False),
+        ({_PENDING: b"1\n", _JOURNAL: _V2_ENCRYPT}, True),
+        ({_PENDING: b"1\n", _JOURNAL: _V2_ENCRYPT, _MARKER: b"1\n"}, True),
+    ],
+    ids=["scheduled", "resume", "resume-after-marker"],
+)
+def test_gate_claims_only_scheduled_or_interrupted_encryption(tmp_path, monkeypatch, state, resuming):
+    for name, raw in state.items():
+        _private_file(tmp_path, name, raw)
+    claimed = []
+
+    def claim(root, *, resuming):
+        claimed.append((root, resuming))
+        return True
+
+    monkeypatch.setattr(_startup, "_convert_scheduled", claim)
+    assert _startup.run_scheduled_conversion(tmp_path) is True
+    assert claimed == [(tmp_path, resuming)]
 
 
 def test_ordinary_start_without_mordred_directory_creates_nothing(tmp_path):
@@ -803,9 +882,7 @@ def test_ordinary_start_without_mordred_directory_creates_nothing(tmp_path):
 def test_ordinary_armed_start_with_a_late_record_removes_it(native_root, monkeypatch):
     root, _, _, _ = native_root
     _configure_policy(monkeypatch, root, "linux")
-    path = root / "mordred" / _startup.RECORD_NAME
-    path.write_text(json.dumps({"version": 1, "outcome": "busy"}))
-    path.chmod(0o600)
+    path = _record(root, "busy")
     try:
         assert dbcrypt.install(home=root) is True
         assert not path.exists()
@@ -833,14 +910,144 @@ def test_attempting_is_written_under_exclusive_lease_before_the_first_custody_ca
     assert not (root / "mordred" / _startup.RECORD_NAME).exists()
 
 
+def _forbid_polling(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SimpleNamespace(
+        time=_startup.time.time,
+        monotonic=_startup.time.monotonic,
+        sleep=lambda seconds: pytest.fail("a sticky start waited for EX"),
+    )
+    monkeypatch.setattr(_startup, "time", clock)
+
+
+@pytest.mark.parametrize("sticky", ["attempting", "auth_interrupted"])
+def test_exclusive_attempt_never_authenticates_over_a_sticky_record(home, monkeypatch, sticky):
+    """auth_interrupted can also appear after the pre-EX read, so EX judges it again."""
+    from mordred_hermes.dbcrypt import _maintenance
+
+    monkeypatch.setattr(_maintenance, "convert_home", lambda *a, **k: pytest.fail("attempted over a sticky record"))
+    _record(home.root, sticky)
+    assert _startup._attempt(home.root) == "auth_interrupted"
+    assert home.backend.calls == []
+    assert _raw_outcome(home.root) == "auth_interrupted"
+
+
 def test_killed_during_native_auth_does_not_retry_at_next_startup(home):
     root = home.root
     _record(root, "attempting")
     before = _databases(root)
     assert dbcrypt.install(home=root) is False
     assert home.backend.calls == []
-    assert _raw_outcome(root) == "source_unavailable"
-    _assert_stayed_plain(home, before, "source_unavailable")
+    assert _raw_outcome(root) == "auth_interrupted"
+    _assert_stayed_plain(home, before, "auth_interrupted")
+
+
+def test_interrupted_attempt_stays_sticky_across_restarts(home, monkeypatch):
+    root = home.root
+    _record(root, "attempting")
+    before = _databases(root)
+    monkeypatch.setattr(_startup, "STARTUP_EX_WAIT", 3600.0)
+    _forbid_polling(monkeypatch)
+    for _ in range(3):
+        assert dbcrypt.install(home=root) is False
+        assert home.backend.calls == []
+        _assert_stayed_plain(home, before, "auth_interrupted")
+        assert _raw_outcome(root) == "auth_interrupted"
+        _release_process_state(root)
+
+
+def test_interrupted_attempt_does_not_wait_behind_a_running_runtime(home, monkeypatch):
+    """EX stays unobtainable while a gateway runs; the durable code needs no EX to judge."""
+    root = home.root
+    _record(root, "auth_interrupted")
+    monkeypatch.setattr(_startup, "STARTUP_EX_WAIT", 3600.0)
+    _forbid_polling(monkeypatch)
+    child = _reader(root)
+    try:
+        assert dbcrypt.install(home=root) is False
+    finally:
+        child.communicate("exit\n", timeout=10)
+    assert home.backend.calls == []
+    assert _raw_outcome(root) == "auth_interrupted"
+
+
+@pytest.mark.parametrize("sticky", ["attempting", "auth_interrupted"])
+@pytest.mark.parametrize("precheck", ["memory_not_enabled", "too_large", "refused", "unavailable"])
+def test_precheck_outcome_does_not_clear_an_interrupted_attempt(home, monkeypatch, sticky, precheck):
+    root = home.root
+    if precheck == "memory_not_enabled":
+        (root / "mordred/memory-vault.marker").unlink()
+    elif precheck == "too_large":
+        monkeypatch.setattr(_startup, "STARTUP_CONVERSION_MAX_BYTES", 1)
+    elif precheck == "refused":
+        (root / "foreign.db.unknown").write_bytes(b"opaque")
+    else:
+        monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: False)
+        monkeypatch.setattr(_capability, "sys", policy_sys("win32"))
+    _record(root, sticky)
+    assert dbcrypt.install(home=root) is False
+    assert home.backend.calls == []
+    assert _raw_outcome(root) == sticky
+    assert _startup.read_outcome(root) == "auth_interrupted"
+
+
+def test_clearing_a_precheck_does_not_re_enable_an_interrupted_attempt(home):
+    root = home.root
+    memory = root / "mordred/memory-vault.marker"
+    enabled = memory.read_bytes()
+    memory.unlink()
+    _record(root, "attempting")
+    assert dbcrypt.install(home=root) is False
+    assert _raw_outcome(root) == "attempting"
+    _release_process_state(root)
+    _private_file(root, memory.name, enabled)
+    assert dbcrypt.install(home=root) is False
+    assert home.backend.calls == []
+    assert _raw_outcome(root) == "auth_interrupted"
+
+
+@pytest.mark.parametrize("sticky", ["attempting", "auth_interrupted"])
+def test_lock_failure_does_not_clear_an_interrupted_attempt(home, monkeypatch, sticky):
+    root = home.root
+    _record(root, sticky)
+
+    def refused(*args, **kwargs):
+        raise DatabaseRefused("lock metadata unavailable")
+
+    monkeypatch.setattr(_startup, "acquire_exclusive", refused)
+    assert dbcrypt.install(home=root) is False
+    assert _raw_outcome(root) == sticky
+
+
+@pytest.mark.parametrize("specific", ["source_unavailable", "memory_not_enabled", "holders_open", "too_large"])
+def test_busy_does_not_overwrite_a_specific_outcome(home, specific):
+    root = home.root
+    _record(root, specific)
+    child = _reader(root)
+    try:
+        assert dbcrypt.install(home=root) is False
+    finally:
+        child.communicate("exit\n", timeout=10)
+    assert home.backend.calls == []
+    assert _raw_outcome(root) == specific
+
+
+def test_unschedule_clears_an_interrupted_attempt_and_the_next_start_converts(home):
+    root = home.root
+    _record(root, "auth_interrupted")
+    assert dbcrypt.install(home=root) is False
+    assert home.backend.calls == []
+    _release_process_state(root)
+    _migrate.unschedule(root)
+    assert _startup.read_outcome(root) is None
+    assert not _migrate.pending_path(root).exists()
+    assert dbcrypt.install(home=root) is False, "cancelling converts nothing"
+    assert home.backend.calls == []
+    assert _is_plaintext(root / "state.db")
+    _release_process_state(root)
+    _migrate.schedule(root)
+    assert dbcrypt.install(home=root) is True
+    assert not _startup.read_outcome(root)
+    assert not _is_plaintext(root / "state.db")
 
 
 def test_native_auth_kill_is_recorded_for_the_next_start(home, monkeypatch):
@@ -853,10 +1060,10 @@ def test_native_auth_kill_is_recorded_for_the_next_start(home, monkeypatch):
     with pytest.raises(_Crash):
         dbcrypt.install(home=root)
     assert _raw_outcome(root) == "attempting"
-    assert _startup.read_outcome(root) == "source_unavailable"
+    assert _startup.read_outcome(root) == "auth_interrupted"
     assert _migrate.pending_path(root).exists() and not _migrate.journal_path(root).exists()
     assert dbcrypt.install(home=root) is False
-    assert _raw_outcome(root) == "source_unavailable"
+    assert _raw_outcome(root) == "auth_interrupted"
 
 
 def test_a_handled_native_refusal_is_retried_by_a_normal_restart(home):
@@ -870,7 +1077,7 @@ def test_a_handled_native_refusal_is_retried_by_a_normal_restart(home):
     assert not (root / "mordred" / _startup.RECORD_NAME).exists()
 
 
-@pytest.mark.parametrize("outcome", sorted(_startup.OUTCOMES))
+@pytest.mark.parametrize("outcome", sorted(_startup.OUTCOMES - {"auth_interrupted"}))
 def test_other_outcomes_do_not_block_a_later_attempt(home, outcome):
     _record(home.root, outcome)
     assert dbcrypt.install(home=home.root) is True
@@ -931,7 +1138,7 @@ def test_busy_does_not_erase_a_dead_attempt(home):
         child.communicate("exit\n", timeout=10)
     assert home.backend.calls == []
     assert _raw_outcome(root) == "attempting"
-    assert _startup.read_outcome(root) == "source_unavailable"
+    assert _startup.read_outcome(root) == "auth_interrupted"
 
 
 def test_attempting_with_journal_still_resumes(home, monkeypatch):
@@ -947,6 +1154,27 @@ def test_attempting_with_journal_still_resumes(home, monkeypatch):
         dbcrypt.install(home=root)
     monkeypatch.setattr(_migrate, "_transition", transition)
     assert _raw_outcome(root) == "attempting"
+    assert _migrate.journal_path(root).exists()
+    assert dbcrypt.install(home=root) is True
+    assert not _migrate.journal_path(root).exists()
+    assert not (root / "mordred" / _startup.RECORD_NAME).exists()
+    assert not _is_plaintext(root / "state.db")
+
+
+def test_interrupted_attempt_with_a_journal_still_resumes(home, monkeypatch):
+    """Sticky only stops a fresh attempt; a half-converted home must still finish."""
+    root = home.root
+
+    def crash(point):
+        if point == "verified":
+            raise _Crash
+
+    transition = _migrate._transition
+    monkeypatch.setattr(_migrate, "_transition", crash)
+    with pytest.raises(_Crash):
+        dbcrypt.install(home=root)
+    monkeypatch.setattr(_migrate, "_transition", transition)
+    _record(root, "auth_interrupted")
     assert _migrate.journal_path(root).exists()
     assert dbcrypt.install(home=root) is True
     assert not _migrate.journal_path(root).exists()
@@ -979,7 +1207,7 @@ def test_unschedule_clears_the_record_and_allows_a_new_attempt(home):
     root = home.root
     _record(root, "attempting")
     assert dbcrypt.install(home=root) is False
-    assert _raw_outcome(root) == "source_unavailable"
+    assert _raw_outcome(root) == "auth_interrupted"
     _release_process_state(root)
     _migrate.unschedule(root)
     assert not (root / "mordred" / _startup.RECORD_NAME).exists()
