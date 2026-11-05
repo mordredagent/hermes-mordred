@@ -14,7 +14,9 @@ See ``docs/dev/STATE_DB_ENCRYPTION.md``.
 from __future__ import annotations
 
 from ._capability import (
+    DatabaseIntent,
     DatabaseStatus,
+    database_intent,
     database_status,
     diagnose_database,
 )
@@ -29,9 +31,11 @@ from ._runtime import (
 )
 
 __all__ = [
+    "DatabaseIntent",
     "DatabaseStatus",
     "arm",
     "armed",
+    "database_intent",
     "database_status",
     "diagnose_database",
     "install",
