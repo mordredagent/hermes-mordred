@@ -94,12 +94,19 @@ Key policy:
   >=80% and strict mypy. Drafts run critical feedback plus CI-tool tests.
 - The optional macOS worker runs the complete default suite, coverage, typing
   and status guard; drafts retain critical feedback and the status guard.
-  It uses `macos-15-intel`: hosted macOS 26 ARM and Intel pools repeatedly
-  failed runner acquisition on 2026-11-04. The job/check identity, Python floor
-  and complete Swift/TPM validation packs remain unchanged. Native builds and
-  dependencies are exercised on macOS 15 Intel; hosted ARM and macOS 26
-  compilation are not established by this fallback. Local ARM results and live-device acceptance
-  remain separate evidence; see the [delivery record](../superpowers/reports/2026-11-04-maintenance-performance.md).
+  It uses the supported `macos-26` ARM64 runner, restoring the original macOS
+  26 ARM validation target. A temporary macOS 15 Intel fallback followed hosted
+  runner-acquisition failures on 2026-11-04. The post-#295 dev run then failed
+  existing elapsed-time budgets on that fallback in both
+  [attempt 1](https://github.com/mordredagent/hermes-mordred/actions/runs/41933231755/attempts/1)
+  and [attempt 2](https://github.com/mordredagent/hermes-mordred/actions/runs/41933231755/attempts/2).
+  All test selectors, performance limits, timeouts, coverage floors, worker/check
+  identities, the Python floor and complete Swift/TPM packs are retained. Fresh
+  ARM runner acquisition and complete selected checks must succeed before
+  acceptance; runner availability is not assumed. Intel results and live-device
+  qualification remain separate evidence; see the
+  [delivery record](../superpowers/reports/2026-11-04-maintenance-performance.md)
+  and GitHub's [supported runner labels](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 - Ordinary/draft Windows requests use one worker; final uses four isolated
   Windows runners. Ordinary workers retain complete mapped modules and remaining
   critical cases. Final workers cover all 84 frozen native modules once; routine

@@ -149,13 +149,20 @@ def test_connector_error_reports_connection_failure(ask_local, monkeypatch):
 
 
 def test_closed_port_reports_connection_failure(ask_local):
-    # Keep ownership until the request completes: no other peer can reuse this port.
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as refused:
-        refused.bind(("127.0.0.1", 0))
-        origin = f"http://127.0.0.1:{refused.getsockname()[1]}"
-        started = time.monotonic()
-        result, _ = ask_local(origin + "/v1", timeout=10)
-        elapsed = time.monotonic() - started
+    # A bound-only socket can silently drop SYNs on macOS. Reserve a connected
+    # client port instead: it has no listener, and both live peers retain ownership.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        with socket.create_connection(listener.getsockname(), timeout=10) as refused, listener.accept()[0]:
+            origin = f"http://127.0.0.1:{refused.getsockname()[1]}"
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as duplicate:
+                with pytest.raises(OSError) as occupied:
+                    duplicate.bind(refused.getsockname())
+                assert occupied.value.errno == errno.EADDRINUSE
+            started = time.monotonic()
+            result, _ = ask_local(origin + "/v1", timeout=10)
+            elapsed = time.monotonic() - started
     assert result["error"] == "local_llm_unavailable"
     assert result["detail"]["failure"] == "connection_failed", (
         f"failure={result['detail']['failure']}, elapsed={elapsed:.3f}s"

@@ -1220,10 +1220,12 @@ def _resolve_windows_memory_step(
     Unreadable, unsafe or broken custody is ``"blocked"`` (manual repair, never
     reset); a missing CNG helper is ``"manual"``; an opt-out is respected.
     """
+    from .._core._config_io import passive_canonical_reads
     from ._windows_memory import observe
     from ._windows_status import setup_memory_state
 
-    action, detail = setup_memory_state(observe(home, blocking=False))
+    with passive_canonical_reads():
+        action, detail = setup_memory_state(observe(home, blocking=False))
     if action is not None:
         return StepResult(_STEP_MEMORY_ENCRYPTION, action, detail)
     return _run_gated_encryption_step(
