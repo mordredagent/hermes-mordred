@@ -76,6 +76,7 @@ def test_database_intent_is_lstat_only_and_separates_marker_from_pending(tmp_pat
         assert observed == module.DatabaseIntent(**{**dict.fromkeys(names, False), field: True}, unsafe=False)
         assert module.database_intent(home / "profiles/work") == observed, "a profile observes its root's intent"
         (directory / name).unlink()
+    monkeypatch.undo()  # Status may read package metadata: Windows checks the driver distribution.
     assert not module.database_status(home).configured
     assert dbcrypt.DatabaseIntent is module.DatabaseIntent
     assert dbcrypt.database_intent is module.database_intent
