@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3 as stdlib_sqlite3
 
 import pytest
 
@@ -42,6 +43,69 @@ def test_native_offline_commands_use_ex_without_runtime_provider(native_root, mo
     assert calls == ([] if dry_run else [command])
     assert backend.calls == []
     assert {path: path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses the POSIX authority fixture; Windows native proof is explicit")
+@pytest.mark.parametrize("command", ["encrypt", "decrypt"])
+def test_cli_and_startup_share_convert_home(native_root, monkeypatch, command):
+    from mordred_hermes import dbcrypt
+    from mordred_hermes._core._database_lifecycle import ExclusiveLease, current_thread_exclusive_leases
+    from mordred_hermes.dbcrypt import _maintenance, _migrate, _startup
+    from mordred_hermes.wizard import databases_cli
+
+    root, backend, _, _ = native_root
+    dbcrypt.marker_path(root).unlink()
+    _migrate.schedule(root)
+    calls = []
+
+    def convert(home, *, lease, decrypting):
+        assert home == root and type(lease) is ExclusiveLease
+        assert current_thread_exclusive_leases() == (lease,), "the caller owns the only exclusive lease"
+        calls.append(decrypting)
+        return _migrate.Report()
+
+    monkeypatch.setattr(_maintenance, "convert_home", convert)
+    assert getattr(databases_cli, "databases_" + command)(home=root) == 0
+    assert calls == [command == "decrypt"]
+    calls.clear()
+    assert _startup._attempt(root) is None
+    assert calls == [False], "startup only ever encrypts"
+    assert backend.calls == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses the POSIX authority fixture; Windows native proof is explicit")
+def test_cli_stops_on_a_refused_source_and_holders_with_the_same_text(native_root, monkeypatch, capsys):
+    """The typed subclasses keep each message and stay inside the CLI's handled errors."""
+    from mordred_hermes import dbcrypt
+    from mordred_hermes.dbcrypt import _migrate
+    from mordred_hermes.wizard import databases_cli
+
+    root, backend, _, _ = native_root
+    assert issubclass(_migrate.NativeSourceUnavailable, RuntimeError)
+    assert issubclass(_migrate.DatabasesHeldOpen, RuntimeError)
+    dbcrypt.marker_path(root).unlink()
+    connection = stdlib_sqlite3.connect(root / "state.db")
+    connection.execute("CREATE TABLE messages (body TEXT)")
+    connection.commit()
+    connection.close()
+    (root / "state.db").chmod(0o600)
+    suffix = ". Stop Hermes and resolve the refusal before retrying.\n"
+
+    backend.denied_reason = "user_cancelled"
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    assert databases_cli.databases_encrypt(home=root) == 1
+    assert capsys.readouterr().err == (
+        "error: database maintenance stopped: TPM memory key unavailable or invalid; "
+        "restore access to the original TPM" + suffix
+    )
+
+    backend.denied_reason = None
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [4242])
+    assert databases_cli.databases_encrypt(home=root) == 1
+    assert capsys.readouterr().err == (
+        "error: database maintenance stopped: the databases are open in other processes (pids [4242]); "
+        "stop Hermes first" + suffix
+    )
 
 
 @pytest.mark.parametrize("directory_mode", [0o700, 0o755])
