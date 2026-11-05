@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from weakref import WeakKeyDictionary
 
 from ..._private_fs import PrivateFSError
+from ...keyvault._reset_authority import ResetAuthorization, check_reset_access
 
 if TYPE_CHECKING:
     from ...keyvault.wrap import NativeBackend
@@ -557,7 +558,9 @@ def _checked_archive_lock(lock: PosixArchiveLock) -> _ArchiveLockRecord:
 
 
 @contextlib.contextmanager
-def _posix_archive_lock(root: Path, *, allow_pending: bool = False) -> Iterator[PosixArchiveLock]:
+def _posix_archive_lock(
+    root: Path, *, allow_pending: bool = False, _reset: ResetAuthorization | None = None
+) -> Iterator[PosixArchiveLock]:
     import fcntl
 
     from ...keyvault import _storage
@@ -565,6 +568,8 @@ def _posix_archive_lock(root: Path, *, allow_pending: bool = False) -> Iterator[
 
     if _windows():
         raise StoreError("store_path_unsafe")
+    if root.name == "telegram" and root.parent.name == "mordred":
+        check_reset_access(root.parent.parent, _reset, component="telegram")
     if root.exists() or root.is_symlink():
         _archive_identity(root, directory=True)
     else:
@@ -593,6 +598,8 @@ def _posix_archive_lock(root: Path, *, allow_pending: bool = False) -> Iterator[
         )
         try:
             _checked_archive_lock(lock)
+            if root.name == "telegram" and root.parent.name == "mordred":
+                check_reset_access(root.parent.parent, _reset, component="telegram")
             if not allow_pending and root.name == "telegram" and root.parent.name == "mordred":
                 assert_no_pending_forget(root.parent.parent)
             yield lock
