@@ -1071,6 +1071,19 @@ uninstall
 offline recovery command; it takes exclusive database exclusion before key
 authentication and publishes only a new, verified plaintext output.
 
+`databases backup recover` finishes an interrupted registered-backup publication
+or deletion under exclusive exclusion and native authentication; with no journal
+it is a no-op without authentication. `--abandon` previews (exit 1) and
+`--abandon --yes` removes only the journal; it never deletes files, refuses
+malformed, other-generation and deletion journals, and prints the destination
+and staging paths that may remain as unmanaged encrypted copies. When such a copy
+may remain, removing the journal also requires `--accept-unmanaged-copy`. While the
+journal exists, backup, restore, delete, export and component maintenance refuse
+with a message naming the command; runtime access continues. An ordinary failure
+before publication releases the staging file and the journal automatically;
+crashes and uncertain commits retain them. A destination path already registered
+to a missing or different file is refused before anything is published.
+
 `databases status` reports configured intent, capability, dependency count (or
 unknown), and authentication **not checked**, without SQL, native authentication,
 or writes. `databases diagnose` explicitly authenticates existing authority and
@@ -6919,6 +6932,7 @@ incomplete journals, unavailable destinations and other generations refuse.
 retained backup to a new plaintext database after reinstalling Mordred on the same
 physical home/device with the retained key and helper. Export verifies a private
 staging file before no-overwrite publication; it never modifies the backup.
+An incomplete backup journal is resolved with `databases backup recover`.
 
 `--purge-data` refuses before restoration when known encrypted backups would
 outlive their keys; it never implicitly decrypts or deletes backups. Helper

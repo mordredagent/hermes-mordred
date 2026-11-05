@@ -57,6 +57,7 @@ def _display(value: object, limit: int = 300) -> str:
 
 _HINTS = {
     "busy": "stop Hermes first (a runtime holds the database lease)",
+    "backup_recovery_required": "stop Hermes, then run `hermes-mordred databases backup recover`",
     "store_missing": "start Hermes once so a fresh store is created, stop it, then restore",
 }
 _UNAVAILABLE_RESTORE_HINT = (
@@ -73,11 +74,13 @@ def _refused(code: object, *, hint: str | None = None) -> int:
 
 
 def _refusal_code(exc: BaseException) -> str:
-    from .._core._database_contracts import DatabaseBusy
+    from .._core._database_contracts import BackupRecoveryRequired, DatabaseBusy
     from ..activity._gate import ActivityRefused
 
     if isinstance(exc, ActivityRefused):
         return exc.code
+    if isinstance(exc, BackupRecoveryRequired):  # the restore preview scope runs outside _refusing()
+        return "backup_recovery_required"
     return "busy" if isinstance(exc, DatabaseBusy) else "store_unavailable"
 
 

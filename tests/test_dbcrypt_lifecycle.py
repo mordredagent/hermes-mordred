@@ -589,6 +589,21 @@ def test_backup_export_startup_is_offline_and_does_not_take_runtime_lease(tmp_pa
     )
 
 
+@pytest.mark.parametrize("launcher", [["hermes-mordred"], ["hermes", "mordred"]])
+@pytest.mark.parametrize("flags", [[], ["--abandon"], ["--abandon", "--yes"], ["--yes"]])
+def test_backup_recover_startup_is_offline_and_does_not_take_runtime_lease(tmp_path, monkeypatch, launcher, flags):
+    test_maintenance_startup_does_not_execute_pending_conversions(
+        tmp_path, monkeypatch, [*launcher, "databases", "backup", "recover", *flags]
+    )
+
+
+@pytest.mark.parametrize("arguments", [["--bogus"], ["extra"], ["--abandon=1"]])
+def test_malformed_backup_recover_is_not_a_startup_exemption(arguments):
+    from mordred_hermes.dbcrypt._cli import maintenance_process
+
+    assert not maintenance_process(["hermes-mordred", "databases", "backup", "recover", *arguments])
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

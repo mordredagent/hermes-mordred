@@ -321,6 +321,10 @@ class _Transaction:
         with handle:
             raise PrivateFSError("unsafe", "expected_absent")
 
+    def finish_interrupted_rename(self, name: str, destination: str) -> None:
+        # The native rename is one atomic step, so no two-name state can exist.
+        raise PrivateFSError("unsupported", "finish_interrupted_rename")
+
     def rename_file(self, name: str, destination: str, *, expected_identity: FileIdentity | None = None) -> None:
         source_path = self.directory.path(name)
         destination_path = self.directory.path(destination)

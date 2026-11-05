@@ -486,6 +486,30 @@ These commands leave the source unchanged. Output is a verified plaintext DB;
 existing files are never overwritten. Keep it private. This is export, not an
 automatic replacement of a live Hermes database.
 
+If a backup was interrupted, `databases status` shows `backup recovery: required`
+and later backup, restore and export commands refuse. Stop Hermes, then finish it,
+or forget it if the destination cannot be finished:
+
+```sh
+hermes-mordred databases backup recover
+hermes-mordred databases backup recover --abandon        # preview only
+hermes-mordred databases backup recover --abandon --yes  # removes only the journal
+```
+
+`--abandon --yes` keeps the journal when a copy may remain, and the preview names
+the flag that accepts it, `--accept-unmanaged-copy`. If `recover` can still finish
+the backup, prefer that: an accepted copy loses its key dependency.
+
+Abandoning never deletes files. A `<destination>.mordred-backup-*` file or a
+published destination left behind is an unmanaged encrypted copy: key teardown
+will not detect it, and its retention and key are your responsibility. A journal
+that is unreadable or belongs to another generation is refused by both commands;
+inspect `<root>/mordred/db-backups.journal.json` and remove it by hand only once you have
+accounted for the destination and staging paths it names. Never remove a journal
+containing `"operation": "delete"` by hand: if its backup file is already gone, the
+registry keeps an entry with no file, and uninstall and key teardown refuse with
+no command to clear it yet.
+
 `--purge-data` refuses before restoration if known encrypted backups would be
 stranded. Export or manage those backups separately; uninstall never silently
 converts or deletes them. Unregistered external/offline copies cannot be

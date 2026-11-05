@@ -17,6 +17,10 @@ class DatabaseBusy(DatabaseRefused):
     """A runtime or maintenance operation already owns this database domain."""
 
 
+class BackupRecoveryRequired(DatabaseRefused):
+    """An interrupted registered-backup operation must be recovered or abandoned first."""
+
+
 @dataclass(frozen=True)
 class RootIdentity:
     platform: Literal["darwin", "linux", "win32"]

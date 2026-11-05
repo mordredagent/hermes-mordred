@@ -111,10 +111,16 @@ def _passive_or_maintenance(  # noqa: C901, PLR0915 - finite CLI grammar
         item = child(database, verb)
         if verb in {"encrypt", "decrypt"}:
             item.add_argument("--dry-run", action="store_true")
-    export = child(child(database, "backup").add_subparsers(required=True), "export")
+    backup = child(database, "backup").add_subparsers(required=True)
+    export = child(backup, "export")
     export.add_argument("--source", required=True)
     export.add_argument("--output", required=True)
     export.add_argument("--member")
+    # Offline recovery owns the exclusive lease; keep aligned with wizard._cli_parsers._add_databases.
+    recover = child(backup, "recover")
+    recover.add_argument("--abandon", action="store_true")
+    recover.add_argument("--yes", action="store_true")
+    recover.add_argument("--accept-unmanaged-copy", action="store_true")
     # Offline restore owns the exclusive lease; a runtime shared lease would refuse it.
     # Keep aligned with wizard.activity_store_cli.add_parsers("restore").
     restore = child(child(sub, "activity").add_subparsers(required=True), "restore")

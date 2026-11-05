@@ -92,6 +92,17 @@ def database_intent(home: Path) -> DatabaseIntent:
     )
 
 
+def backup_recovery_required(home: Path) -> bool | None:
+    """Metadata-only: is an interrupted backup journal present? None when unreadable."""
+    try:
+        (_root(home) / "mordred" / "db-backups.journal.json").lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return None
+    return True
+
+
 def _driver_present() -> bool:
     try:
         return importlib.util.find_spec("sqlcipher3") is not None

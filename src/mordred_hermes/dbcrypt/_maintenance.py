@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .._core._database_contracts import DatabaseRefused, NativeSnapshot
+from .._core._database_contracts import BackupRecoveryRequired, DatabaseRefused, NativeSnapshot
 from .._core._database_lifecycle import ExclusiveLease, current_thread_exclusive_leases
 from ..keyvault._database_authority import (
     CheckedDatabaseDomain,
@@ -227,6 +227,9 @@ class MaintenanceScope:
             if observe_database_source(root=self._domain.root) != self._snapshot:
                 raise DatabaseRefused("maintenance native source changed")
             ExclusiveLease.assert_held(self._lease, self._domain.root)
+        except BackupRecoveryRequired:
+            self._invalidate()
+            raise
         except Exception:
             self._invalidate()
             raise DatabaseRefused("maintenance source or exclusive lease changed") from None
