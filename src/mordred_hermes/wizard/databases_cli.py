@@ -41,13 +41,9 @@ def databases_diagnose(home: Path | None = None) -> int:
 
 def _convert(*, decrypting: bool, dry_run: bool, home: Path | None) -> int:
     from .._core._database_lifecycle import acquire_exclusive
-    from ..dbcrypt import _migrate, arm, database_status
-    from ..dbcrypt._marker import LegacyMarker, Marker, read_marker
-    from ..keyvault._database_authority import (
-        enroll_database_source,
-        require_database_memory_enabled,
-        resolve_database_domain,
-    )
+    from ..dbcrypt import _migrate, database_status
+    from ..dbcrypt._maintenance import convert_home
+    from ..keyvault._database_authority import resolve_database_domain
 
     try:
         base = resolve_database_domain(home or _home()).root
@@ -61,16 +57,7 @@ def _convert(*, decrypting: bool, dry_run: bool, home: Path | None) -> int:
             print("Dry run: metadata only; no authentication or changes.")
             return 0
         with acquire_exclusive(base) as lease:
-            if not decrypting:
-                require_database_memory_enabled(root=base)
-            marker = read_marker(base)
-            if isinstance(marker, LegacyMarker):
-                _migrate.adopt_legacy(base, lease=lease)
-            elif not isinstance(marker, Marker) and not decrypting:
-                enroll_database_source(root=base, lease=lease)
-            # The conversion owner authenticates exactly under actual EX. A
-            # runtime SH provider cannot authorize this offline operation.
-            report = _migrate.decrypt_all(base, None) if decrypting else _migrate.migrate(base, None, arm=arm)
+            report = convert_home(base, lease=lease, decrypting=decrypting)
     except (OSError, RuntimeError, ValueError) as exc:
         _term.emit_error(f"database maintenance stopped: {exc}. Stop Hermes and resolve the refusal before retrying.")
         return 1
