@@ -326,7 +326,7 @@ class TestResetDegradedPaths:
         assert not _storage.reset_journal_path(root).exists()
         assert "incomplete" in capsys.readouterr().err
 
-    def test_unknown_native_delete_outcome_refuses_replay_from_retained_metadata(self, tmp_path: Path) -> None:
+    def test_partial_native_delete_can_be_retried_from_retained_metadata(self, tmp_path: Path) -> None:
         root = _build_keyvault(tmp_path, ["default", "payments"])
         backend = _FailsOneDeleteOnceBackend(_physical(root, "payments"))
 
@@ -338,9 +338,9 @@ class TestResetDegradedPaths:
 
         second_rc = keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True)
 
-        assert second_rc == 1
-        assert root.exists()
-        assert _storage.reset_journal_path(root).exists()
+        assert second_rc == 0
+        assert not (root / "meta.json").exists()
+        assert not _storage.reset_journal_path(root).exists()
 
     def test_rmtree_failure_reports_cleanly_without_traceback(
         self,

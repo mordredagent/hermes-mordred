@@ -504,3 +504,167 @@ def test_recover_after_reset_retains_shared_helpers_and_backup(tmp_path, fake_na
     )
     assert retained.read_bytes() == b"KEEP SHARED SOURCE"
     assert backup_path.read_bytes() == blob
+
+
+def _native_target(root):
+    from mordred_hermes.keyvault._native_key_id import scoped_native_key_id
+    from mordred_hermes.keyvault._seckey_errors import _application_tag
+
+    helper = root / "sekey"
+    helper.mkdir(mode=0o700)
+    blob = helper / (_application_tag(scoped_native_key_id(root, "default")).hex() + ".bin")
+    _storage.atomic_write(blob, b"ORIGINAL NATIVE TARGET")
+    return blob
+
+
+def _failing_delete_once(monkeypatch, backend, on_failure=None):
+    real = backend.delete_enclave_key
+    state = {"fail": True}
+
+    def delete(key_id):
+        if state["fail"]:
+            state["fail"] = False
+            if on_failure is not None:
+                on_failure(real, key_id)
+            raise RuntimeError("temporarily unavailable")
+        real(key_id)
+
+    monkeypatch.setattr(backend, "delete_enclave_key", delete)
+
+
+def test_failed_native_deletion_can_be_retried(tmp_path, monkeypatch):
+    root = _build_keyvault(tmp_path, ["default"])
+    blob = _native_target(root)
+    backend = FakeBackend()
+    _failing_delete_once(monkeypatch, backend)
+
+    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
+    assert _storage.reset_journal_path(root).exists()
+    assert blob.exists()
+
+    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+    assert not _storage.reset_journal_path(root).exists()
+    assert not (root / "meta.json").exists()
+
+
+def test_native_deletion_that_finished_before_interruption_resumes(tmp_path, monkeypatch):
+    root = _build_keyvault(tmp_path, ["default"])
+    blob = _native_target(root)
+    backend = FakeBackend()
+
+    def delete_then_lose_the_outcome(real, key_id):
+        real(key_id)
+        blob.unlink()
+
+    _failing_delete_once(monkeypatch, backend, on_failure=delete_then_lose_the_outcome)
+
+    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
+    assert not blob.exists()
+
+    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+    assert not _storage.reset_journal_path(root).exists()
+
+
+def test_native_deletion_retry_refuses_a_replaced_target(tmp_path, monkeypatch):
+    root = _build_keyvault(tmp_path, ["default"])
+    blob = _native_target(root)
+    backend = FakeBackend()
+    _failing_delete_once(monkeypatch, backend)
+
+    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
+    _storage.atomic_write(blob, b"REPLACED NATIVE TARGET")
+    deletes_before = [call for call in backend.calls if call[0] == "delete"]
+
+    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
+    assert [call for call in backend.calls if call[0] == "delete"] == deletes_before
+    assert _storage.reset_journal_path(root).exists()
+    assert (root / "meta.json").exists()
+
+
+def _restored_plaintext_store(home, monkeypatch):
+    from mordred_hermes.dbcrypt import _migrate
+    from mordred_hermes.dbcrypt._authority import Authority
+    from mordred_hermes.dbcrypt._connection import open_protected
+    from mordred_hermes.imports import _schema
+
+    path = home / "plugin-data/mordred/mordred.db"
+    path.parent.mkdir(parents=True, mode=0o700)
+    authority = Authority.acquire(home)
+    try:
+        conn = open_protected(path, authority=authority)
+        for statement in _schema.STATEMENTS:
+            conn.execute(statement)
+        conn.commit()
+        conn.close()
+    finally:
+        authority.close()
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    return path
+
+
+def test_uninstall_reset_retains_the_restored_plaintext_database(native_root, monkeypatch, capsys):
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
+    from mordred_hermes.dbcrypt import _migrate, _uninstall
+
+    home, _, _, _ = native_root
+    root = _build_keyvault(home, ["default"])
+    path = _restored_plaintext_store(home, monkeypatch)
+    backend = FakeBackend()
+
+    with acquire_exclusive(home) as lease:
+        _migrate.decrypt_all(home, None)
+        assert path.read_bytes().startswith(b"SQLite format 3")
+        before = path.read_bytes()
+        with _uninstall.verified(_uninstall.preflight(home, lease=lease, purge=True), lease=lease) as permit:
+            rc = keyvault_cli._reset_with_memory_guard(
+                home=home, backend=backend, assume_yes=True, database_lease=lease, uninstall=permit
+            )
+
+    assert rc == 0
+    assert path.read_bytes() == before
+    assert not _storage.reset_journal_path(root).exists()
+    assert not (root / "meta.json").exists()
+    assert any(call[0] == "delete" for call in backend.calls)
+    output = capsys.readouterr().out
+    assert "history removed" not in output
+    assert "keep their imported history" in output
+
+
+def test_plaintext_store_still_refuses_reset_without_uninstall_authority(native_root, monkeypatch):
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
+    from mordred_hermes.dbcrypt import _migrate
+
+    home, _, _, _ = native_root
+    root = _build_keyvault(home, ["default"])
+    _restored_plaintext_store(home, monkeypatch)
+    backend = FakeBackend()
+
+    with acquire_exclusive(home) as lease:
+        _migrate.decrypt_all(home, None)
+        rc = keyvault_cli._reset_with_memory_guard(home=home, backend=backend, assume_yes=True, database_lease=lease)
+
+    assert rc == 1
+    assert not any(call[0] == "delete" for call in backend.calls)
+    assert (root / "meta.json").exists()
+
+
+def test_expired_uninstall_authority_cannot_skip_history_erasure(native_root, monkeypatch):
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
+    from mordred_hermes.dbcrypt import _migrate, _uninstall
+
+    home, _, _, _ = native_root
+    root = _build_keyvault(home, ["default"])
+    _restored_plaintext_store(home, monkeypatch)
+    backend = FakeBackend()
+
+    with acquire_exclusive(home) as lease:
+        _migrate.decrypt_all(home, None)
+        with _uninstall.verified(_uninstall.preflight(home, lease=lease, purge=True), lease=lease) as permit:
+            expired = permit
+        rc = keyvault_cli._reset_with_memory_guard(
+            home=home, backend=backend, assume_yes=True, database_lease=lease, uninstall=expired
+        )
+
+    assert rc == 1
+    assert not any(call[0] == "delete" for call in backend.calls)
+    assert (root / "meta.json").exists()

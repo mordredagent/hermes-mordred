@@ -658,4 +658,5 @@ def _reset_keyvault(
         prompt_io=prompt_io,
         assume_yes=assume_yes,
         database_lease=database_lease,
+        uninstall=uninstall,
     )

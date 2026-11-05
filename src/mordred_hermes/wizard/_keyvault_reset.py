@@ -19,6 +19,7 @@ from ..keyvault._reset_files import (
     snapshot_files,
 )
 from ..keyvault._reset_journal import _encode_reset_journal, _load_reset_journal, _ResetJournal
+from ..keyvault._uninstall_authority import UninstallAuthorization, check_authorization
 from . import _term
 
 
@@ -293,7 +294,13 @@ def _prepare(home: Path, assume_yes: bool, prompt_io: Any) -> _ResetJournal | No
 
 
 def coordinate_reset(  # noqa: C901, PLR0912, PLR0915 - explicit destructive stage machine
-    *, home: Path, backend: Any, prompt_io: Any, assume_yes: bool, database_lease: ExclusiveLease
+    *,
+    home: Path,
+    backend: Any,
+    prompt_io: Any,
+    assume_yes: bool,
+    database_lease: ExclusiveLease,
+    uninstall: UninstallAuthorization | None = None,
 ) -> int:
     from ..imports._reset import erase_reset_history
     from ..keyvault._reset_authority import reset_authorization
@@ -320,8 +327,14 @@ def coordinate_reset(  # noqa: C901, PLR0912, PLR0915 - explicit destructive sta
             _check(root, journal)
             stage = state["stage"]
             if stage == "database":
-                with reset_authorization(home, database_lease) as authorization:
-                    erase_reset_history(home, lease=database_lease, _reset=authorization)
+                if uninstall is not None:
+                    # Uninstall has restored and retains this database in
+                    # plaintext, so its adopted marker is gone by design. Only
+                    # live authority may skip the erasure; it never adds targets.
+                    check_authorization(uninstall, root=_sources(home)[0], lease=database_lease, purpose="delete")
+                else:
+                    with reset_authorization(home, database_lease) as authorization:
+                        erase_reset_history(home, lease=database_lease, _reset=authorization)
             elif stage in {"mail", "telegram"}:
                 handler = _retire_mail if stage == "mail" else _retire_telegram
                 component_journal = (
@@ -354,12 +367,14 @@ def coordinate_reset(  # noqa: C901, PLR0912, PLR0915 - explicit destructive sta
                         progress = state["native"]["key:" + key_id]
                         if progress == "deleted":
                             continue
-                        if progress == "deleting":
-                            raise DatabaseRefused("native key deletion outcome is unknown; reset evidence retained")
                         expected_native = {
                             name: state["credentials"][name] for name in _native_observations(home, selector)
                         }
-                        check_observations(home / "mordred", expected_native)
+                        # "deleting" means an earlier attempt failed or stopped
+                        # at an unknown point. Deletion is idempotent under the
+                        # checked owner, so repeat it: a missing target may be
+                        # that attempt's result, but a replaced one still refuses.
+                        check_observations(home / "mordred", expected_native, missing_ok=progress == "deleting")
                         from ..keyvault._native_key_id import bind_backend_to_root
 
                         try:
@@ -392,6 +407,10 @@ def coordinate_reset(  # noqa: C901, PLR0912, PLR0915 - explicit destructive sta
     except Exception as exc:
         _term.emit_error(f"Keyvault reset is incomplete ({exc}); recovery evidence retained. Retry reset after repair.")
         return 1
+    if uninstall is not None:
+        print("Keyvault reset — profile keys and Mail and Telegram credentials removed.")
+        print("Restored databases keep their imported history.")
+        return 0
     print("Keyvault reset — profile keys, Mail and Telegram credentials and all their local history removed.")
     print("Run `hermes-mordred keyvault init` to create a new key.")
     return 0
