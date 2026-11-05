@@ -2205,6 +2205,26 @@ completion acceptance matrix track later work and current open gates.
   Evidence:
   `~/.codex/artifacts/mordred-connected-reset-20261105-9928ffe8/`.
 
+- **2026-11-05 — Installed coordinated reset verification.** Built the
+  `0.3.0a5` wheel from local integration commit `7c274593b` and replaced the
+  installed `0.3.0a3` PM member, preserving the recorded
+  `extension,keyvault,macos,telegram` extras. Rebuilt the selected environment
+  with `hermes pm install venv`; the installed reset modules matched the source
+  bytes. Repaired the stale standalone launcher to resolve PM's committed
+  environment at startup. The existing legacy database marker needed private
+  permissions and authenticated adoption through `databases encrypt`, which
+  reported **0 databases converted**. Hermes and Mordred version commands,
+  plugin listing (`mordred` enabled), passive status and authenticated database
+  diagnosis passed on the installed Python **3.14.7** runtime.
+
+  Preloading the installed package into the repository Python **3.11.15** test
+  runner, the complete keyvault-reset, connected-reset and Windows-refusal
+  modules passed **73 tests**. The explicit real Secure Enclave helper suite
+  passed **1 test**, including two provision/reset cycles, against a retained
+  private synthetic home. The critical preset passed **24 tests** before
+  deployment. No production keyvault reset or account retirement was run.
+  This does not extend the earlier Linux or full Python 3.14 acceptance claims.
+
 - **2026-11-05 — E2E standalone tool/cron sender guard: automated candidate verification; live browser gate pending.**
   Candidate branch `fix/e2e-standalone-senders` protects Hermes's common
   `_send_to_platform` seam without changing Hermes, the extension or the v3
