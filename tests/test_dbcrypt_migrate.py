@@ -216,6 +216,45 @@ def test_a_scheduled_conversion_runs_at_startup_then_the_shim_is_installed(
     assert sqlite3.connect(str(home / "state.db")).execute("SELECT count(*) FROM messages").fetchone() == (3,)
 
 
+def test_unschedule_removes_only_the_schedule_and_its_record(home: Path) -> None:
+    from mordred_hermes.dbcrypt._startup import RECORD_NAME
+
+    before = (home / "state.db").read_bytes()
+    _migrate.schedule(home)
+    record = home / "mordred" / RECORD_NAME
+    record.write_text('{"version":1,"outcome":"busy"}')
+    record.chmod(0o600)
+    _migrate.unschedule(home)
+    assert not _migrate.pending_path(home).exists()
+    assert not record.exists()
+    assert (home / "state.db").read_bytes() == before
+    assert not dbcrypt.marker_path(home).exists()
+    _migrate.unschedule(home)  # Idempotent, also when nothing is scheduled.
+
+
+def test_unschedule_without_a_mordred_directory_creates_nothing(tmp_path: Path) -> None:
+    _migrate.unschedule(tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("name", ["journal", "marker"])
+def test_unschedule_refuses_when_a_journal_or_marker_exists(home: Path, name: str) -> None:
+    from mordred_hermes.dbcrypt._startup import RECORD_NAME
+
+    _migrate.schedule(home)
+    record = home / "mordred" / RECORD_NAME
+    record.write_text('{"version":1,"outcome":"busy"}')
+    record.chmod(0o600)
+    path = _migrate.journal_path(home) if name == "journal" else dbcrypt.marker_path(home)
+    path.write_bytes(b"{}\n")
+    path.chmod(0o600)
+    with pytest.raises(_migrate.MigrationError):
+        _migrate.unschedule(home)
+    assert _migrate.pending_path(home).exists()
+    assert record.exists()
+    assert path.read_bytes() == b"{}\n"
+
+
 def test_without_a_key_the_scheduled_conversion_waits(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "sqlite3", stdlib_sqlite3)
     monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))

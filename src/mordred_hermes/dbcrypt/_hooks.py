@@ -159,7 +159,8 @@ def _pending_line(home: Path) -> str:
         )
     return (
         "## Hermes's databases (Mordred)\nEncryption of Hermes's databases is scheduled but not active yet: "
-        "the conversation history remains unencrypted. Pending conversion requires explicit supported maintenance."
+        "the conversation history remains unencrypted. It is converted at the next Hermes start when that is "
+        "possible; otherwise the pending conversion requires explicit supported maintenance."
     )
 
 

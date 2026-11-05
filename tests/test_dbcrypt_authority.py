@@ -673,7 +673,7 @@ def test_fork_refuses_before_entering_inherited_thread_lock(native_root, operati
         provider.close()
 
 
-@pytest.mark.parametrize("kind", ["journal", "encrypt-pending", "decrypt-pending"])
+@pytest.mark.parametrize("kind", ["journal", "decrypt-pending"])
 def test_default_startup_without_marker_preserves_recovery_state(tmp_path, monkeypatch, kind):
     from mordred_hermes import dbcrypt
     from mordred_hermes.dbcrypt import _migrate, _shim
@@ -686,7 +686,6 @@ def test_default_startup_without_marker_preserves_recovery_state(tmp_path, monke
     prepared.write_bytes(b"prepared database bytes")
     state = {
         "journal": _migrate.journal_path(root),
-        "encrypt-pending": _migrate.pending_path(root),
         "decrypt-pending": _migrate.decrypt_pending_path(root),
     }[kind]
     state.write_text(
@@ -713,6 +712,41 @@ def test_default_startup_without_marker_preserves_recovery_state(tmp_path, monke
     finally:
         if dbcrypt._runtime._PROVIDER is not None:
             dbcrypt._runtime._PROVIDER.close()
+
+
+def test_default_startup_without_marker_retains_a_scheduled_conversion_it_cannot_run(tmp_path, monkeypatch):
+    """Encrypt-pending now reaches the startup seam, whose refusal keeps the files untouched."""
+    from mordred_hermes import dbcrypt
+    from mordred_hermes.dbcrypt import _locking, _migrate, _shim, _startup
+
+    root = tmp_path
+    (root / "mordred").mkdir(mode=0o700)
+    original, prepared = root / "state.db", root / "state.db.prepared"
+    original.write_bytes(b"original database bytes")
+    prepared.write_bytes(b"prepared database bytes")
+    pending = _migrate.pending_path(root)
+    pending.write_bytes(b"1\n")
+    pending.chmod(0o600)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(sys, "argv", ["hermes"])
+    monkeypatch.setattr(_shim, "is_installed", lambda: False)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
+    monkeypatch.setattr(
+        _migrate, "resume_at_startup", lambda *a, **k: pytest.fail("native startup entered legacy recovery")
+    )
+    try:
+        assert dbcrypt.install(home=root) is False
+        after = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+        assert {path: after.get(path) for path in before} == before
+        assert _startup.read_outcome(root) == "refused"  # The unknown sibling leaves the inventory incomplete.
+        assert not dbcrypt.marker_path(root).exists()
+        assert not _migrate.journal_path(root).exists()
+    finally:
+        entry = _locking._LEASES.pop(root.absolute(), None)
+        if entry is not None:
+            entry[0].__exit__(None, None, None)
 
 
 def test_explicit_native_provider_cannot_enter_legacy_install(native_root, monkeypatch):

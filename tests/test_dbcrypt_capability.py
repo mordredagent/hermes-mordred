@@ -46,6 +46,71 @@ def test_status_never_enrolls_or_unwraps(tmp_path, monkeypatch, marker):
     assert before == {p.relative_to(home): p.read_bytes() for p in home.rglob("*") if p.is_file()}
 
 
+def test_database_intent_is_lstat_only_and_separates_marker_from_pending(tmp_path, monkeypatch):
+    from mordred_hermes.dbcrypt import _key
+
+    module = capability()
+    home = tmp_path / "home"
+    assert module.database_intent(home) == module.DatabaseIntent(False, False, False, False, False)
+    assert not home.exists(), "observation never creates a home"
+    directory = home / "mordred"
+    directory.mkdir(parents=True)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("intent observation opened a file, custody or a lease")
+
+    monkeypatch.setattr(_key, "KeyProvider", forbidden)
+    real_open = Path.open
+    monkeypatch.setattr(Path, "open", forbidden)
+    monkeypatch.setattr(os, "open", forbidden)
+    names = {
+        "armed": "db-encryption.marker",
+        "encrypt_pending": "db-encryption.pending",
+        "decrypt_pending": "db-decryption.pending",
+        "journal": "db-encryption.journal.json",
+    }
+    for field, name in names.items():
+        with real_open(directory / name, "wb"):
+            pass
+        observed = module.database_intent(home)
+        assert observed == module.DatabaseIntent(**{**dict.fromkeys(names, False), field: True}, unsafe=False)
+        assert module.database_intent(home / "profiles/work") == observed, "a profile observes its root's intent"
+        (directory / name).unlink()
+    assert not module.database_status(home).configured
+    assert dbcrypt.DatabaseIntent is module.DatabaseIntent
+    assert dbcrypt.database_intent is module.database_intent
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX link metadata")
+def test_database_intent_marks_links_unsafe_and_keeps_status_configured(tmp_path):
+    module = capability()
+    directory = tmp_path / "mordred"
+    directory.mkdir()
+    (tmp_path / "elsewhere").write_bytes(b"1\n")
+    (directory / "db-encryption.pending").symlink_to(tmp_path / "elsewhere")
+    observed = module.database_intent(tmp_path)
+    assert observed.encrypt_pending and observed.unsafe
+    assert not observed.armed
+    assert module.database_status(tmp_path).configured is True
+    assert module.database_intent(tmp_path / "profiles").unsafe
+    assert module.database_intent(tmp_path / "a" / ".." / "b").unsafe
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX metadata permissions")
+def test_database_intent_treats_unobservable_metadata_as_unsafe(tmp_path, monkeypatch):
+    module = capability()
+    real = Path.lstat
+
+    def denied(path):
+        if path.name == "db-encryption.pending":
+            raise PermissionError("denied")
+        return real(path)
+
+    (tmp_path / "mordred").mkdir()
+    monkeypatch.setattr(Path, "lstat", denied)
+    assert module.database_intent(tmp_path) == module.DatabaseIntent(False, False, False, False, True)
+
+
 def test_driver_import_is_not_readiness(tmp_path, monkeypatch):
     from mordred_hermes.dbcrypt import _windows_vfs
 

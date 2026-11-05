@@ -26,7 +26,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -56,6 +56,25 @@ RETAINED_SUFFIX: Final = ".mordred-original-"
 _SIDECAR_SUFFIXES: Final = ("-wal", "-shm", "-journal")
 #: The first 8 bytes of a synced (hot-capable) SQLite rollback journal header.
 _JOURNAL_MAGIC: Final = b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7"
+
+
+class NativeSourceUnavailable(MigrationError):
+    """Native custody refused or could not resolve the database source."""
+
+
+class DatabasesHeldOpen(MigrationError):
+    """Another process has a database open, or holders could not be determined."""
+
+
+@contextlib.contextmanager
+def native_source() -> Iterator[None]:
+    """Type a custody refusal, keeping its message, for callers that give a different remedy."""
+    try:
+        yield
+    except (MigrationBusy, NativeSourceUnavailable):
+        raise
+    except MigrationError as exc:
+        raise NativeSourceUnavailable(str(exc)) from exc
 
 
 @dataclass(frozen=True)
@@ -689,8 +708,9 @@ def _authenticate(
         from ._maintenance_windows import require_qualified
 
         require_qualified()
-    snapshot = custody.observe_database_source(root=root)
-    key = derive(custody.load_database_source(root=root, expected=snapshot))
+    with native_source():
+        snapshot = custody.observe_database_source(root=root)
+        key = derive(custody.load_database_source(root=root, expected=snapshot))
     if supplied is not None and key != supplied:
         raise MigrationError("supplied database key does not belong to the native source")
     marker = read_marker(root)
@@ -746,9 +766,9 @@ def _refuse_if_open(todo: list[Database], holders_of: Callable[[list[Path]], lis
         return
     busy = (holders_of or holders)([d.path for d in todo])
     if busy is None:
-        raise MigrationError("could not check database holders (lsof or platform inspection failed)")
+        raise DatabasesHeldOpen("could not check database holders (lsof or platform inspection failed)")
     if busy:
-        raise MigrationError(f"the databases are open in other processes (pids {busy}); stop Hermes first")
+        raise DatabasesHeldOpen(f"the databases are open in other processes (pids {busy}); stop Hermes first")
 
 
 def _bound_path(root: Path, relative: Any) -> Path:
@@ -1308,6 +1328,38 @@ def _schedule_intent(home: Path, name: str) -> None:
 def schedule(home: Path) -> None:
     """Persist private conversion intent without upgrading an active SH lease."""
     _schedule_intent(home, PENDING_SUBPATH[-1])
+
+
+def _present(tx: Any, name: str) -> Any:
+    """The leaf's metadata, or ``None`` only when it is truly absent."""
+    try:
+        return tx.stat(name)
+    except PrivateFSError as exc:
+        if exc.reason != "missing":
+            raise
+        return None
+
+
+def unschedule(home: Path) -> None:
+    """Cancel a scheduled conversion and its startup record; converts nothing.
+
+    Refuses once a conversion has a journal or marker: those are finished through
+    maintenance, not cancelled. Cancelling is also the explicit way to retry after
+    startup recorded that a native authentication died.
+    """
+    from ._startup import RECORD_NAME
+
+    try:
+        with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
+            if _present(tx, JOURNAL_SUBPATH[-1]) is not None or _present(tx, "db-encryption.marker") is not None:
+                raise MigrationError("a started database conversion cannot be cancelled")
+            for name in (PENDING_SUBPATH[-1], RECORD_NAME):
+                metadata = _present(tx, name)
+                if metadata is not None:
+                    tx.delete_file(name, expected_identity=metadata.identity)
+    except PrivateFSError as exc:
+        if exc.reason != "missing":  # No private directory: nothing was ever scheduled.
+            raise
 
 
 def plaintext_backups(home: Path) -> list[Path]:
