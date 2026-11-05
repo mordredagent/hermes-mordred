@@ -42,6 +42,9 @@ from ._capability import database_intent, database_status
 from ._locking import runtime_lease
 
 STARTUP_EX_WAIT: Final = 15.0
+#: An earlier start already postponed, so a plain Hermes likely holds the lease and
+#: every gateway or worker it spawns would otherwise lose the whole wait.
+STARTUP_EX_RECHECK_WAIT: Final = 2.0
 STARTUP_SIBLING_WAIT: Final = 900.0
 STARTUP_CONVERSION_MAX_BYTES: Final = 512 * 1024 * 1024
 RECORD_NAME: Final = "startup-conversion.json"
@@ -279,7 +282,8 @@ def _convert_scheduled(root: Path, *, resuming: bool) -> bool:
     outcome = _precheck(root, resuming=resuming)
     if outcome is not None:
         return _postpone(root, outcome, recorded=False)
-    deadline = time.monotonic() + STARTUP_EX_WAIT
+    wait = STARTUP_EX_WAIT if _read_record(root) is None else STARTUP_EX_RECHECK_WAIT
+    deadline = time.monotonic() + wait
     while True:
         try:
             outcome = _attempt(root)

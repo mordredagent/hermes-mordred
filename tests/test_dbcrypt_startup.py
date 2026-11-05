@@ -227,6 +227,21 @@ def test_startup_conversion_postpones_when_a_runtime_holds_the_lease(home):
     _assert_stayed_plain(home, before, "busy")
 
 
+def test_start_after_a_postponement_does_not_wait_the_full_budget_again(home, monkeypatch):
+    """While a plain Hermes runs, every later start would otherwise lose the whole wait."""
+    root = home.root
+    _record(root, "source_unavailable")
+    monkeypatch.setattr(_startup, "STARTUP_EX_WAIT", 3600.0)
+    monkeypatch.setattr(_startup, "STARTUP_EX_RECHECK_WAIT", 0.1)
+    child = _reader(root)
+    try:
+        assert dbcrypt.install(home=root) is False
+    finally:
+        child.communicate("exit\n", timeout=10)
+    assert home.backend.calls == []
+    assert _raw_outcome(root) == "source_unavailable"
+
+
 _SIBLING = """
 import json, os, sys
 from pathlib import Path
