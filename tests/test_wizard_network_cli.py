@@ -296,6 +296,37 @@ class TestNetworkStatusStandalone:
         assert "clearnet" in out.lower()
         assert "'clearnet'" not in out
 
+    @pytest.mark.parametrize(
+        "config",
+        [
+            "plugins: [\n  TOP-SECRET-SENTINEL: {",
+            "plugins:\n  mordred_network:\n    default_path: TOP-SECRET-SENTINEL\n",
+        ],
+        ids=["malformed-yaml", "invalid-path"],
+    )
+    def test_damaged_config_is_unavailable_not_the_clearnet_default(
+        self,
+        tmp_path: Path,
+        config: str,
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import json
+
+        from mordred_hermes.wizard import network_cli
+
+        path = tmp_path / "config.yaml"
+        path.write_text(config, encoding="utf-8")
+
+        assert network_cli.handle_status(_make_args(config_path=path)) == 0
+        text = capsys.readouterr().out
+        assert text == "configured default_path = unavailable  (configuration could not be safely read)\n"
+
+        assert network_cli.handle_status(_make_args(config_path=path, json=True)) == 0
+        output = capsys.readouterr().out
+        assert json.loads(output) == {"live": False, "configured_path": "unavailable"}
+        assert "TOP-SECRET-SENTINEL" not in text + output + caplog.text
+
 
 class TestNetworkInitGuidance:
     def test_init_summary_warns_when_selected_tor_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -515,8 +546,27 @@ class TestInvalidConfiguration:
         captured = capsys.readouterr()
         assert "invalid" in captured.err.lower() and "config" in captured.err.lower()
         assert captured.out == ""
-        assert "TOP-SECRET-SENTINEL" not in captured.err + caplog.text
+        assert "SENTINEL" not in (captured.err + caplog.text).upper()
         assert {path: path.read_bytes() for path in protected_files} == protected_files
+
+    @pytest.mark.parametrize(
+        "data",
+        [b"plugins:\n", b"plugins:\n  mordred_network:\n"],
+        ids=["blank-plugins", "blank-section"],
+    )
+    def test_blank_keys_seed_init_as_unconfigured(self, data: bytes, tmp_path: Path) -> None:
+        from mordred_hermes.wizard import network_cli
+
+        config = tmp_path / "config.yaml"
+        config.write_bytes(data)
+        assert network_cli._read_network_seed(config) == {}
+
+    def test_advisory_read_collapses_every_parser_failure(self, tmp_path: Path) -> None:
+        from mordred_hermes.wizard import network_cli
+
+        config = tmp_path / "config.yaml"
+        config.write_bytes(b"a: !!bool TOP-SECRET-SENTINEL\n")
+        assert network_cli._read_existing_network_section(config) == {}
 
     @pytest.mark.parametrize("command", ["use", "init"])
     def test_checked_validation_refuses_without_leaking_or_changing_files(
@@ -556,6 +606,59 @@ class TestInvalidConfiguration:
         monkeypatch.setattr(PolicyWriter, "merge_mordred_sections", bug)
         with pytest.raises(RuntimeError, match="unexpected writer bug"):
             self._invoke(command, tmp_path)
+        assert {path: path.read_bytes() for path in protected_files} == protected_files
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            b"plugins: [\n  TOP-SECRET-SENTINEL: {",
+            b"- TOP-SECRET-SENTINEL\n",
+            b"plugins: [TOP-SECRET-SENTINEL]\n",
+            b"plugins:\n  mordred_network: TOP-SECRET-SENTINEL\n",
+            b"a: !!bool TOP-SECRET-SENTINEL\n",
+            b"[" * 3000 + b"]" * 3000,
+        ],
+        ids=[
+            "malformed-yaml",
+            "non-mapping-root",
+            "non-mapping-plugins",
+            "non-mapping-section",
+            "keyerror",
+            "too-deep",
+        ],
+    )
+    def test_interactive_init_refuses_unreadable_seed_before_prompting(
+        self,
+        data: bytes,
+        tmp_path: Path,
+        protected_files: dict[Path, bytes],
+        capsys: pytest.CaptureFixture[str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from mordred_hermes.wizard import network_cli
+        from mordred_hermes.wizard.policy_writer import PolicyWriter
+
+        class NoPrompts:
+            def __getattr__(self, name: str) -> Any:
+                pytest.fail(f"an unreadable seed must refuse before prompting ({name})")
+
+        config = tmp_path / "config.yaml"
+        protected_files[config] = data
+        config.write_bytes(data)
+        mordred = tmp_path / "mordred"
+
+        rc = network_cli.run_init(
+            prompt_io=NoPrompts(),  # type: ignore[arg-type]
+            policy_writer=PolicyWriter(config, mordred / "policy.json", mordred),
+            env_writer=network_cli.DotEnvFileWriter(),
+            credentials_writer=network_cli.JSONCredentialsWriter(),
+        )
+
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert "invalid or unavailable network configuration" in captured.err
+        assert captured.out == ""
+        assert "TOP-SECRET-SENTINEL" not in captured.err + caplog.text
         assert {path: path.read_bytes() for path in protected_files} == protected_files
 
 
