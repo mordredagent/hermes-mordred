@@ -82,6 +82,34 @@ Shared policy, path, audit, YAML, provider, and terminal boundaries live at the
 package root. The extension package also contains the standalone localhost
 WebSocket server.
 
+### E2E standalone tool and cron delivery
+
+`extension/standalone_outbound.py` installs the required guard on Hermes's
+shared `_send_to_platform` seam from `extension/gateway_plugin.register`, before
+E2E hooks are advertised. Verify its async signature at installation, preserve
+arguments/results, and make repeated registration idempotent. Missing or changed
+seams raise a deliberate startup refusal that escapes ordinary plugin error
+containment. Do not modify Hermes or its retry/deduplication policy.
+
+Use `e2e.outbound_must_encrypt`, remembered keys and channel bindings. Resolve
+Discord destination/parent context before delegation; retain actual destination
+and supplied thread root when inheriting keys. Protected sends use
+`e2e.encrypt_reply` and explicit routed platform HTTP clients; Slack ciphertext
+bypasses Markdown conversion. Reject protected attachments as a whole and refuse
+new protected forum posts whose thread ID is unknown. Return content-free errors
+on key/context/transport failure, without a plaintext retry.
+
+Drive real Hermes tool and cron delivery with destination I/O replaced, decrypt
+captured v3 payloads, and cover ordinary sends, threads, parent inheritance,
+ambiguous/missing keys, lookup failure, chunk failure, attachments, forum refusal,
+registration and import order. Run the critical preset, complete E2E modules,
+static checks, Hermes 0.13.0 floor and locked-version compatibility, then one
+full final regression. The floor tool does not parse Slack thread targets; its
+shared seam and real cron origin-thread delivery still require coverage. Before
+release, record authorized Slack/Discord browser-extension decryption in
+`VALIDATION_LOG.md`. Edits, streaming and other live-adapter media/prompt APIs
+remain a separate E2E change.
+
 ## Phase 0 — Operational Setup (one-time, blocking everything else)
 
 Phase 0 is complete. Its rules remain the baseline for every change.

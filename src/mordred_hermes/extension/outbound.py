@@ -18,8 +18,9 @@ thread context to inherit — cron output, proactive notifications, agent-initia
 messages — which otherwise left in cleartext into a ciphertext-only channel.
 Mordred's own needs-key notice is the sole exception (``e2e.control_notice_send``).
 
-This covers the live adapter's ``send`` only. Hermes's standalone senders
-(``standalone_sender_fn``) bypass it; see the accepted limitations in SPEC.md.
+This module covers the live adapter's ``send`` only. The required common-seam
+standalone tool/cron guard is installed by :mod:`standalone_outbound`. Edits and
+other live-adapter methods remain outside these wrappers (SPEC.md).
 """
 
 from __future__ import annotations
@@ -169,7 +170,7 @@ async def _discord_encrypted_send(self: Any, channel: Any, content: str, thread_
         # forum channel with no ``send``). Chunks already posted stay posted, and
         # this wrapper does not fall back to plaintext. Hermes callers outside the
         # adapter can: cron retries a failed result through the standalone sender,
-        # which is unwrapped (see TODO.md). Log only the type: exception text is
+        # whose common seam is guarded separately. Log only the type: exception text is
         # platform-controlled and may echo the payload.
         logger.warning("mordred_e2e: Discord encrypted send failed after %d chunks: %s", len(mids), type(exc).__name__)
         return SendResult(success=False, error=_SEND_FAILED, raw_response={"message_ids": mids})

@@ -43,8 +43,8 @@ condition. Preserve the zero-upstream-PR commitment and one-plugin-one-PR rule.
 
 ## Standalone-repo repair backlog (2026-07-01)
 
-The original repair backlog is complete. One extension-operability decision and
-two outbound-encryption gaps are still actionable:
+The original repair backlog is complete. One extension-operability decision, one
+outbound-encryption gap and a release validation gate remain actionable:
 
 - [ ] Decide and document the supported long-running lifecycle for
   `extension serve`: explicit foreground operation, operator-managed
@@ -52,13 +52,17 @@ two outbound-encryption gaps are still actionable:
   service hook. Preserve coexistence with a standalone service or compatible
   legacy/custom gateway already using port 7788, and define restart behavior
   after package upgrades.
-- [ ] **Priority: plaintext through standalone senders.** The `send_message` tool's
-  Discord route calls the registry's `standalone_sender_fn` directly, with no
-  `outbound_must_encrypt` check (reproduced with a fake sender), and cron falls
-  back to `_send_to_platform` when the adapter returns a failure, including
-  `mordred_encrypt_*` refusals (read in `cron/scheduler.py`; not run). Check Slack's
-  route as well. Done when a test drives each route with a bound channel, thread
-  and unresolvable parent and asserts no cleartext reaches the sender.
+- [x] **Priority: plaintext through standalone senders.** Install the required
+  shared `_send_to_platform` guard at E2E registration. Real tool and cron
+  regressions cover Slack/Discord bindings, threads, parent inheritance,
+  unresolvable context, key/transport failures, attachments, forum refusal and
+  module import order (`tests/extension/test_standalone_outbound.py`). Protected
+  text uses the existing v3 wire and routed HTTP; failures never delegate to
+  the plaintext sender. Hermes 0.13.0 and the locked version are checked.
+- [ ] Before releasing the standalone sender guard, verify browser-extension
+  decryption on explicitly authorized Slack and Discord test destinations and
+  append the results to `VALIDATION_LOG.md`. Automated round trips are not live
+  browser evidence.
 - [ ] Cover the adapter outbound methods other than `send`. `_wrap_discord` and
   `_wrap_slack` wrap only `send`, so these Hermes adapter methods are unwrapped
   and can write plaintext to a bound channel: `edit_message` (reached by the
