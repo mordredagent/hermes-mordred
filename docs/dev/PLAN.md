@@ -2818,6 +2818,27 @@ The design owns architecture and acceptance boundaries; the implementation plan
 owns exact interfaces and test tasks. This rollout outline does not authorize
 skipping native gates or combining unrelated component implementations into one PR.
 
+### Desktop startup conversion slice
+
+Contracts: [startup conversion](SPEC.md#startup-conversion) and
+[Databases from the page](SPEC.md#databases-from-the-page). Land these PRs to `dev`
+in this order:
+
+1. Docs: the contracts above, paths, task list and user guidance.
+2. `dbcrypt`: shared `convert_home`, `_startup.run_scheduled_conversion` before the
+   native install checks, the record, `database_intent` and `unschedule`.
+3. `wizard`: `databases encrypt` uses `convert_home`.
+4. `desktop`: status projection, route decision, `POST /databases/cancel`, codes and
+   step 1.3 on Linux and Windows.
+5. Validation: live results in the validation log, `CI.md` and `TODO.md`.
+
+Desktop MUST NOT land before `dbcrypt`: scheduling without the startup seam makes
+Hermes refuse to start on every platform. Run a security review on PRs 2 and 4 before
+merge, and confirm the bounded record read explicitly. The 15 s, 900 s and 512 MiB
+values stay provisional until measured. Release notes MUST warn that downgrading with a
+pending marker brings the startup refusal back. Report Hermes Desktop on Linux or
+Windows Server as unverified when no such environment is available; never claim it.
+
 ### Data-preserving uninstall implementation
 
 1. Establish the shared contract in SPEC before component changes.
