@@ -12,6 +12,27 @@ Mordred is a standalone Python distribution loaded through
 Hermes upstream.
 
 
+## Scoped maintenance coordination (2026-11-04)
+
+Follow [the six-task implementation plan](../superpowers/plans/2026-11-04-maintenance-six.md)
+and its [design](../superpowers/specs/2026-11-04-maintenance-six-design.md).
+Land this coordination documentation before cross-component implementation;
+use separate local worktrees/branches for YAML diagnostics, passive status,
+Windows test setup, dbcrypt admission, ImportStore history APIs and acceptance
+tooling. Integrate reviewed commits locally, run focused security modules per
+slice and one full regression at final integration. Preserve required live gates
+and distinguish historical timing weights from fresh same-host measurements.
+
+## Additional performance coordination (2026-11-04)
+
+The [additional design](../superpowers/specs/2026-11-04-additional-performance-design.md)
+and [implementation plan](../superpowers/plans/2026-11-04-additional-performance.md)
+coordinate measured Unix default-suite parallelism, audit preflight setup and
+single-snapshot public search hydration. Preserve all selected cases, per-cell
+coverage floors, native Windows shards and live gates. Enable parallel CI only
+after controlled outcome/coverage equivalence and at least 25% elapsed reduction.
+Each implementation remains a separate owner-scoped change.
+
 ## Bounded macOS presence reuse
 
 `keyvault/_presence.py` binds operation-local scope, fixed-purpose credential
@@ -60,6 +81,34 @@ names, which survive as config section names (`plugins.mordred_network`, ...);
 Shared policy, path, audit, YAML, provider, and terminal boundaries live at the
 package root. The extension package also contains the standalone localhost
 WebSocket server.
+
+### E2E standalone tool and cron delivery
+
+`extension/standalone_outbound.py` installs the required guard on Hermes's
+shared `_send_to_platform` seam from `extension/gateway_plugin.register`, before
+E2E hooks are advertised. Verify its async signature at installation, preserve
+arguments/results, and make repeated registration idempotent. Missing or changed
+seams raise a deliberate startup refusal that escapes ordinary plugin error
+containment. Do not modify Hermes or its retry/deduplication policy.
+
+Use `e2e.outbound_must_encrypt`, remembered keys and channel bindings. Resolve
+Discord destination/parent context before delegation; retain actual destination
+and supplied thread root when inheriting keys. Protected sends use
+`e2e.encrypt_reply` and explicit routed platform HTTP clients; Slack ciphertext
+bypasses Markdown conversion. Reject protected attachments as a whole and refuse
+new protected forum posts whose thread ID is unknown. Return content-free errors
+on key/context/transport failure, without a plaintext retry.
+
+Drive real Hermes tool and cron delivery with destination I/O replaced, decrypt
+captured v3 payloads, and cover ordinary sends, threads, parent inheritance,
+ambiguous/missing keys, lookup failure, chunk failure, attachments, forum refusal,
+registration and import order. Run the critical preset, complete E2E modules,
+static checks, Hermes 0.13.0 floor and locked-version compatibility, then one
+full final regression. The floor tool does not parse Slack thread targets; its
+shared seam and real cron origin-thread delivery still require coverage. Before
+release, record authorized Slack/Discord browser-extension decryption in
+`VALIDATION_LOG.md`. Edits, streaming and other live-adapter media/prompt APIs
+remain a separate E2E change.
 
 ## Phase 0 — Operational Setup (one-time, blocking everything else)
 
@@ -2769,6 +2818,27 @@ The design owns architecture and acceptance boundaries; the implementation plan
 owns exact interfaces and test tasks. This rollout outline does not authorize
 skipping native gates or combining unrelated component implementations into one PR.
 
+### Desktop startup conversion slice
+
+Contracts: [startup conversion](SPEC.md#startup-conversion) and
+[Databases from the page](SPEC.md#databases-from-the-page). Land these PRs to `dev`
+in this order:
+
+1. Docs: the contracts above, paths, task list and user guidance.
+2. `dbcrypt`: shared `convert_home`, `_startup.run_scheduled_conversion` before the
+   native install checks, the record, `database_intent` and `unschedule`.
+3. `wizard`: `databases encrypt` uses `convert_home`.
+4. `desktop`: status projection, route decision, `POST /databases/cancel`, codes and
+   step 1.3 on Linux and Windows.
+5. Validation: live results in the validation log, `CI.md` and `TODO.md`.
+
+Desktop MUST NOT land before `dbcrypt`: scheduling without the startup seam makes
+Hermes refuse to start on every platform. Run a security review on PRs 2 and 4 before
+merge, and confirm the bounded record read explicitly. The 15 s, 900 s and 512 MiB
+values stay provisional until measured. Release notes MUST warn that downgrading with a
+pending marker brings the startup refusal back. Report Hermes Desktop on Linux or
+Windows Server as unverified when no such environment is available; never claim it.
+
 ### Data-preserving uninstall implementation
 
 1. Establish the shared contract in SPEC before component changes.
@@ -2792,3 +2862,27 @@ archives and deletion dependencies. Preserve unknown state and require explicit
 recovery instead of guessing. Staged exports are verified against their source
 schema/count result and published only to an absent output. Retained backup
 registrations and native source bindings survive ordinary uninstall/reinstall.
+
+## Coordinated keyvault reset implementation (2026-11-05)
+
+Contract: [Coordinated keyvault reset](SPEC.md#coordinated-keyvault-reset-2026-11-05).
+Deliver this documentation contract as an independent PR to `dev` first, then
+keep component implementation changes in separate commits/review slices:
+
+1. Keyvault: extend strict reset recovery with explicit scope/progress, checked
+   internal reset authorization and selective file cleanup; retain independent
+   native sources and refuse changed ownership. Repeat failed or interrupted
+   native deletion under the checked owner, tolerating only an absent target.
+2. Imports: expose bounded offline Mail/Telegram erasure using an existing
+   exclusive lease and `maintenance_scope`, secure deletion and FTS cleanup;
+   erase previous accounts, runs, references, cursor and retirement metadata.
+3. Mail/Telegram custody: block ordinary writers during reset and permit only
+   authorized authenticated local retirement, including legacy archives.
+4. Wizard: delegate reset orchestration, preserve CLI syntax and Windows gate,
+   explain confirmation scope, journal before mutation and resume completed
+   stages safely. Do not invoke CLI subprocesses or remote logout.
+5. Verify the reproduction and isolated/combined/empty/history-only setups,
+   previous accounts, preservation, cancellation and each failure/retry boundary.
+   Run complete affected modules, critical feedback, then one full regression
+   and static checks at integration. Record explicitly gated native acceptance
+   in the manual validation log; unavailable platforms remain unverified.

@@ -36,8 +36,10 @@ from tests.test_windows_memory_lifecycle import (
     normalized,
     put,
 )
+from tests.test_windows_memory_proof import custody_env as custody_env
 from tests.test_windows_memory_proof import installed_runtime as installed_runtime
 from tests.test_windows_memory_proof import proof_env as proof_env
+from tests.test_windows_memory_proof import proof_module
 from tests.test_wizard_windows_memory import memory_lease, role_current
 from tests.test_wizard_windows_memory import seeded as seeded
 from tests.test_wizard_windows_memory import win as win
@@ -181,12 +183,34 @@ def test_refusing_gate_or_proof_stops_before_anything_is_removed(enabled, monkey
 
 
 @pytest.mark.parametrize("dry_run", [True, False])
-def test_erase_encrypted_is_refused_on_windows(enabled, capsys, dry_run):
-    env = enabled
+def test_erase_encrypted_is_refused_on_windows(request, monkeypatch, capsys, dry_run, hermes_files):
+    # The executing variant retains genuine armed-state preservation coverage;
+    # dry-run must reject this option even without enrolled custody or a proof.
+    env = request.getfixturevalue("custody_env" if dry_run else "enabled")
+    if dry_run:
+        put(env.home, "memories", "MEMORY.md", ORIGINALS["MEMORY.md"])
+        put(env.home, "mordred", "kept", b"preflight sentinel")
+        env.runner = Runner()
     before = (files(env.home), markers(env.home), mordred_entries(env))
+    native_calls = list(env.backend.calls)
+    launches = list(env.launches.argv)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("--erase-encrypted must refuse before planning, cleanup, proof or native operations")
+
+    monkeypatch.setattr(uninstall_cli, "build_plan", forbidden)
+    monkeypatch.setattr(uninstall_cli, "apply_config_cleanup", forbidden)
+    monkeypatch.setattr(uninstall_cli, "apply_env_cleanup", forbidden)
+    monkeypatch.setattr(desktop_install, "remove_page", forbidden)
+    monkeypatch.setattr(proof_module(), "prove_windows_memory_runtime", forbidden)
+    monkeypatch.setattr(env.custody, "windows_custody_session", forbidden)
+    for name in ("generate_enclave_key", "get_enclave_public_key", "enclave_ecdh", "delete_enclave_key"):
+        monkeypatch.setattr(env.backend, name, forbidden)
     assert run_uninstall(context(env), UninstallOptions(erase_encrypted=True, dry_run=dry_run)) == 1
     assert "--erase-encrypted is not supported on Windows" in capsys.readouterr().err
     assert (files(env.home), markers(env.home), mordred_entries(env)) == before
+    assert env.backend.calls == native_calls and env.launches.argv == launches
+    assert env.runner.calls == [] and hermes_files == []
 
 
 def test_unverifiable_custody_plans_a_refusing_restore(win, capsys):

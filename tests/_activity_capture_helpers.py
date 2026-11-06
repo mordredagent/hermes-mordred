@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import types
 import uuid
@@ -84,7 +85,12 @@ def failed(error: str) -> str:
 
 @pytest.fixture
 def capture_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Path, ActivityStore]]:
-    """A profile home with a plain-SQLite store behind the capture's store seam and the history reader."""
+    """A profile home with a plain-SQLite store behind the capture's store seam and the history reader.
+
+    No write counts as slow here: every capture write commits to disk, and on a loaded runner three of one test's
+    402 commits exceeded the production :data:`.capture_hermes.SLOW_APPEND_S`, which suspended the session and
+    dropped the remaining events (CI run 42017277672, ``linux (3.13)``). A test of the suspension itself sets the
+    threshold it needs (``monkeypatch.setattr(capture_hermes, "SLOW_APPEND_S", 0.01)``)."""
     home = tmp_path / "home"
     home.mkdir()
     store = ActivityStore(home / "mordred.db", plain_opener, busy_timeout_s=capture_hermes.WRITE_BUSY_S)
@@ -98,6 +104,7 @@ def capture_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tu
     monkeypatch.setattr(hooks_history, "_last_hosts", type(hooks_history._last_hosts)())
     monkeypatch.setattr(capture_hermes, "STORE_FACTORY", lambda _home: store)
     monkeypatch.setattr(capture_hermes, "_sessions", type(capture_hermes._sessions)())
+    monkeypatch.setattr(capture_hermes, "SLOW_APPEND_S", math.inf)
     return home, store
 
 

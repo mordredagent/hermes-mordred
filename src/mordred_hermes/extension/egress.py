@@ -106,19 +106,23 @@ def loopback_proxy_host(url: str) -> bool:
         return False
 
 
-def resolve_route(target_host: str) -> EgressRoute:
+def resolve_route(target_host: str, *, platform_env_var: str | None = None) -> EgressRoute:
     """Resolve the explicit route for traffic to *target_host*.
 
     ``socks5h://`` is normalized to ``socks5://``; callers must request remote
     DNS from their SOCKS client (``rdns=True``) so hostnames never resolve
-    locally when Tor is in use.
+    locally when Tor is in use. ``platform_env_var`` preserves Hermes's
+    platform-specific proxy override while applying the same route validation.
     """
 
     tor_required = tor_route_required()
     try:
         from gateway.platforms.base import resolve_proxy_url
 
-        proxy_url = resolve_proxy_url(target_hosts=target_host)
+        if platform_env_var is None:
+            proxy_url = resolve_proxy_url(target_hosts=target_host)
+        else:
+            proxy_url = resolve_proxy_url(platform_env_var=platform_env_var, target_hosts=target_host)
     except Exception as exc:
         raise EgressError() from exc
 

@@ -43,7 +43,6 @@ from .._private_fs import PrivateFSError
 from ..network import api
 from ..network._exceptions import MordredNetworkError
 from ..network.guidance import dependency_warning
-from ..network.settings import read_default_path
 from . import _term
 from . import policy_writer as _policy_writer
 from ._network_answers import (
@@ -54,6 +53,13 @@ from ._network_answers import (
 from ._network_init import (
     collect_network_answers,
     network_answers_from_args,
+)
+from ._network_status import (
+    NETWORK_UNAVAILABLE,
+    NETWORK_UNAVAILABLE_DETAIL,
+    NETWORK_UNAVAILABLE_REMEDY,
+    read_configured_network_path,
+    read_network_section_or_raise,
 )
 from .configure import (
     PromptIO,
@@ -123,6 +129,8 @@ def handle_status(args: argparse.Namespace) -> int:
     Shows live runtime state when available, else the disk-configured
     default with a "(not active in this process)" marker so the user
     can tell whether the value they see is currently routing traffic.
+    Config that cannot be safely read is reported as unavailable, never as
+    the clearnet default.
     """
     config_path = _resolve_config_path(args)
     as_json = bool(getattr(args, "json", False))
@@ -149,9 +157,12 @@ def handle_status(args: argparse.Namespace) -> int:
             )
         return 0
 
-    configured = _read_default_path_from_config(config_path)
+    configured = read_configured_network_path(config_path, log=_LOG)
     if as_json:
         print(json.dumps({"live": False, "configured_path": configured}, indent=2))
+        return 0
+    if configured == NETWORK_UNAVAILABLE:
+        print(f"configured default_path = {configured}  ({NETWORK_UNAVAILABLE_DETAIL})")
         return 0
     print(f"configured default_path = {configured}  (runtime not active in this process)")
     return 0
@@ -200,15 +211,6 @@ def _write_default_path_to_config(config_path: Path, default_path: str) -> None:
     )
 
 
-def _read_default_path_from_config(config_path: Path) -> str:
-    """Read ``plugins.mordred_network.default_path`` or fall back to clearnet.
-
-    Validation delegates to ``network.settings.read_default_path`` so the
-    wizard reports exactly the path the runtime would bootstrap with.
-    """
-    return read_default_path(config_path, log=_LOG)
-
-
 def _dependency_warning_for_configured_path(config_path: Path, target: str) -> str | None:
     """Warn when the selected path needs a missing external program."""
     network = _read_existing_network_section(config_path)
@@ -249,7 +251,9 @@ def run_init(
     ``clear_mullvad`` removes the stored Mullvad secret (and skips the secret
     prompt). See :func:`_persist_network` for the persistence contract.
     """
-    existing = _read_existing_network_section(policy_writer.config_path)
+    existing = _read_network_seed(policy_writer.config_path)
+    if existing is None:
+        return 1
     inputs = collect_network_answers(prompt_io, existing=existing, prompt_secret=not clear_mullvad)
     return _persist_network(
         inputs,
@@ -368,7 +372,9 @@ def handle_init(args: argparse.Namespace) -> int:
     credentials_writer = JSONCredentialsWriter()
 
     if non_interactive:
-        existing = _read_existing_network_section(config_path)
+        existing = _read_network_seed(config_path)
+        if existing is None:
+            return 1
         inputs = network_answers_from_args(args, existing=existing)
         return _persist_network(
             inputs,
@@ -387,16 +393,32 @@ def handle_init(args: argparse.Namespace) -> int:
     )
 
 
+def _read_network_seed(config_path: Path) -> dict[str, Any] | None:
+    """Return the section seeding ``network init``, or report a refusal and return ``None``.
+
+    The seed keeps existing values across a re-run. Treating an unreadable
+    config as empty would offer clearnet and static defaults that, once
+    confirmed, replace the saved settings as soon as the config is readable.
+    """
+    try:
+        return read_network_section_or_raise(config_path) or {}
+    except Exception:
+        # Not only YAMLError: ruamel's constructors raise bare KeyError/ValueError
+        # and deep nesting raises RecursionError. Their text can quote config
+        # values, so report a fixed message only.
+        _term.emit_error(f"invalid or unavailable network configuration; {NETWORK_UNAVAILABLE_REMEDY} before retrying")
+        return None
+
+
 def _read_existing_network_section(config_path: Path) -> dict[str, Any]:
     """Return the current ``plugins.mordred_network`` body, or ``{}``.
 
-    Used to seed :func:`collect_network_answers` defaults so a re-run keeps
-    existing values. Any read/parse error collapses to ``{}`` (the prompts
-    then fall back to their safe static defaults).
+    For advisory output only. Any read/parse error collapses to ``{}``; use
+    :func:`_read_network_seed` when the result can reach a write.
     """
     try:
         return load_plugin_section(config_path, "mordred_network", catch=()) or {}
-    except (OSError, YAMLError, ValueError):
+    except Exception:
         # The shared loader's default warning includes the exception text,
         # which can expose YAML source snippets before the write refuses.
         _LOG.warning("could not read network configuration from %s", config_path)

@@ -83,10 +83,30 @@ The labeler remains independent PR metadata automation, not a test workflow.
 
 Key policy:
 
+- Non-critical Linux/macOS default suites and the Hermes-floor suite use
+  `-n 2 --dist=loadfile --max-worker-restart=0`. Real workers receive private
+  homes before collection; local pytest remains serial by default. Critical,
+  Windows and explicit feature/live suites keep their existing execution.
+  The controlled same-host comparison retained all outcomes and covered lines
+  with 41.47% less elapsed time; see the [validation record](../superpowers/reports/2026-11-04-maintenance-performance.md)
+  for revision boundaries, resource ownership and outstanding platform gates.
 - Ubuntu ordinary/final workers run the complete default suite with coverage
   >=80% and strict mypy. Drafts run critical feedback plus CI-tool tests.
 - The optional macOS worker runs the complete default suite, coverage, typing
   and status guard; drafts retain critical feedback and the status guard.
+  It uses the supported `macos-26` ARM64 runner, restoring the original macOS
+  26 ARM validation target. A temporary macOS 15 Intel fallback followed hosted
+  runner-acquisition failures on 2026-11-04. The post-#295 dev run then failed
+  existing elapsed-time budgets on that fallback in both
+  [attempt 1](https://github.com/mordredagent/hermes-mordred/actions/runs/41933231755/attempts/1)
+  and [attempt 2](https://github.com/mordredagent/hermes-mordred/actions/runs/41933231755/attempts/2).
+  All test selectors, performance limits, timeouts, coverage floors, worker/check
+  identities, the Python floor and complete Swift/TPM packs are retained. Fresh
+  ARM runner acquisition and complete selected checks must succeed before
+  acceptance; runner availability is not assumed. Intel results and live-device
+  qualification remain separate evidence; see the
+  [delivery record](../superpowers/reports/2026-11-04-maintenance-performance.md)
+  and GitHub's [supported runner labels](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 - Ordinary/draft Windows requests use one worker; final uses four isolated
   Windows runners. Ordinary workers retain complete mapped modules and remaining
   critical cases. Final workers cover all 84 frozen native modules once; routine

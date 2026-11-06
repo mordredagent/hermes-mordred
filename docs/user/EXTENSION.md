@@ -166,6 +166,24 @@ ciphertext, and legacy v1/v2 gateway commands are rejected before reaching the
 agent. Encrypted commands receive encrypted replies with the same channel key.
 Deploy a v3-capable browser extension and Mordred server together.
 
+With Mordred enabled, `send_message` and standalone cron delivery (including
+fallback after a failed live-adapter send) encrypt text for bound Slack/Discord
+channels and remembered encrypted conversations. Discord threads may inherit
+their parent's key without changing the destination. Missing/conflicting keys,
+unknown destinations and send failures return an error; they do not retry in
+plaintext. A partial send can leave encrypted chunks already posted, and Hermes
+may retry delivery using its existing policy.
+
+These protected standalone requests reject attachments before posting any text.
+New protected Discord forum posts are also refused; send to an existing thread.
+Other destinations keep Hermes's ordinary behavior. E2E startup refuses an
+unsupported Hermes standalone-sender interface; restart with a supported Hermes
+version rather than running without the guard.
+
+Protection of other live-adapter methods, including edits, streaming edits,
+attachments and interactive prompts, is still pending. Use the protected text
+send paths for confidential output.
+
 The complete wire contract is in [`SLACK_E2E.md`](../dev/SLACK_E2E.md).
 
 ## Standalone behavior

@@ -32,6 +32,11 @@ is required before absence can escape the owning checked context.
 `CheckedContents(data, metadata)` records bounded bytes and checked metadata.
 `CanonicalSnapshot(config, policy)` uses `None` only for clean checked absence.
 `read_canonical_snapshot` uses nonblocking locks; errors remain errors.
+A `blocking=False` session waits up to `IN_PROCESS_WAIT_SECONDS` for another
+thread's in-process session before refusing `busy`/`canonical_lock`. Inside the
+thread-local `passive_canonical_reads()` scope it refuses immediately instead;
+`blocking=True` sessions and cross-process file locks are unaffected. Use the
+scope only for presentation reads, never around ceremonies or mutation gates.
 `read_home`, `read_policy`, `read_pair` return checked contents/snapshots. Config,
 policy and dotenv are limited to 8 MiB; marker reads to 4 KiB. `write_home` and
 `delete_home` support dotenv and validated uninstall backup leaves only; config

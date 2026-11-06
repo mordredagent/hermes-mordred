@@ -38,6 +38,7 @@ MARKER_LIMIT = 4096
 # Bounded wait of a ``blocking=False`` session for another thread's in-process
 # session before refusing ``busy``/``canonical_lock``. The holder is one of our
 # own short sessions; cross-process file locks stay strictly nonblocking.
+# ``passive_canonical_reads`` opts presentation reads out of this wait.
 IN_PROCESS_WAIT_SECONDS = 2.0
 _Result = TypeVar("_Result")
 POLICY_TRANSACTION_MARKER = ".policy-write.pending"
@@ -99,6 +100,24 @@ def _after_fork() -> None:
 
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_after_fork)
+
+
+@contextmanager
+def passive_canonical_reads() -> Iterator[None]:
+    """Make this thread's nonblocking presentation reads refuse contention immediately.
+
+    Ordinary admission and explicit blocking sessions retain their existing
+    policy. Keep this scope outside ceremonies and mutation gates.
+    """
+    # Capture the local object: after a fork, exiting an inherited scope must
+    # restore only the discarded parent local, never the child's fresh policy.
+    local = _local
+    previous = getattr(local, "passive_reads", False)
+    local.passive_reads = True
+    try:
+        yield
+    finally:
+        local.passive_reads = previous
 
 
 def _read(tx: ConfidentialTransaction | None, name: str, limit: int) -> CheckedContents | None:
@@ -217,6 +236,14 @@ def canonical_session(
         yield session
 
 
+def _acquire_canonical_lock(*, blocking: bool) -> bool:
+    if blocking:
+        return _lock.acquire()
+    if getattr(_local, "passive_reads", False):
+        return _lock.acquire(blocking=False)
+    return _lock.acquire(timeout=IN_PROCESS_WAIT_SECONDS)
+
+
 @contextmanager
 def _canonical_session(
     paths: CanonicalPaths, *, scope: Literal["home", "policy"], create: bool, blocking: bool
@@ -228,8 +255,9 @@ def _canonical_session(
         with _nested_session(active, paths, scope, create, blocking) as session:
             yield session
         return
-    # Nonblocking sessions wait a bounded time here only; file locks below keep ``blocking``.
-    if not (_lock.acquire() if blocking else _lock.acquire(timeout=IN_PROCESS_WAIT_SECONDS)):
+    # Only passive presentation opts out of the ordinary bounded in-process
+    # wait. File locks below continue to use the caller's ``blocking`` policy.
+    if not _acquire_canonical_lock(blocking=blocking):
         raise PrivateFSError("busy", "canonical_lock")
     state: _State | None = None
     try:
@@ -599,6 +627,11 @@ class _MordredTransaction:
         self._invoke(
             lambda: self._transaction.rename_file(name, destination, expected_identity=expected_identity), mutation=True
         )
+
+    def finish_interrupted_rename(self, name: str, destination: str) -> None:
+        self._leaf(name)
+        self._leaf(destination)
+        self._invoke(lambda: self._transaction.finish_interrupted_rename(name, destination), mutation=True)
 
 
 class PublicationReceipt:

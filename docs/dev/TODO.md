@@ -43,8 +43,8 @@ condition. Preserve the zero-upstream-PR commitment and one-plugin-one-PR rule.
 
 ## Standalone-repo repair backlog (2026-07-01)
 
-The original repair backlog is complete. One extension-operability decision and
-two outbound-encryption gaps are still actionable:
+The original repair backlog is complete. One extension-operability decision, one
+outbound-encryption gap and a release validation gate remain actionable:
 
 - [ ] Decide and document the supported long-running lifecycle for
   `extension serve`: explicit foreground operation, operator-managed
@@ -52,13 +52,17 @@ two outbound-encryption gaps are still actionable:
   service hook. Preserve coexistence with a standalone service or compatible
   legacy/custom gateway already using port 7788, and define restart behavior
   after package upgrades.
-- [ ] **Priority: plaintext through standalone senders.** The `send_message` tool's
-  Discord route calls the registry's `standalone_sender_fn` directly, with no
-  `outbound_must_encrypt` check (reproduced with a fake sender), and cron falls
-  back to `_send_to_platform` when the adapter returns a failure, including
-  `mordred_encrypt_*` refusals (read in `cron/scheduler.py`; not run). Check Slack's
-  route as well. Done when a test drives each route with a bound channel, thread
-  and unresolvable parent and asserts no cleartext reaches the sender.
+- [x] **Priority: plaintext through standalone senders.** Install the required
+  shared `_send_to_platform` guard at E2E registration. Real tool and cron
+  regressions cover Slack/Discord bindings, threads, parent inheritance,
+  unresolvable context, key/transport failures, attachments, forum refusal and
+  module import order (`tests/extension/test_standalone_outbound.py`). Protected
+  text uses the existing v3 wire and routed HTTP; failures never delegate to
+  the plaintext sender. Hermes 0.13.0 and the locked version are checked.
+- [ ] Before releasing the standalone sender guard, verify browser-extension
+  decryption on explicitly authorized Slack and Discord test destinations and
+  append the results to `VALIDATION_LOG.md`. Automated round trips are not live
+  browser evidence.
 - [ ] Cover the adapter outbound methods other than `send`. `_wrap_discord` and
   `_wrap_slack` wrap only `send`, so these Hermes adapter methods are unwrapped
   and can write plaintext to a bound channel: `edit_message` (reached by the
@@ -269,8 +273,9 @@ the source remains usable, and failure paths leave no partial destination.
 The macOS CLI, startup protection, monitor and uninstall lifecycle are implemented
 ([design](./STATE_DB_ENCRYPTION.md)). Remaining work:
 
-- [ ] Desktop acceptance: status and scheduled encryption exist in
-  `desktop/_databases.py` and the page. Finish the throwaway-home ceremony checks
+- [ ] Desktop acceptance: status and scheduling exist in `desktop/_databases.py` and
+  the page, with [startup conversion](SPEC.md#startup-conversion) still to land.
+  Finish the throwaway-home ceremony checks
   under Desktop operability below; decide whether a page-level decrypt control
   is required (the CLI already provides `databases decrypt`).
 - [ ] Logging: redact message previews (`msg=`) from `logs/agent.log`.
@@ -308,8 +313,11 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   and later operations refuse them as unknown sidecars (`src/mordred_hermes/dbcrypt/_migrate.py`).
 - [ ] Monitor: `monitor_runtime` invalidates authority over non-database files such as `state.db.malformed-backup-*`;
   the inventory and policy name classifiers disagree (`src/mordred_hermes/dbcrypt/_monitor.py`, `src/mordred_hermes/_core/_database_inventory.py`, `src/mordred_hermes/dbcrypt/_policy.py`).
-- [ ] Backup journal: a failed backup journal is never cleared in production, because
-  `recover_backups`/`delete_backup` have no non-test caller (`src/mordred_hermes/dbcrypt/_backup.py`).
+- [x] Backup journal: `databases backup recover [--abandon]` clears a failed backup journal, and
+  ordinary copy failures clean up automatically (`src/mordred_hermes/dbcrypt/_backup.py`).
+- [ ] `delete_backup` still has no non-test caller; add `databases backup delete`. Delete journals
+  then become reachable and abandon keeps refusing them. A registered backup whose file was removed
+  by hand makes the inventory incomplete and needs an explicit way to unregister it.
 - [x] Uninstall: move known refusals before restoration and separate verified
   package-removal authority from key deletion. Cover every profile, retain
   recoverable backups, and export them after reinstalling. See
@@ -320,24 +328,30 @@ MEDIUM and LOW findings deliberately left unfixed in PR #270, plus the deferred 
   ordinary UID 1000. Windows and the final macOS recheck include the two native
   fixes discovered after the Linux run. Exact builds are recorded in CI. Keep
   unresolved keyvault-reset ownership and backup-journal recovery outside this
-  change; these states refuse before restoration. See
+  change; these states refuse before restoration (backup-journal recovery landed
+  later as `databases backup recover`). See
   [the validation log](VALIDATION_LOG.md#manual-live-device-validation-log).
 - [ ] Authority checks: `Authority.check()` runs on every authorizer/progress callback and takes
   Windows custody locks; validate at admission and before commit only (`src/mordred_hermes/dbcrypt/_connection.py`).
 - [ ] Connection errors: an unprotected out-of-scope connection error invalidates the whole
   runtime; revoke only that connection (`src/mordred_hermes/dbcrypt/_connection.py`).
-- [ ] `keyvault reset`: `rmtree` of `mordred/keyvault` strips the mail/Telegram helper stores and
-  bypasses custody; it also refuses corrupt or legacy `meta.json` (`src/mordred_hermes/wizard/keyvault_cli.py`).
+- [x] `keyvault reset`: replace recursive removal with journaled, authenticated Mail/Telegram
+  retirement and selective keyvault cleanup. Preserve shared helper/database/memory custody;
+  ambiguous metadata and native outcomes remain fail-closed for explicit recovery.
 - [ ] macOS database-key load is not bound to the root helper store, so child profiles fail closed
   (`src/mordred_hermes/keyvault/_database_authority.py`).
-- [ ] macOS passive regressions: Desktop database step stuck in attention and `mail status --json` nulls;
-  decide on an authenticated path (`src/mordred_hermes/desktop/_databases.py`, `src/mordred_hermes/desktop/_status_v4.py`).
+- [ ] macOS passive regressions: `mail status --json` nulls; decide on an authenticated path
+  (`src/mordred_hermes/desktop/_status_v4.py`). The Desktop database step stuck in attention moves to
+  [startup conversion](SPEC.md#startup-conversion), which stays passive.
 - [ ] Windows DLL provenance: release CI ships only `py3-none-any`, the toolset is unpinned, there is
   no hash binding to `RECORD`, and source builds hard-fail without MSVC (`hatch_build.py`).
-- [ ] Acceptance `verify` self-attests `live_accepted`; `_verify_mode_sequences` and
-  `_verify_native_stops` are untested (`tools/dbcrypt_acceptance.py`).
-- [ ] Oversized files: `tools/dbcrypt_acceptance.py` (4,266 lines), `tests/test_dbcrypt_acceptance_manifest.py` (3,082),
-  `tests/_dbcrypt_acceptance_native.py` (1,907; destructive collector shipped in the sdist); split them, consider stacked PRs.
+- [ ] Acceptance `verify` self-attests `live_accepted`; synthetic tests now cover
+  `_verify_mode_sequences` and `_verify_native_stops`, including corrupt sequence
+  and receipt inputs, but do not establish native acceptance.
+- [ ] Oversized files: the acceptance CLI is now a compatibility facade over
+  common/evidence/execution/Windows modules. `tests/test_dbcrypt_acceptance_manifest.py`
+  (3,082 lines) and `tests/_dbcrypt_acceptance_native.py` (1,907; destructive
+  collector shipped in the sdist) still need separate consideration.
 - [x] Windows path handling: `_shim.py`, `_connection.py` and `_backup.py` reject
   UNC/device namespaces lexically before target I/O, including decoded URIs,
   registered backup values and relative paths under a UNC working directory.
@@ -926,8 +940,25 @@ compatibility with every downstream private-store reader.
   the Codex pass-11 review of PR #262 (2026-10-23; note retired from the tree),
   following the earlier API/page/mail reviews. Its SHIP verdict is scoped to
   that revision; it does not validate #270's later changes.
-  - [ ] Recheck passive database/mail status after #270; see the database
-    review follow-ups. Earlier Desktop evidence does not close that regression.
+  - [ ] Recheck passive mail status after #270; see the database review
+    follow-ups. Earlier Desktop evidence does not close that regression.
+  - [ ] Desktop **Encrypt databases** on macOS, Linux and Windows Server through
+    [startup conversion](SPEC.md#startup-conversion), in the
+    [PR order](PLAN.md#desktop-startup-conversion-slice); this replaces the passive
+    database recheck. Remaining live gates, each recorded in the
+    [validation log](VALIDATION_LOG.md#manual-live-device-validation-log) with an
+    isolated `HERMES_HOME`, never production `~/.hermes`:
+    - [ ] macOS Desktop with a default no-prompt key: button, restart, done; a home
+      near the size limit; measured throughput for `STARTUP_CONVERSION_MAX_BYTES`.
+    - [ ] macOS Desktop with an "ask every time" key: whether the backend can answer
+      a prompt, its prompt count and cancel text, and `auth_interrupted` after a kill
+      at the port deadline.
+    - [ ] Whether Desktop's restart stops gateway and profile processes, or the step
+      answers `startup_busy`.
+    - [ ] Linux on the AWS TPM host: `hermes` start, concurrent gateway and profile.
+    - [ ] Windows Server 2025 on AWS: ordinary-user CLI and gateway start.
+    - [ ] Windows 11 Desktop: "not supported" only, nothing scheduled.
+    - [ ] Hermes Desktop on Linux and Windows Server: remains unverified until run.
 
 - [ ] CLI counts after the Telegram archive moved to `mordred.db` (found during
   the production rollout, 2026-10-23). `hermes-mordred telegram status` prints
@@ -1076,3 +1107,20 @@ Later (not scheduled): see
 Linux and Windows store implementation and acceptance are tracked under
 [Hermes database encryption](#hermes-database-encryption). Native consumers exist;
 the former claim that both platforms only use `.enc` archives is stale.
+
+## Coordinated keyvault reset delivery (2026-11-05)
+
+- [x] Publish the independent English contract/plan PR to `dev` ([#299](https://github.com/mordredagent/hermes-mordred/pull/299)).
+- [x] Add bounded journal/authorization and selective keyvault cleanup.
+- [x] Add transactional offline Mail/Telegram history erasure.
+- [x] Integrate authenticated credential retirement and pending-reset guards.
+- [x] Wire the wizard coordinator and explicit full-scope confirmation/help.
+- [x] Verify failure/retry, preservation and complete affected modules; run
+  critical feedback and final regression/static checks.
+- [x] Allow reset to repeat a failed or interrupted native deletion, and let
+  uninstall purge skip SQL erasure for its restored plaintext database.
+- [ ] Decide whether uninstall `--purge-data` should also erase Mail and Telegram
+  history from the restored plaintext `plugin-data/mordred/mordred.db`. It is
+  retained, as it was before coordinated reset.
+- [ ] Complete Linux hardware acceptance. Isolated macOS real-helper acceptance and
+  the existing Windows refusal tests passed; see the dated validation-log entry.

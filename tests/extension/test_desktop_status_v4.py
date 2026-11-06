@@ -66,7 +66,9 @@ def test_v3_keeps_its_keys_and_v4_adds_exactly_the_new_sections(desktop: Any) ->
         "runtime_protected",
         "databases",
         "plaintext_backups",
+        "startup_outcome",
     }
+    assert new["databases"]["startup_outcome"] is None and new["databases"]["plaintext_backups"] == 0
 
 
 @pytest.mark.parametrize("code", sorted(_projections.IMPORT_STATE_CODES))
@@ -244,10 +246,12 @@ def test_pending_work_means_not_runtime_protected(desktop: Any, monkeypatch: pyt
     key = {"db-encryption.pending": "encrypt_pending", "db-decryption.pending": "decrypt_pending"}.get(
         marker, "journal"
     )
-    assert databases[key] is None  # pending state is not classified by DatabaseStatus
+    assert databases[key] is True  # a real fact from lstat, never inferred from another field
+    others = {"encrypt_pending", "decrypt_pending", "journal"} - {key}
+    assert all(databases[other] is False for other in others)
 
 
-def test_databases_status_leaves_classification_and_backup_counts_unknown(
+def test_databases_status_counts_backups_and_leaves_classification_unknown(
     desktop: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(_seams, "sqlcipher_available", lambda: True)
@@ -256,10 +260,11 @@ def test_databases_status_leaves_classification_and_backup_counts_unknown(
     (desktop.home / "kanban.db").write_bytes(b"\x01" * 4096)  # ciphertext (or damage): unreadable without a key
     (desktop.home / "backups").mkdir()
     (desktop.home / "backups" / "hermes-1.zip").write_bytes(b"zip")
+    (desktop.home / "backups" / "notes.txt").write_bytes(b"not an archive")
     databases = desktop.get("/databases/status")
     assert databases["ok"] is True and databases["supported"] is True and databases["armed"] is False
     assert databases["databases"] == []  # unknown, never a verified empty inventory
-    assert databases["plaintext_backups"] is None and databases["runtime_protected"] is False
+    assert databases["plaintext_backups"] == 1 and databases["runtime_protected"] is False
 
 
 def test_a_failing_shared_observation_is_a_code_not_a_500(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> None:

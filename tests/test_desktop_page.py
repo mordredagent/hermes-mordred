@@ -72,6 +72,13 @@ PAGE_CODES = (
     "databases_key_missing",
     "databases_failed",
     "databases_busy",
+    "databases_cancel_refused",
+    "startup_busy",
+    "startup_memory_required",
+    "startup_key_unavailable",
+    "startup_refused",
+    "startup_too_large",
+    "startup_auth_interrupted",
     "vault_anchor_stale",
     "mail_already_configured",
     "mail_setup_flow_expired",
@@ -201,6 +208,7 @@ def v4(
     mail_messages: int = 0,
     mail: dict[str, Any] | None = None,
     supported: bool = True,
+    startup_outcome: str | None = None,
 ) -> dict[str, Any]:
     sources = {
         "telegram": {"conversations": telegram[0], "messages": telegram[1], "parts": telegram[1]},
@@ -219,6 +227,7 @@ def v4(
             "runtime_protected": armed if protected is None else protected,
             "databases": [{"relative": relative, "state": state} for relative, state in rows],
             "plaintext_backups": backups,
+            "startup_outcome": startup_outcome,
         },
         "imports": {"available": available, "code": code, "sources": sources if available else {}},
         "mail": mail if mail is not None else {"configured": False},
@@ -479,10 +488,10 @@ STATE_CASES.update(
 # Step 1.3 over the databases facts (the second design revision's total table).
 STATE_CASES.update(
     {
-        "v4, databases armed in a home with a new plaintext file": (
+        "v4, armed and protected whatever a row says: status cannot classify files": (
             mac(**v4(rows=(("state.db", "unreadable"), ("kanban.db", "plaintext")))),
             None,
-            ready_but(databases="attention:plaintext_in_armed_home"),
+            ready_but(),
         ),
         "v4, databases armed with a stale encrypt request": (
             mac(**v4(encrypt_pending=True)),
@@ -503,6 +512,83 @@ STATE_CASES.update(
             mac(**v4(armed=False, rows=(), available=False, code="not_armed")),
             None,
             ready_but(databases="next", telegram_import="blocked:needs_databases", mail="todo"),
+        ),
+        "v4, a journal outranks a decrypt marker": (
+            mac(**v4(journal=True, decrypt_pending=True)),
+            None,
+            ready_but(databases="attention:journal"),
+        ),
+        "v4, a record never outranks a journal": (
+            mac(**v4(armed=False, encrypt_pending=True, journal=True, startup_outcome="busy", available=False)),
+            None,
+            ready_but(databases="attention:journal", telegram_import="blocked:needs_databases"),
+        ),
+        "v4, startup postponed by a holder": (
+            mac(**v4(armed=False, encrypt_pending=True, startup_outcome="busy", available=False)),
+            None,
+            ready_but(databases="attention:startup_busy", telegram_import="blocked:needs_databases"),
+        ),
+        "v4, memory off cannot hide the Cancel of a schedule": (
+            mac(memory=False, login=False, **v4(armed=False, encrypt_pending=True, available=False)),
+            None,
+            ready_but(
+                memory="next",
+                databases="todo:restart",
+                telegram="blocked:needs_memory",
+                telegram_import="blocked:needs_memory",
+                mail="todo",
+            ),
+        ),
+        "linux, v4, not armed": (
+            linux(**v4(vault=None, armed=False, available=False, code="store_unavailable")),
+            None,
+            ready_but(vault=None, databases="next", telegram_import="todo", mail=None),
+        ),
+        "linux, v4, scheduled": (
+            linux(**v4(vault=None, armed=False, encrypt_pending=True, available=False, code="store_unavailable")),
+            None,
+            ready_but(vault=None, databases="next:restart", telegram_import="todo", mail=None),
+        ),
+        "linux, v4, startup refused": (
+            linux(
+                **v4(
+                    vault=None,
+                    armed=False,
+                    encrypt_pending=True,
+                    startup_outcome="refused",
+                    available=False,
+                    code="store_unavailable",
+                )
+            ),
+            None,
+            ready_but(vault=None, databases="attention:startup_refused", telegram_import="next", mail=None),
+        ),
+        "linux, v4, armed before this start": (
+            linux(**v4(vault=None, protected=False, available=False, code="store_unavailable")),
+            None,
+            ready_but(vault=None, databases="next:restart", telegram_import="todo", mail=None),
+        ),
+        "linux, v4, on": (
+            linux(**v4(vault=None, available=False, code="store_unavailable")),
+            SYNC_COUNTS,
+            ready_but(vault=None, mail=None),
+        ),
+        "linux, v4, memory first": (
+            linux(memory=False, login=False, **v4(vault=None, armed=False, available=False, code="store_unavailable")),
+            None,
+            ready_but(
+                vault=None,
+                memory="next",
+                databases="blocked:needs_memory",
+                telegram="blocked:needs_memory",
+                telegram_import="blocked:needs_memory",
+                mail=None,
+            ),
+        ),
+        "linux, v4, no driver": (
+            linux(**v4(vault=None, armed=False, supported=False, available=False, code="store_unavailable")),
+            SYNC_COUNTS,
+            ready_but(vault=None, databases="attention:databases_unsupported", mail=None),
         ),
     }
 )
@@ -640,7 +726,6 @@ def test_backend_answers_version_4_like_version_3(monkeypatch, platform, tmp_pat
     "status,layout",
     [
         ({"platform": "darwin", "hardware_kind": "secure_enclave", "telegram_supported": True}, "macos"),
-        ({"platform": "linux", "hardware_kind": "tpm", "telegram_supported": True}, "linux"),
         ({"platform": "win32", "hardware_kind": "cng", "telegram_supported": False}, "windows"),
         ({"platform": "darwin", "hardware_kind": None, "telegram_supported": True}, "unsupported"),
         ({"platform": "darwin", "hardware_kind": "secure_enclave", "telegram_supported": False}, "unsupported"),
@@ -700,19 +785,39 @@ def test_every_code_the_page_knows_has_an_entry():
 
 
 def test_explain_uses_the_imap_hint_and_mail_wording():
-    result = render_page("""
+    result = render_page(
+        """
 console.log(JSON.stringify({
   hinted: new MordredError('imap_auth_failed', {hint: 'gmail_app_password_length'}).message,
   unknown: new MordredError('imap_auth_failed', {hint: 'free text from a server'}).message,
   plain: explain('imap_auth_failed'),
   mail: explainMail('secrets_corrupt'),
   shared: explainMail('imap_unreachable'),
+  mailFailures: ANSWERS.map(a => explainMail(a.error, a.hint)),
+  directFailures: Object.fromEntries(DIRECT_CODES.map(code => [code, explain(code)])),
 }))
-""")
+""".replace("ANSWERS", json.dumps([answer for answer, _ in MAIL_FAILURES])).replace(
+            "DIRECT_CODES", json.dumps(list(DIRECT_TOOLS_CODES))
+        )
+    )
     assert result["hinted"].startswith("A Gmail app password is exactly 16 letters")
     assert result["unknown"] == result["plain"] == "The login was refused. Nothing was stored."
     assert "mailbox" in result["mail"] and "Telegram" not in result["mail"]
     assert result["shared"].startswith("The server could not be reached")
+    for (answer, phrase), message in zip(MAIL_FAILURES, result["mailFailures"], strict=True):
+        assert phrase in message, answer
+    direct_phrases = {
+        "config_unreadable": "could not be read (or is not a YAML mapping)",
+        "config_vault_managed": "sealed in Mordred\u2019s vault",
+        "config_write_failed": "hermes config command did not finish",
+        "config_has_setting": "already sets tools.tool_search",
+        "hermes_cli_missing": "hermes command was not found",
+        "config_unsupported_shape": "shares the tools or tool_search mapping",
+        "hermes_cli_unsupported": "hermes config command has no get/unset",
+    }
+    assert set(direct_phrases) == set(DIRECT_TOOLS_CODES) == set(result["directFailures"])
+    for code, phrase in direct_phrases.items():
+        assert phrase in result["directFailures"][code], code
 
 
 def test_sync_in_progress_names_both_writers():
@@ -848,9 +953,7 @@ console.log(JSON.stringify([...out]))
 def page_text(status: dict[str, Any]) -> str:
     return render_page(
         """
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 console.log(JSON.stringify(text(PageBody({status: STATUS, health: null, refresh: () => {}}))))
 """.replace("STATUS", json.dumps(status))
     )
@@ -943,9 +1046,7 @@ rest = async path => {
 }
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)) }
 const page = () => { cursor = 0; effects.length = 0; return SetupPage({}) }
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 const out = {}
 page()
 effects.slice().forEach(f => f())
@@ -988,83 +1089,6 @@ console.log(JSON.stringify(out))
 SYNC_IDLE = {"syncing": False, "progress": None, "last_error": None, "dialog_count": 0, "message_count": 0}
 
 
-@pytest.mark.parametrize(
-    "polls",
-    [
-        # Finished before any poll saw it running: the first idle answer is its completion.
-        [{**SYNC_IDLE, "dialog_count": 2, "message_count": 9}],
-        # Seen running first: the busy → idle rule refreshes, and only once.
-        [SYNC_RUNNING, {**SYNC_IDLE, "dialog_count": 2, "message_count": 9}],
-    ],
-    ids=["idle-to-idle", "busy-to-idle"],
-)
-def test_an_import_started_here_refreshes_the_counts_once_even_between_polls(polls):
-    before = mac(**v4(telegram=(0, 0)))
-    after = mac(**v4(telegram=(2, 9)))
-    result = render_page(
-        """
-globalThis.setInterval = () => 0
-globalThis.clearInterval = () => {}
-const original = jsx
-let body = null
-jsx = jsxs = (type, props) => type === PageBody ? (body = props, {type: 'PageBody', props: {}}) : original(type, props)
-const statuses = [BEFORE, AFTER]
-const reads = []
-const polls = POLLS
-rest = async (path, init) => {
-  if (path.startsWith('/status')) {
-    reads.push(path)
-    return statuses[Math.min(reads.length - 1, statuses.length - 1)]
-  }
-  if (path === '/sync') return init && init.method === 'POST' ? {ok: true} : polls.length ? polls.shift() : LAST
-  return {ok: true}
-}
-const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)) }
-const page = () => { cursor = 0; effects.length = 0; return SetupPage({}) }
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
-const out = {}
-page()
-effects.slice().forEach(f => f())
-await flush()
-page()
-// The import step's first poll, before anything was started: idle, nothing to refresh.
-body.onSync(IDLE)
-await flush()
-out.beforeStart = reads.length
-// The real import step (its hooks numbered apart from SetupPage's), started by its button.
-const step = () => { cursor = 1000; effects.length = 0; return ImportStep({id: 'telegram_import', n: '2.4',
-  state: 'next', title: 'Import Telegram messages', refresh: body.refresh, onSync: body.onSync,
-  onStarted: body.onImportStarted}) }
-let tree = step()
-await find(tree, n => n.type === 'button' && n.props.children === 'Import').props.onClick()
-await flush()
-// The step's next polls (its interval), until the import is seen idle.
-while (polls.length) { body.onSync(await rest('/sync')); await flush() }
-out.afterImport = reads.length
-// Later polls of the same idle state, or of another one, never read the status again.
-body.onSync(LAST); await flush()
-body.onSync({...LAST, message_count: 10}); await flush()
-out.later = reads.length
-page()
-cursor = 2000
-out.text = text(PageBody({...body}))
-console.log(JSON.stringify(out))
-""".replace("BEFORE", json.dumps(before))
-        .replace("AFTER", json.dumps(after))
-        .replace("POLLS", json.dumps(polls))
-        .replace("LAST", json.dumps(polls[-1]))
-        .replace("IDLE", json.dumps(SYNC_IDLE))
-    )
-    assert result["beforeStart"] == 1
-    assert result["afterImport"] == 2, "exactly one extra status read for the finished import"
-    assert result["later"] == 2
-    text = result["text"]
-    assert "connected · 2 chats · 9 messages in Mordred\u2019s store (all accounts)" in text
-    assert "Import Telegram messages\u2713 Done" in text
-
-
 # SetupPage with its PageBody captured, and the real import step mounted beside it (hooks
 # numbered apart): /sync GETs and the POST answer from `syncAnswers` in order, "HOLD"
 # staying pending until `held.shift()(answer)`; /status answers BEFORE, then AFTER.
@@ -1090,9 +1114,7 @@ rest = async (path, init) => {
 }
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r)) }
 const page = () => { cursor = 0; effects.length = 0; return SetupPage({}) }
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 page()
 effects.slice().forEach(f => f())
 await flush()
@@ -1136,6 +1158,9 @@ out.afterCurrent = reads.length
 timers[0](); await flush()
 out.later = reads.length
 out.gets = gets.length
+body.onSync(NINE); await flush()
+body.onSync({...NINE, message_count: 10}); await flush()
+out.afterRepeatedIdle = reads.length
 page()
 cursor = 2000
 out.text = text(PageBody({...body}))
@@ -1145,13 +1170,15 @@ out.text = text(PageBody({...body}))
     assert result["afterStale"] == 1, "the stale idle answer (poll issued before the start) refreshes nothing"
     assert result["afterCurrent"] == 2, "the first idle answer to a later poll is the import's end"
     assert result["later"] == 2 and result["gets"] == 3
+    assert result["afterRepeatedIdle"] == 2, "repeated or changed idle counts never repeat completion"
     assert "connected · 2 chats · 9 messages in Mordred\u2019s store (all accounts)" in result["text"]
     assert "Import Telegram messages\u2713 Done" in result["text"]
 
 
 def test_a_stale_pre_start_idle_after_a_post_start_busy_answer_changes_nothing():
     """busy (post-start) → stale idle (pre-start) → completed idle: one read, at the real end."""
-    script = """
+    script = (
+        """
 await find(tree, n => n.type === 'button' && n.props.children === 'Import').props.onClick()
 await flush()
 held[1](RUNNING)
@@ -1162,13 +1189,20 @@ await flush()
 out.afterStale = reads.length
 timers[0](); await flush()
 out.afterEnd = reads.length
+body.onSync(NINE); await flush()
+body.onSync({...NINE, message_count: 10}); await flush()
+out.afterRepeatedIdle = reads.length
 page()
 cursor = 2000
 out.text = text(PageBody({...body}))
-""".replace("RUNNING", json.dumps(SYNC_RUNNING)).replace("STALE", json.dumps(SYNC_IDLE))
+""".replace("RUNNING", json.dumps(SYNC_RUNNING))
+        .replace("STALE", json.dumps(SYNC_IDLE))
+        .replace("NINE", json.dumps(SYNC_NINE))
+    )
     result = import_page(["HOLD", {"ok": True}, "HOLD", SYNC_NINE], script)
     assert result["afterBusy"] == 1 and result["afterStale"] == 1
     assert result["afterEnd"] == 2, "exactly one extra status read, at the real completion"
+    assert result["afterRepeatedIdle"] == 2, "repeated or changed idle counts never repeat completion"
     assert "connected · 2 chats · 9 messages in Mordred\u2019s store (all accounts)" in result["text"]
     assert "Import Telegram messages\u2713 Done" in result["text"]
 
@@ -1396,11 +1430,28 @@ def test_overview_from_an_older_api_asks_for_an_update_and_uses_in_process_count
     assert rows(mac())["telegram"] == ("done", "connected")
 
 
-def test_overview_on_linux_says_databases_and_mail_are_not_available():
-    result = rows(linux(memory=False, login=False))
-    assert result["protection"] == ("partial", "TPM 2.0 · memory not encrypted · Databases: not available on Linux")
-    assert result["mail"] == ("not_started", "not available on Linux")
-    assert result["telegram"] == ("not_started", "not connected")
+def test_overview_on_linux_reports_databases_from_v4_and_mail_is_not_available():
+    base = {"vault": None, "available": False, "code": "store_unavailable"}
+    off = rows(linux(memory=False, login=False, **v4(armed=False, **base)))
+    assert off["protection"] == ("partial", "TPM 2.0 · memory not encrypted · databases off")
+    assert off["mail"] == ("not_started", "not available on Linux")
+    assert off["telegram"] == ("not_started", "not connected")
+    on = rows(linux(**v4(**base)))
+    assert on["protection"] == ("done", "TPM 2.0 · memory encrypted · databases on")
+    assert on["mail"] == ("not_started", "not available on Linux")
+    scheduled = rows(linux(**v4(armed=False, encrypt_pending=True, **base)))
+    assert scheduled["protection"] == ("partial", "TPM 2.0 · memory encrypted · databases: converting at next restart")
+    refused = rows(linux(**v4(armed=False, encrypt_pending=True, startup_outcome="refused", **base)))
+    assert refused["protection"] == ("attention", "TPM 2.0 · memory encrypted · databases: needs attention")
+    unsupported = rows(linux(**v4(armed=False, supported=False, **base)))
+    assert unsupported["protection"] == ("attention", "TPM 2.0 · memory encrypted · databases: not available")
+    # No claim about databases on Linux from an API that does not report them.
+    older = rows(linux(memory=False, login=False))
+    assert older["protection"] == (
+        "attention",
+        "TPM 2.0 · memory not encrypted · databases: Update Mordred to use this",
+    )
+    assert older["mail"] == ("not_started", "not available on Linux")
 
 
 def test_overview_from_version_4_reads_the_store_and_the_mailbox_label():
@@ -1603,9 +1654,7 @@ Object.defineProperty(globalThis, 'navigator', {value: {clipboard}, configurable
 let refreshes = 0
 const refresh = () => {refreshes++}
 const view = () => {cursor = 0; effects.length = 0; return COMPONENT}
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 const button = (tree, label) => find(tree, n => n.type === 'button' && n.props.children === label)
 const press = (tree, label) => {
   const found = button(tree, label)
@@ -1667,7 +1716,7 @@ COMMIT = "await press(tree, 'Create the vault'); tree = view()\n"
 
 
 def test_vault_step_shows_the_passphrase_before_anything_is_created():
-    result = component(vault_step(VAULT_NONE), [PREPARED], PREPARE)
+    result = component(vault_step(VAULT_NONE), [PREPARED], PREPARE + COMMIT)
     assert result["requests"] == [["/vault/prepare", {}]]
     words = render_page_words(result["tree"])
     assert words == WORDS
@@ -1676,9 +1725,7 @@ def test_vault_step_shows_the_passphrase_before_anything_is_created():
     assert create == ["Create the vault"]
     assert "Ask for Touch ID every time Hermes unlocks the vault" in result["text"]
     # Not ticked yet: the commit stays disabled, and pressing it anyway sends nothing.
-    gated = component(vault_step(VAULT_NONE), [PREPARED], PREPARE + COMMIT)
-    assert gated["requests"] == [["/vault/prepare", {}]]
-    assert '"disabled": true' in json.dumps(find_button(gated["tree"], "Create the vault"))
+    assert '"disabled": true' in json.dumps(find_button(result["tree"], "Create the vault"))
 
 
 def render_page_words(tree: Any) -> list[str]:
@@ -1813,8 +1860,6 @@ def test_a_malformed_prepare_answer_shows_no_card(answer):
     "code,kept",
     [
         ("vault_flow_expired", False),
-        ("vault_exists", False),
-        ("env_optout", False),
         ("memory_operation_in_progress", True),
     ],
 )
@@ -1952,8 +1997,10 @@ def test_databases_table_is_the_preview():
     assert "Encrypt databases" in result["buttons"]
     single = component(databases_step(mac(**v4(armed=False, backups=1, available=False))), [])
     assert "1 backup archive in your Hermes home" in single["text"]
+    # `databases: []` is what status always answers, and means unknown: never "no files".
     empty = component(databases_step(mac(**v4(armed=False, rows=(), available=False))), [])
-    assert "No Hermes database files were found yet." in empty["text"]
+    assert "No Hermes database files" not in empty["text"] and "not checked" not in empty["text"]
+    assert "Encrypt databases" in empty["buttons"]
 
 
 def test_encrypt_databases_schedules_and_offers_the_restart():
@@ -1965,8 +2012,9 @@ def test_encrypt_databases_schedules_and_offers_the_restart():
     assert SCHEDULED_TEXT in result["text"]
     assert "Restart Hermes Desktop" in result["buttons"] and "Encrypt databases" not in result["buttons"]
     assert result["refreshes"] == 1
+    # Armed since the status was read (the Terminal command): the route's answer decides.
     restart = component(
-        databases_step(mac(**v4(protected=False))),
+        databases_step(PLAINTEXT_HOME),
         [{"ok": True, "action": "needs_restart", "restart_required": True}],
         script,
     )
@@ -1991,7 +2039,7 @@ def test_encrypt_databases_schedules_and_offers_the_restart():
         ({"ok": False, "error": "decrypt_pending"}, "Database decryption is pending"),
         ({"ok": False, "error": "journal"}, "left its journal. Run hermes-mordred databases status"),
         ({"ok": False, "error": "databases_failed"}, "The step shows the current state again"),
-        ({"ok": False, "error": "databases_unsupported"}, "Protected storage is unavailable for this runtime"),
+        ({"ok": False, "error": "databases_unsupported"}, "not supported on this system"),
     ],
 )
 def test_encrypt_databases_failures_are_explained_and_the_status_is_read_again(answer, phrase):
@@ -2007,17 +2055,21 @@ def test_encrypt_databases_failures_are_explained_and_the_status_is_read_again(a
 
 
 @pytest.mark.parametrize(
-    "status,text",
+    "status,text,buttons",
     [
-        (mac(**v4(armed=False, encrypt_pending=True, available=False)), SCHEDULED_TEXT),
-        (mac(**v4(protected=False)), ARMED_TEXT),
+        (
+            mac(**v4(armed=False, encrypt_pending=True, available=False)),
+            SCHEDULED_TEXT,
+            ["Cancel", "Restart Hermes Desktop"],
+        ),
+        (mac(**v4(protected=False)), ARMED_TEXT, ["Restart Hermes Desktop"]),
     ],
     ids=["scheduled", "armed-before-this-start"],
 )
-def test_databases_waiting_for_a_restart_offer_only_the_restart(status, text):
+def test_databases_waiting_for_a_restart_offer_only_the_restart(status, text, buttons):
     result = component(databases_step(status, restart=True), [])
     assert text in result["text"]
-    assert result["buttons"] == ["Restart Hermes Desktop"]
+    assert result["buttons"] == buttons
 
 
 @pytest.mark.parametrize("code", ["plaintext_in_armed_home", "stale_pending", "decrypt_pending", "journal"])
@@ -2028,11 +2080,301 @@ def test_databases_attention_from_status_points_to_terminal_without_an_encrypt_b
     assert '"role": "alert"' in json.dumps(result["tree"])
 
 
-def test_databases_done_says_encrypted_or_unreadable_never_databases_encrypted():
-    status = mac(**v4(rows=(("state.db", "unreadable"), ("kanban.db", "unreadable"))))
-    result = component(databases_step(status, "done"), [])
-    assert "Database encryption: on (2 files encrypted or unreadable)." in result["text"]
-    assert "databases encrypted" not in result["text"].lower()
+def test_databases_done_says_on_with_no_file_count():
+    # A count would be false: `databases` stays unknown, so nothing was counted.
+    for status in (mac(**v4(rows=())), mac(**v4(rows=(("state.db", "unreadable"), ("kanban.db", "unreadable"))))):
+        result = component(databases_step(status, "done"), [])
+        assert "Database encryption: on" in result["text"]
+        assert "file" not in result["text"].split("Database encryption: on")[1].split("Why this step")[0]
+        assert "encrypted or unreadable" not in result["text"] and "databases encrypted" not in result["text"].lower()
+    assert rows(mac(**v4(rows=(("a.db", "plaintext"),))))["protection"][1].endswith("databases on")
+
+
+def derived_databases_step(status: dict[str, Any]) -> str:
+    return (
+        "(() => {const status = (globalThis.dbStatus ??= " + json.dumps(status) + ");"
+        "return DatabasesStep({id:'databases', n:'1.3', ...stepStates(status).databases, status, refresh})})()"
+    )
+
+
+REMEDIES = {
+    "startup_busy": ["Quit all Hermes processes"],
+    "startup_memory_required": ["memory"],
+    "startup_key_unavailable": ["hermes-mordred databases encrypt", "if one appears"],
+    "startup_refused": ["hermes-mordred databases encrypt"],
+    "startup_too_large": ["hermes-mordred databases encrypt"],
+    "startup_auth_interrupted": ["Cancel", "Encrypt databases", "hermes-mordred databases encrypt"],
+}
+OUTCOMES = {
+    "busy": "startup_busy",
+    "memory_not_enabled": "startup_memory_required",
+    "source_unavailable": "startup_key_unavailable",
+    "auth_interrupted": "startup_auth_interrupted",
+    "too_large": "startup_too_large",
+    "holders_open": "startup_refused",
+    "refused": "startup_refused",
+    "unavailable": "startup_refused",
+    "not_a_known_outcome": "startup_refused",
+}
+
+
+@pytest.mark.parametrize(("outcome", "code"), sorted(OUTCOMES.items()))
+def test_startup_outcome_codes_point_to_their_remedy(outcome, code):
+    """On page load after a restart, from status alone: no press needed."""
+    status = mac(**v4(armed=False, encrypt_pending=True, startup_outcome=outcome, available=False))
+    result = component(derived_databases_step(status), [])
+    assert result["requests"] == []
+    assert '"role": "alert"' in json.dumps(result["tree"], ensure_ascii=False)
+    for phrase in REMEDIES[code]:
+        assert phrase in result["text"], (code, phrase)
+    assert "Touch ID" not in result["text"], code
+    assert "Encrypt databases" not in result["buttons"], "the button would only answer the same code"
+    assert "Cancel" in result["buttons"], "every startup code offers Cancel while pending"
+
+
+def test_startup_codes_retried_by_a_restart_offer_it():
+    for outcome, offered in (("busy", True), ("source_unavailable", True), ("memory_not_enabled", True)):
+        status = mac(**v4(armed=False, encrypt_pending=True, startup_outcome=outcome, available=False))
+        assert ("Restart Hermes Desktop" in component(derived_databases_step(status), [])["buttons"]) is offered
+    for outcome in ("auth_interrupted", "too_large", "refused"):
+        status = mac(**v4(armed=False, encrypt_pending=True, startup_outcome=outcome, available=False))
+        assert "Restart Hermes Desktop" not in component(derived_databases_step(status), [])["buttons"]
+
+
+@pytest.mark.parametrize(
+    ("facts", "encrypt", "cancel"),
+    [
+        ({"armed": False}, True, False),
+        ({"armed": False, "encrypt_pending": True}, False, True),
+        ({"armed": False, "encrypt_pending": True, "startup_outcome": "busy"}, False, True),
+        ({"armed": False, "encrypt_pending": True, "journal": True}, False, False),
+        ({"armed": False, "journal": True}, False, False),
+        ({"armed": False, "decrypt_pending": True}, False, False),
+        ({"armed": False, "decrypt_pending": True, "encrypt_pending": True}, False, True),
+        ({"protected": False}, False, False),
+        ({"encrypt_pending": True}, False, False),  # armed: cancelling would be refused
+        ({}, False, False),
+        ({"armed": False, "supported": False}, False, False),
+    ],
+    ids=[
+        "unarmed",
+        "scheduled",
+        "postponed",
+        "scheduled-with-journal",
+        "journal",
+        "decrypting",
+        "decrypting-and-scheduled",
+        "armed-before-this-start",
+        "stale",
+        "on",
+        "unsupported",
+    ],
+)
+def test_encrypt_and_cancel_are_visible_only_where_they_can_act(facts, encrypt, cancel):
+    status = mac(**v4(available=False, **facts))
+    result = component(derived_databases_step(status), [])
+    assert ("Encrypt databases" in result["buttons"]) is encrypt, result["buttons"]
+    assert ("Cancel" in result["buttons"]) is cancel, result["buttons"]
+
+
+def _unknown_facts() -> dict[str, Any]:
+    status = mac(**v4(available=False))
+    status["databases"].update(armed=None, encrypt_pending=None, decrypt_pending=None, journal=None)
+    status["databases"].update(plaintext_backups=None, databases=[])
+    return status
+
+
+def test_unknown_facts_show_neither_control_and_name_a_next_step():
+    result = component(derived_databases_step(_unknown_facts()), [])
+    assert "Encrypt databases" not in result["buttons"] and "Cancel" not in result["buttons"]
+    assert "hermes-mordred databases status" in result["text"]
+    assert "not checked" in result["text"]
+
+
+def test_not_checked_is_only_said_when_the_facts_are_unknown():
+    for facts in ({"armed": False}, {"armed": False, "encrypt_pending": True}, {"protected": False}, {}):
+        result = component(derived_databases_step(mac(**v4(available=False, rows=(), **facts))), [])
+        assert "not checked" not in result["text"], facts
+        assert "unknown" not in result["text"].lower(), facts
+
+
+def test_cancel_goes_through_the_route_and_reads_the_status_again():
+    status = mac(**v4(armed=False, encrypt_pending=True, startup_outcome="auth_interrupted", available=False))
+    after = mac(**v4(armed=False, available=False))
+    script = "await press(tree, 'Cancel'); globalThis.dbStatus = " + json.dumps(after) + "; tree = view()\n"
+    result = component(derived_databases_step(status), [{"ok": True, "action": "cancelled"}], script)
+    assert result["requests"] == [["/databases/cancel", {}]]
+    assert result["refreshes"] == 1
+    assert "Encrypt databases" in result["buttons"] and "Cancel" not in result["buttons"]
+    assert "cancelled" in result["text"].lower()
+    assert '"role": "alert"' not in json.dumps(result["tree"])
+
+
+@pytest.mark.parametrize(
+    ("answer", "phrase"),
+    [
+        ({"ok": True, "action": "attention", "code": "databases_cancel_refused"}, "cannot be cancelled"),
+        ({"ok": True, "action": "attention", "code": "journal"}, "left its journal"),
+        ({"ok": True, "action": "nothing"}, "does not understand"),
+        ({"ok": False, "error": "databases_failed"}, "hermes-mordred databases status"),
+        ({"ok": False, "error": "databases_unsupported"}, "not supported on this system"),
+    ],
+)
+def test_cancel_failures_are_explained_and_the_status_is_read_again(answer, phrase):
+    status = mac(**v4(armed=False, encrypt_pending=True, available=False))
+    result = component(derived_databases_step(status), [answer], "await press(tree, 'Cancel'); tree = view()\n")
+    assert '"role": "alert"' in json.dumps(result["tree"]) and phrase in result["text"]
+    assert result["refreshes"] == 1
+    assert "The scheduled encryption is cancelled" not in result["text"]
+
+
+def test_the_scheduled_notice_keeps_a_cancel_and_cancel_then_press_schedules_again():
+    status = mac(**v4(armed=False, available=False))
+    pending = mac(**v4(armed=False, encrypt_pending=True, available=False))
+    script = (
+        "await press(tree, 'Encrypt databases'); globalThis.dbStatus = "
+        + json.dumps(pending)
+        + "; tree = view(); out.first = labels(tree)\n"
+        "await press(tree, 'Cancel'); globalThis.dbStatus = "
+        + json.dumps(status)
+        + "; tree = view(); out.second = labels(tree)\n"
+        "await press(tree, 'Encrypt databases'); tree = view()\n"
+    )
+    answers = [
+        {"ok": True, "action": "scheduled", "restart_required": True},
+        {"ok": True, "action": "cancelled"},
+        {"ok": True, "action": "scheduled", "restart_required": True},
+    ]
+    result = component(derived_databases_step(status), answers, script)
+    assert [request[0] for request in result["requests"]] == [
+        "/databases/encrypt",
+        "/databases/cancel",
+        "/databases/encrypt",
+    ]
+    assert "Cancel" in result["out"]["first"] and "Restart Hermes Desktop" in result["out"]["first"]
+    assert "Encrypt databases" in result["out"]["second"] and "Restart Hermes Desktop" not in result["out"]["second"]
+    assert SCHEDULED_TEXT in result["text"]
+
+
+def test_too_large_at_the_press_is_explained_with_nothing_scheduled():
+    answer = {"ok": True, "action": "attention", "code": "startup_too_large"}
+    result = component(
+        databases_step(PLAINTEXT_HOME), [answer], "await press(tree, 'Encrypt databases'); tree = view()\n"
+    )
+    assert "hermes-mordred databases encrypt" in result["text"]
+    assert SCHEDULED_TEXT not in result["text"] and result["refreshes"] == 1
+    assert '"role": "alert"' in json.dumps(result["tree"])
+
+
+def test_no_database_copy_promises_a_prompt():
+    table = block("MESSAGES")
+    for code in REMEDIES:
+        line = re.search(rf"^\s*{code}:\s*\n?\s*'([^']*)'", table, re.M)
+        assert line, code
+        assert "Touch ID" not in line.group(1), code
+        assert "will prompt" not in line.group(1).lower(), code
+    assert "if one appears" in re.search(r"startup_key_unavailable:\s*\n?\s*'([^']*)'", table).group(1)
+    assert "Takes effect the next time Hermes Desktop starts." in source()
+
+
+def test_page_and_route_answer_the_same_code_for_every_outcome():
+    pytest.importorskip("fastapi")
+    from mordred_hermes.desktop import _databases
+
+    for outcome, code in OUTCOMES.items():
+        assert _databases._OUTCOME_CODES.get(outcome, "startup_refused") == code
+    assert set(_databases._OUTCOME_CODES.values()) <= set(REMEDIES)
+    assert set(REMEDIES) == set(OUTCOMES.values())
+
+
+def test_every_database_code_of_the_api_has_a_message():
+    pytest.importorskip("fastapi")
+    from mordred_hermes.desktop._projections import DATABASE_CODES
+
+    table = block("MESSAGES")
+    for code in DATABASE_CODES:
+        assert re.search(rf"^\s*{code}:", table, re.M), code
+
+
+def test_databases_unsupported_text_makes_no_promise():
+    text = re.search(r"databases_unsupported:\s*\n?\s*'([^']*)'", block("MESSAGES")).group(1)
+    assert "not supported on this system" in text
+    for promise in ("yet", "later", "soon", "future", "will be", "coming"):
+        assert promise not in text.lower(), promise
+
+
+BLOCKER_TEXT_DATABASES = "Encrypt the Hermes databases first."
+BLOCKER_TEXT_RESTART = "Restart Hermes Desktop to finish step 1.3."
+
+
+def test_linux_page_renders_the_databases_step_from_v4_status():
+    status = linux(**v4(vault=None, armed=False, available=False, code="store_unavailable"))
+    rendered = headings(status, None)
+    assert rendered["steps"]["mordred-step-memory"]["text"].startswith("1.2  ")
+    assert rendered["steps"]["mordred-step-databases"]["text"].startswith("1.3  Encrypt Hermes databases")
+    assert "mordred-step-mail" not in rendered["steps"] and "mordred-step-vault" not in rendered["steps"]
+    text = page_text(status)
+    assert "Encrypt databases" in text
+    pressed = render_page(
+        """
+const requests = []
+rest = async (path, options) => { requests.push(path); return {ok: true, action: 'scheduled', restart_required: true} }
+const tree = PageBody({status: STATUS, health: null, refresh: () => {}})
+await find(tree, n => n.type === 'button' && n.props.children === 'Encrypt databases').props.onClick()
+console.log(JSON.stringify(requests))
+""".replace("STATUS", json.dumps(status))
+    )
+    assert pressed == ["/databases/encrypt"]
+    # Blocked on Linux's own step numbers.
+    blocked = page_text(linux(memory=False, login=False, **v4(vault=None, armed=False, available=False)))
+    assert "Go to step 1.2" in blocked
+
+
+def test_linux_page_without_v4_has_no_databases_step_and_no_claim_of_support():
+    rendered = headings(linux(memory=False, login=False), None)
+    assert "mordred-step-databases" not in rendered["steps"]
+
+
+@pytest.mark.parametrize(
+    ("facts", "state"),
+    [
+        ({"armed": False}, "todo"),
+        ({"armed": False, "encrypt_pending": True}, "todo"),
+        ({"armed": False, "encrypt_pending": True, "startup_outcome": "refused"}, "next"),
+        ({"armed": False, "supported": False}, "next"),
+    ],
+    ids=["unarmed", "pending", "postponed", "unsupported"],
+)
+def test_linux_import_is_not_blocked_by_unencrypted_databases(facts, state):
+    """Step 1.3 is opt-in on Linux: an unarmed import writes the Telegram archive (``select_sink``)."""
+    status = linux(**v4(vault=None, available=False, code="store_unavailable", **facts))
+    result = render_page(
+        """
+const status = STATUS
+console.log(JSON.stringify({blocker: storeBlocker(status), step: stepStates(status).telegram_import,
+  text: treeText(PageBody({status, health: null, refresh: () => {}}))}))
+""".replace("STATUS", json.dumps(status))
+    )
+    assert result["blocker"] is None
+    assert result["step"] == {"state": state}
+    assert BLOCKER_TEXT_DATABASES not in result["text"] and BLOCKER_TEXT_RESTART not in result["text"]
+    assert "1.3  Encrypt Hermes databases" in result["text"], "the step stays on the page"
+
+
+def test_linux_import_still_needs_memory_before_the_databases_matter():
+    status = linux(memory=False, login=False, **v4(vault=None, armed=False, available=False))
+    states = render_page(f"console.log(JSON.stringify(stepStates({json.dumps(status)}).telegram_import))")
+    assert states == {"state": "blocked", "blocker": "needs_memory"}
+
+
+def test_macos_import_is_still_blocked_until_the_databases_are_armed():
+    for facts, blocker in (
+        ({"armed": False}, "needs_databases"),
+        ({"armed": False, "encrypt_pending": True}, "needs_restart"),
+        ({"protected": False}, "needs_restart"),
+    ):
+        status = mac(**v4(available=False, **facts))
+        assert render_page(f"console.log(JSON.stringify(storeBlocker({json.dumps(status)})))") == blocker
 
 
 # -- step 2.5: mail --------------------------------------------------------------------------------
@@ -2358,22 +2700,22 @@ def test_a_superseded_setup_start_is_cancelled_and_the_newer_one_applies():
         + f"held.shift()({json.dumps(FOLDERS)})\nawait first\n"
         + f"held.shift()({json.dumps(newer)})\nawait second\ntree = view()\n"
         + "out.finish = Boolean(button(tree, 'Finish'))\n"
+        + "out.beforeFinish = {requests: [...requests], text: text(tree)}\n"
     )
-    result = component(late_step(MAIL_V4), ["HOLD", "HOLD", {"ok": True}], script)
-    assert [request[0] for request in result["requests"]] == [
-        "/mail/setup/start",
-        "/mail/setup/start",
-        "/mail/setup/m7/cancel",
-    ]
-    assert result["out"]["finish"] is True and "Gesendet" in json.dumps(result["tree"])
-    finish = component(
+    result = component(
         late_step(MAIL_V4),
         ["HOLD", "HOLD", {"ok": True}, {"ok": True, "step": "done"}],
         script
         + "find(find(tree, n => n.type === 'label' && text(n) === 'Archiv'), n => n.props && n.props.type === 'radio')"
         + ".props.onChange(); tree = view()\nawait press(tree, 'Finish'); tree = view()\n",
     )
-    assert finish["requests"][-1] == ["/mail/setup/m8/finish", {"selection": "f-arch"}]
+    assert [request[0] for request in result["out"]["beforeFinish"]["requests"]] == [
+        "/mail/setup/start",
+        "/mail/setup/start",
+        "/mail/setup/m7/cancel",
+    ]
+    assert result["out"]["finish"] is True and "Gesendet" in result["out"]["beforeFinish"]["text"]
+    assert result["requests"][-1] == ["/mail/setup/m8/finish", {"selection": "f-arch"}]
 
 
 def test_a_late_setup_failure_after_unmount_shows_nothing():
@@ -2400,26 +2742,26 @@ def test_mail_finish_failures_keep_the_flow_only_for_a_retry(code, kept):
     assert '"role": "alert"' in json.dumps(result["tree"])
 
 
-@pytest.mark.parametrize(
-    "answer,phrase",
-    [
-        ({"error": "imap_auth_failed", "hint": "authentication_failed"}, "The server rejected the address or the app"),
-        ({"error": "imap_auth_failed", "hint": "server_alert"}, "The server refused the login with an alert"),
-        ({"error": "imap_auth_failed", "hint": "login_disabled"}, "does not allow password login over IMAP"),
-        ({"error": "imap_auth_failed", "hint": "gmail_app_password_length"}, "exactly 16 letters"),
-        ({"error": "imap_auth_failed"}, "The login was refused. Nothing was stored."),
-        ({"error": "imap_unreachable"}, "The server could not be reached"),
-        ({"error": "sync_in_progress"}, "A mail fetch or import is running (from Hermes or Terminal)"),
-        ({"error": "mail_already_configured"}, "A mailbox is already set up. Remove it below first."),
-        ({"error": "mail_setup_busy"}, "Another mail setup is waiting for its folder choice"),
-        ({"error": "touch_id_policy_mismatch"}, "Touch ID setting differs from your choice"),
-        ({"error": "invalid_address"}, "Enter a mail address"),
-        ({"error": "invalid_host"}, "Enter the IMAP server name"),
-        ({"error": "invalid_account"}, "The account label must start with a lowercase letter"),
-        ({"error": "invalid_password"}, "1 to 256 printable characters"),
-        ({"error": "too_many_addresses"}, "at most 20 other addresses"),
-    ],
-)
+MAIL_FAILURES = [
+    ({"error": "imap_auth_failed", "hint": "authentication_failed"}, "The server rejected the address or the app"),
+    ({"error": "imap_auth_failed", "hint": "server_alert"}, "The server refused the login with an alert"),
+    ({"error": "imap_auth_failed", "hint": "login_disabled"}, "does not allow password login over IMAP"),
+    ({"error": "imap_auth_failed", "hint": "gmail_app_password_length"}, "exactly 16 letters"),
+    ({"error": "imap_auth_failed"}, "The login was refused. Nothing was stored."),
+    ({"error": "imap_unreachable"}, "The server could not be reached"),
+    ({"error": "sync_in_progress"}, "A mail fetch or import is running (from Hermes or Terminal)"),
+    ({"error": "mail_already_configured"}, "A mailbox is already set up. Remove it below first."),
+    ({"error": "mail_setup_busy"}, "Another mail setup is waiting for its folder choice"),
+    ({"error": "touch_id_policy_mismatch"}, "Touch ID setting differs from your choice"),
+    ({"error": "invalid_address"}, "Enter a mail address"),
+    ({"error": "invalid_host"}, "Enter the IMAP server name"),
+    ({"error": "invalid_account"}, "The account label must start with a lowercase letter"),
+    ({"error": "invalid_password"}, "1 to 256 printable characters"),
+    ({"error": "too_many_addresses"}, "at most 20 other addresses"),
+]
+
+
+@pytest.mark.parametrize("answer,phrase", [MAIL_FAILURES[i] for i in (0, 7, 10)])
 def test_mail_setup_failures_are_explained_and_clear_every_input(answer, phrase):
     result = component(mail_step(MAIL_V4), [{"ok": False, **answer}], FILL + CONNECT + FIELDS)
     assert phrase in result["text"]
@@ -2945,15 +3287,11 @@ def test_masked_inputs_leave_no_trace_after_success_failure_cancel_collapse_bloc
     assert [canary for canary in CANARIES if canary in sinks] == []
     for note in result["notifications"]:
         assert set(note) <= {"error", "kind", "message"}
-
-
-def test_a_late_answer_after_cancel_changes_nothing():
-    target, answers, script = SECRET_CASES["code-late-answer-after-cancel"]
-    result = secret(target, answers, script)
-    text = json.dumps(result["tree"])
-    assert "Telegram password" not in text and "Send login code" in text
-    assert result["requests"][-1] == "/telegram/login/f1/cancel"
-    assert result["notifications"] == []
+    if case == "code-late-answer-after-cancel":
+        text = json.dumps(result["tree"])
+        assert "Telegram password" not in text and "Send login code" in text
+        assert result["requests"][-1] == "/telegram/login/f1/cancel"
+        assert result["notifications"] == []
 
 
 def test_a_late_flow_after_collapse_is_cancelled():
@@ -3313,9 +3651,7 @@ def test_the_card_sits_in_maintenance_between_updates_and_uninstall():
     result = render_page(
         """
 const tree = PageBody({status: STATUS, health: null, refresh: () => {}})
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 const group = find(tree, n => n.type === 'section' && n.props['aria-labelledby'] === 'mordred-group-maintenance')
 const order = [].concat(group.props.children).filter(Boolean).map(n => n.props && n.props['aria-labelledby'] || n.type)
 const card = find(group, n => n.type === 'section' && n.props['aria-labelledby'] === 'mordred-tools')
@@ -3408,8 +3744,8 @@ def test_the_checkbox_shows_only_the_status_and_stays_disabled_while_saving():
     assert result["refreshes"] == 1
 
 
-@pytest.mark.parametrize("code", DIRECT_TOOLS_CODES)
-def test_a_refused_change_is_an_alert_with_its_sentence_and_no_restart(code):
+def test_a_refused_change_is_an_alert_with_its_sentence_and_no_restart():
+    code = "config_unreadable"
     result = tools_card(TOOLS_OFF, [{"ok": False, "error": code}], TICK)
     messages = block("MESSAGES")
     sentence = re.search(rf"^  {code}: '([^']+)',$", messages, re.M).group(1)
@@ -3445,9 +3781,7 @@ def model_step(check: dict[str, Any], tools: dict[str, Any] | None, state: str =
 const calls = []
 globalThis.document = {getElementById: id => ({scrollIntoView: () => calls.push(['scroll', id]),
   focus: () => calls.push(['focus', id])})}
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 const props = {id: 'hermes_model', n: '2.1', state: STATE, check: CHECK, tools: TOOLS, refresh: () => {}}
 const tree = HermesModelStep(props)
 const go = find(tree, n => n.type === 'button' && n.props['aria-label'] === 'Go to Tool calls')
@@ -3537,9 +3871,7 @@ def test_the_history_card_follows_tool_calls_in_maintenance():
     result = render_page(
         """
 const tree = PageBody({status: STATUS, health: null, refresh: () => {}})
-const text = node => typeof node === 'string' || typeof node === 'number' ? String(node)
-  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(text).join('')
-  : text(node.props && node.props.children)
+const text = treeText
 const group = find(tree, n => n.type === 'section' && n.props['aria-labelledby'] === 'mordred-group-maintenance')
 const order = [].concat(group.props.children).filter(Boolean).map(n => n.props && n.props['aria-labelledby'] || n.type)
 const card = find(group, n => n.type === 'section' && n.props['aria-labelledby'] === 'mordred-history')

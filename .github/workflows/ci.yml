@@ -133,7 +133,7 @@ jobs:
             .venv/bin/python tools/run_critical_tests.py --junitxml critical-linux.xml
             .venv/bin/python -m pytest -q tests/test_ci_*.py tests/test_critical_test_runner.py tests/test_critical_test_home.py tests/test_native_test_shards.py tests/test_native_test_plan.py tests/test_native_selection.py
           else
-            .venv/bin/python -m pytest -q --cov=mordred_hermes --cov-report=xml
+            .venv/bin/python -m pytest -q --cov=mordred_hermes --cov-report=xml -n 2 --dist=loadfile --max-worker-restart=0
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
@@ -489,7 +489,7 @@ jobs:
         env:
           HERMES_HOME: /tmp/hermes-mordred-ci-home
         run: >-
-          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pytest -q --deselect tests/test_provider_identity.py::test_replica_matches_hermes_source --deselect tests/test_provider_transport_flagger.py::TestRegistrySync::test_known_provider_slugs_are_real_hermes_ids
+          "$RUNNER_TEMP/mordred-ci-floor/bin/python" -m pytest -q --deselect tests/test_provider_identity.py::test_replica_matches_hermes_source --deselect tests/test_provider_transport_flagger.py::TestRegistrySync::test_known_provider_slugs_are_real_hermes_ids -n 2 --dist=loadfile --max-worker-restart=0
         id: floor_tests
       - name: Record worker checks
         id: evidence
@@ -509,7 +509,7 @@ jobs:
     needs:
       - ci-policy
     if: needs.ci-policy.outputs.macos == 'true'
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 60
     env:
       HERMES_HOME: /private/tmp/mordred-ci-macos-home
@@ -546,7 +546,7 @@ jobs:
           if [ "$CI_MODE" = critical ]; then
             .venv/bin/python tools/run_critical_tests.py --junitxml critical-macos.xml
           else
-            .venv/bin/python -m pytest -q --cov=mordred_hermes --cov-report=xml
+            .venv/bin/python -m pytest -q --cov=mordred_hermes --cov-report=xml -n 2 --dist=loadfile --max-worker-restart=0
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
@@ -573,9 +573,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             native/tpmkey-helper/target
-          key: ${{ runner.os }}-cargo-tpmkey-helper-${{ hashFiles('native/tpmkey-helper/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-tpmkey-helper-${{ hashFiles('native/tpmkey-helper/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-tpmkey-helper-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-tpmkey-helper-
         if: contains(fromJSON(needs.ci-policy.outputs.macos_packs), 'tpm')
       - name: Toolchain info + components
         run: |

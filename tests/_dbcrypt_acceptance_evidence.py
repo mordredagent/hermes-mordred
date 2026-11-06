@@ -911,3 +911,144 @@ def packaged_pipeline_fixture(prepared: tuple[Any, ...], bundle_path: Path, monk
 
     monkeypatch.setattr(tool, "_export_bundle_evidence", guest_export)
     return tool, root, checkout, manifest, results, fixture_dir
+
+
+def sequence_matrix(tool: Any, root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Six settled synthetic control cycles and sixteen continuity observations.
+
+    Files are ordinary private JSON records. No cloud/controller/native collector
+    runs, and these deliberately minimal phase rows are not native acceptance.
+    """
+    root.mkdir(mode=0o700)
+
+    def saved(name: str, value: dict[str, Any], captured: float | None = None) -> dict[str, Any]:
+        path = root / name
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+        reference = {"path": name, "sha256": tool.sha256_file(path)}
+        if captured is not None:
+            reference["captured_at"] = captured
+        return reference
+
+    def cloud(name: str, instance: str, run: str, state: str, observed: float) -> dict[str, Any]:
+        raw = saved(
+            name + "-raw.json",
+            {
+                "Reservations": [
+                    {
+                        "OwnerId": "123456789012",
+                        "Instances": [
+                            {
+                                "InstanceId": instance,
+                                "State": {"Name": state},
+                                "Tags": [{"Key": "mordred:dbcrypt-validation", "Value": run}]
+                                if state == "running"
+                                else [],
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        return saved(
+            name + ".json",
+            {
+                "schema": 1,
+                "kind": "ec2_state_observation",
+                "instance": instance,
+                "controller_run": run,
+                "state": state,
+                "observed_at": observed,
+                "raw": raw,
+            },
+        )
+
+    cycles, stops, phases = [], [], []
+    for platform, instance, first_run, final_run in (
+        ("linux", "i-095cbe655c196c749", "a" * 32, "b" * 32),
+        ("win32", "i-00f4db5c3a204906b", "c" * 32, "d" * 32),
+    ):
+        actions = []
+        previous_stop = previous_observed = None
+        for sequence, operation, run, created, action_at, stopped_at in (
+            (1, "start", first_run, 1000.0, 1020.0, 1200.0),
+            (2, "reboot", first_run, 1000.0, 1110.0, 1200.0),
+            (3, "stop_start", final_run, 1500.0, 1520.0, 1700.0),
+        ):
+            prefix = f"{platform}-{sequence}"
+            armed = {
+                "version": 1,
+                "instance": instance,
+                "run": run,
+                "account": "123456789012",
+                "created": created,
+                "deadline": created + 400,
+                "state": "armed",
+                "start_requested": False,
+                "supervisor_pid": None,
+                "heartbeat": None,
+            }
+            ready = {**armed, "supervisor_pid": 99, "heartbeat": action_at - 2}
+            active = {**ready, "state": "running", "start_requested": True, "start_uncertain": False}
+            stop = {**active, "state": "stopped", "stopped_at": stopped_at}
+            # The first start and reboot settle under the same final receipt.
+            stopped = previous_stop if sequence == 2 else saved(prefix + "-stop.json", stop, stopped_at + 0.5)
+            observed = (
+                previous_observed
+                if sequence == 2
+                else cloud(prefix + "-stopped", instance, run, "stopped", stopped_at + 1)
+            )
+            action = {
+                "schema_version": 1,
+                "kind": "dbcrypt_control_action",
+                "platform": platform,
+                "instance": instance,
+                "modes": ["source", "wheel"],
+                "sequence": sequence,
+                "operation": operation,
+                "action_at": action_at,
+                "armed": saved(prefix + "-armed.json", armed, created + 1),
+                "before_action": saved(prefix + "-before.json", active if sequence == 2 else ready, action_at - 1),
+                "running": cloud(prefix + "-running", instance, run, "running", action_at + 2),
+            }
+            if sequence == 2:
+                action["start_action"] = actions[0]
+            else:
+                action.update(
+                    started=saved(prefix + "-started.json", active, action_at + 1),
+                    initial_stopped=cloud(prefix + "-initial", instance, run, "stopped", action_at - 0.5),
+                )
+                if sequence == 3:
+                    action.update(previous_stop=previous_stop, previous_independent_stop=previous_observed)
+            reference = saved(prefix + "-action.json", action)
+            actions.append(reference)
+            cycles.append({"action": reference, "stopped": stopped, "independent_stopped": observed})
+            previous_stop, previous_observed = stopped, observed
+        stops.append(previous_stop)
+        for mode in ("source", "wheel"):
+            for observation, action, sequence, run, start, finish, boot in (
+                ("provision", actions[0], 1, first_run, 1023.0, 1050.0, "boot-1"),
+                ("process_restart", actions[0], 1, first_run, 1060.0, 1080.0, "boot-1"),
+                ("os_reboot", actions[1], 2, first_run, 1113.0, 1150.0, "boot-2"),
+                ("ec2_stop_start", actions[2], 3, final_run, 1523.0, 1550.0, "boot-3"),
+            ):
+                phases.append(
+                    {
+                        "platform": platform,
+                        "instance": instance,
+                        "mode": mode,
+                        "observation": observation,
+                        "control_action": action,
+                        "control_sequence": sequence,
+                        "controller_run": run,
+                        "started_at": start,
+                        "finished_at": finish,
+                        "boot": {"identity": boot},
+                        "bundle_manifest_sha256": "e" * 64,
+                        "fixture": {"identity": platform + mode},
+                        "logical": {"root:sessiondb": "f" * 64},
+                        "native_roots": {"persistence": platform + mode},
+                        "_control": {"action_at": 1110.0 if sequence == 2 else 1520.0 if sequence == 3 else 1020.0},
+                    }
+                )
+    return {"schema_version": 2, "control_cycles": cycles, "stop_receipts": stops}, phases

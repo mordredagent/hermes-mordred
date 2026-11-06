@@ -33,7 +33,7 @@ from .._core._policy_io import (
     policy_transaction_pending,
 )
 from .._core._policy_types import POLICY_MODES
-from .._core._yaml_io import load_plugin_section, load_yaml_mapping
+from .._core._yaml_io import _parse_yaml, load_plugin_section, load_yaml_mapping
 from ..plugin import COMPONENT_REQUIRED_HOOKS, COMPONENTS
 from ._checked_policy import CheckedPolicy, read_checked_policy
 from .audit import Writer
@@ -181,13 +181,19 @@ def _load_config_document(config_path: Path, transaction_marker: Path) -> tuple[
         return "strict", None
 
     from ruamel.yaml import YAML
-    from ruamel.yaml.error import YAMLError
 
     try:
         with f:
-            data = YAML(typ="safe", pure=True).load(f)
-    except (OSError, YAMLError) as e:
-        _LOG.error("config file %s exists but is unreadable (%s); failing closed to strict", config_path, e)
+            data = _parse_yaml(YAML(typ="safe", pure=True), f)
+    except Exception as e:
+        # Not only YAMLError: ruamel's constructors raise bare KeyError/ValueError,
+        # decoding raises ValueError and deep nesting raises RecursionError. All
+        # are "cannot be parsed", and parser text can quote config values.
+        _LOG.error(
+            "config file %s exists but is unreadable (%s); failing closed to strict",
+            config_path,
+            type(e).__name__,
+        )
         return "strict", None
     if policy_transaction_pending(transaction_marker):
         _LOG.error(

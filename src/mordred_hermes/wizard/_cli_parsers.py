@@ -174,6 +174,19 @@ def _add_databases(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     export.add_argument("--output", required=True, help="New plaintext database path; never overwritten")
     export.add_argument("--member", help="Exact database member name inside a ZIP backup")
     export.set_defaults(func=_handle_databases)
+    recover = bsub.add_parser("recover", help="Finish or abandon an interrupted backup operation; stop Hermes first")
+    recover.add_argument(
+        "--abandon",
+        action="store_true",
+        help="Forget the interrupted publication instead of finishing it; no file is deleted (preview unless --yes)",
+    )
+    recover.add_argument("--yes", action="store_true", help="With --abandon: remove the journal")
+    recover.add_argument(
+        "--accept-unmanaged-copy",
+        action="store_true",
+        help="With --abandon --yes: proceed although a copy that key teardown will not detect may remain",
+    )
+    recover.set_defaults(func=_handle_databases)
 
 
 def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -615,14 +628,14 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_recover.set_defaults(func=_handle_keyvault_recover)
     p_reset = ksub.add_parser(
         "reset",
-        help="Destroy all key material and remove the keyvault (irreversible)",
+        help="Destroy profile keys, Mail/Telegram credentials and all their local history (irreversible)",
     )
     p_reset.add_argument(
         "-y",
         "--yes",
         dest="assume_yes",
         action="store_true",
-        help="Skip the interactive confirmation (for scripted / non-interactive use).",
+        help="Confirm deletion of profile keys, Mail/Telegram credentials and all their local history.",
     )
     p_reset.set_defaults(func=_handle_keyvault_reset)
     p_enable_se = ksub.add_parser(

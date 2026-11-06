@@ -515,11 +515,16 @@ def register(ctx: Any) -> None:
     Wires the full E2E transport with no core fork:
       * inbound decrypt / key-exchange drop  → ``pre_gateway_dispatch`` hook
       * outbound reply re-encryption         → platform ``send`` wrappers
+      * standalone tool/cron text encryption → required common sender guard
     The browser-extension WebSocket server ships as the standalone
     ``hermes-mordred extension serve`` command (``extension.api``); it does not
     need the gateway process.
     """
     from ..privacy_check.hooks import check_plugin_integrity
+    from .standalone_outbound import install_standalone_guard
+
+    # Required: ordinary plugin errors are contained by Hermes/the bundle.
+    install_standalone_guard()
 
     ctx.register_hook("on_session_start", check_plugin_integrity)
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)

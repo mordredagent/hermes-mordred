@@ -915,6 +915,52 @@ def test_windows_forget_requires_the_typed_phrase_server_side(telegram, monkeypa
 
 
 # -----------------------------------------------------------------------------
+# Step 1.3: the shared projection and route, by Windows edition
+# -----------------------------------------------------------------------------
+def _edition(monkeypatch, tmp_path, *, admitted: bool) -> None:
+    from mordred_hermes.dbcrypt import _capability, _windows_vfs
+
+    monkeypatch.setattr(_capability, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(_capability, "_driver_present", lambda: True)
+    monkeypatch.setattr(_windows_vfs, "windows_edition_admitted", lambda: admitted)
+    monkeypatch.setattr(_windows_vfs, "driver_distribution_qualified", lambda: True)
+    monkeypatch.setattr(_windows_vfs, "packaged_library_path", lambda: tmp_path / "owned.dll")
+
+
+def test_windows_workstation_status_and_routes_say_unsupported_and_schedule_nothing(desktop, monkeypatch, tmp_path):
+    from tests._desktop_page import render_page
+
+    _edition(monkeypatch, tmp_path, admitted=False)
+    status = get(desktop.http, "/status?client_version=4")
+    assert status["hardware_kind"] == "cng" and status["databases"] == {"supported": False}
+    assert get(desktop.http, "/databases/status") == {"ok": True, "supported": False}
+    assert post(desktop.http, "/databases/encrypt") == {"ok": False, "error": "databases_unsupported"}
+    assert post(desktop.http, "/databases/cancel") == {"ok": False, "error": "databases_unsupported"}
+    assert not (desktop.env.home / "mordred" / "db-encryption.pending").exists()
+    no_native_unwrap(desktop.env)
+    # The page renders this very answer.
+    text = render_page(
+        "console.log(JSON.stringify(treeText(WindowsSetup({status: STATUS, refresh: () => {}}))))".replace(
+            "STATUS", json.dumps(status)
+        )
+    )
+    assert "not supported on this system" in text and "Encrypt databases" not in text
+
+
+def test_windows_server_status_reports_real_facts_and_schedules_for_the_next_start(desktop, monkeypatch, tmp_path):
+    _edition(monkeypatch, tmp_path, admitted=True)
+    databases = get(desktop.http, "/status?client_version=4")["databases"]
+    assert databases["supported"] is True and databases["runtime_protected"] is False
+    assert databases["armed"] is False and databases["encrypt_pending"] is False
+    assert databases["databases"] == [] and databases["startup_outcome"] is None
+    assert post(desktop.http, "/databases/encrypt") == {"ok": True, "action": "scheduled", "restart_required": True}
+    assert get(desktop.http, "/databases/status")["encrypt_pending"] is True
+    assert post(desktop.http, "/databases/cancel") == {"ok": True, "action": "cancelled"}
+    assert get(desktop.http, "/databases/status")["encrypt_pending"] is False
+    no_native_unwrap(desktop.env)
+
+
+# -----------------------------------------------------------------------------
 # Unchanged elsewhere
 # -----------------------------------------------------------------------------
 def test_windows_routes_are_never_taken_on_macos_or_linux(monkeypatch):

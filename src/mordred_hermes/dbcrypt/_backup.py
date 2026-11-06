@@ -7,14 +7,15 @@ undiscoverable and must be retained by their owner together with their key.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import secrets
 from collections.abc import Iterator
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from .._core._database_contracts import DatabaseRefused, NativeSnapshot
+from .._core._database_contracts import BackupRecoveryRequired, DatabaseRefused, NativeSnapshot
 from .._core._database_lifecycle import ExclusiveLease
 from .._private_fs import PrivateFSError, open_private_directory
 from . import _migrate
@@ -22,10 +23,12 @@ from ._authority import Authority
 from ._key import DatabaseKey
 from ._policy import in_scope, refuse_windows_remote_path
 
+_LOG = logging.getLogger("mordred.dbcrypt")
 _INVENTORY = "db-backups.json"
 _JOURNAL = "db-backups.journal.json"
 _FORMAT = "mordred-sqlcipher-v1"
 _ACTIVE: dict[int, _Destination] = {}
+RECOVER_COMMAND = "hermes-mordred databases backup recover"
 
 
 def _transition(phase: str) -> None:
@@ -96,9 +99,16 @@ def _load_inventory(root: Path, snapshot: NativeSnapshot) -> dict[str, Any]:
     return value
 
 
+def _journal_present(root: Path) -> bool:
+    try:
+        (root / "mordred" / _JOURNAL).lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return True
+
+
 def _no_pending(root: Path) -> None:
     for name in (
-        _JOURNAL,
         _migrate.JOURNAL_SUBPATH[-1],
         _migrate.PENDING_SUBPATH[-1],
         _migrate.DECRYPT_PENDING_SUBPATH[-1],
@@ -108,6 +118,12 @@ def _no_pending(root: Path) -> None:
         except FileNotFoundError:
             continue
         raise DatabaseRefused("database maintenance requires recovery before backup")
+    if _journal_present(root):
+        # lstat cannot tell a live publication from a crashed one.
+        raise BackupRecoveryRequired(
+            f"a backup operation is running or was interrupted; if none is running, stop Hermes "
+            f"and run `{RECOVER_COMMAND}`"
+        )
 
 
 class _Destination:
@@ -173,6 +189,15 @@ def _register(root: Path, snapshot: NativeSnapshot, data: dict[str, Any]) -> Non
     _transition("complete")
 
 
+def _refuse_stale_registration(root: Path, snapshot: NativeSnapshot, destination: str, identity: Any) -> None:
+    """Refuse before publishing: _register would reject this path only after the rename."""
+    entries = _load_inventory(root, snapshot)["entries"]
+    if any(entry["path"] == destination and entry["identity"] != identity for entry in entries):
+        raise DatabaseRefused(
+            "backup destination is already registered to a missing or different file; choose another output path"
+        )
+
+
 def _destination_absent(destination: Path) -> None:
     with open_private_directory(destination.parent) as directory:
         try:
@@ -194,22 +219,73 @@ def _update_pending(root: Path, previous: dict[str, Any], data: dict[str, Any]) 
 def _prepare_backup(source: Any, destination: Path, authority: Authority, data: dict[str, Any]) -> None:
     staged = Path(data["prepared"])
     previous = dict(data)
-    with open_private_directory(destination.parent) as directory, directory.transaction() as tx:
-        _destination_absent(destination)
-        tx.create_bytes(staged.name, b"")
-        data["identity"] = _migrate._file_identity(staged)
-    _update_pending(authority.root, previous, data)
+    try:
+        with open_private_directory(destination.parent) as directory, directory.transaction() as tx:
+            _destination_absent(destination)
+            tx.create_bytes(staged.name, b"")
+            data["identity"] = _migrate._file_identity(staged)
+        _update_pending(authority.root, previous, data)
+    except Exception as exc:
+        if not (isinstance(exc, PrivateFSError) and exc.commit_state == "uncertain"):
+            _discard_preparation(staged, authority, previous)
+        raise
     _transition("staged")
     previous = dict(data)
-    # Neither native metadata custody nor SQLite runs under the registry lock.
-    data["verification"] = _copy(source, staged, authority)
-    with open_private_directory(destination.parent) as directory, directory.transaction() as tx:
-        if _migrate._file_identity(staged) != data["identity"]:
-            raise DatabaseRefused("backup staging identity changed")
-        tx.flush_file(staged.name, expected_identity=tx.stat(staged.name).identity)
+    try:
+        # Neither native metadata custody nor SQLite runs under the registry lock.
+        data["verification"] = _copy(source, staged, authority)
+        with open_private_directory(destination.parent) as directory, directory.transaction() as tx:
+            if _migrate._file_identity(staged) != data["identity"]:
+                raise DatabaseRefused("backup staging identity changed")
+            tx.flush_file(staged.name, expected_identity=tx.stat(staged.name).identity)
+    except Exception as exc:
+        # Ordinary failure before any publication. Release the never-published
+        # staging and the journal so the next backup is not refused; any doubt
+        # retains both for recover_backups(). Ctrl-C/kill bypass this on purpose.
+        if not (isinstance(exc, PrivateFSError) and exc.commit_state == "uncertain"):
+            _discard_preparation(staged, authority, previous)
+        raise
     data["phase"] = "verified"
     _update_pending(authority.root, previous, data)
     _transition("verified")
+
+
+def _discard_preparation(staged: Path, authority: Authority, expected: dict[str, Any]) -> None:
+    """Delete only the recorded staging inode (and sidecars), then the unchanged journal.
+
+    Staging goes first: a crash between the steps leaves a journal that
+    recover_backups refuses and --abandon clears, never an undiscoverable copy.
+    The registry lock is never held across the external directory transaction.
+    Any doubt stops here; the caller's original failure always propagates.
+    """
+    try:
+        authority.check()
+        root = authority.root
+        with _registry(root):
+            if _migrate._read_json(root, _JOURNAL) != expected:
+                raise DatabaseRefused("backup journal changed")
+        if expected["identity"] is None:
+            # Staging was never recorded: only its proven absence releases the journal.
+            if _lexical_state(staged) != "absent":
+                raise DatabaseRefused("unrecorded backup staging exists")
+        else:
+            if _migrate._file_identity(staged) != expected["identity"]:
+                raise DatabaseRefused("backup staging identity changed")
+            _migrate._cleanup_sidecars(staged)  # own transaction on Windows; must precede ours
+            with open_private_directory(staged.parent) as directory, directory.transaction() as tx:
+                observed = tx.stat(staged.name)
+                if _migrate._file_identity(staged) != expected["identity"]:
+                    raise DatabaseRefused("backup staging identity changed")
+                tx.delete_file(staged.name, expected_identity=observed.identity)
+        with _registry(root):
+            if _migrate._read_json(root, _JOURNAL) != expected:
+                raise DatabaseRefused("backup journal changed")
+            _migrate._remove_record(root, _JOURNAL)
+    except Exception:
+        # Content-free: no journal path or exception text reaches the log.
+        _LOG.warning(
+            "backup cleanup stopped; the journal may remain. If later backups refuse, run `%s`", RECOVER_COMMAND
+        )
 
 
 def _publish_backup(destination: Path, authority: Authority, data: dict[str, Any]) -> None:
@@ -286,12 +362,22 @@ def backup_database(source: Path, destination: Path, *, authority: Authority) ->
         }
         with _registry(authority.root):
             _no_pending(authority.root)
-            _load_inventory(authority.root, authority.snapshot)
+            _refuse_stale_registration(authority.root, authority.snapshot, str(destination), None)
             _migrate._put_json(authority.root, _JOURNAL, data)
         _transition("pending")
         _prepare_backup(connection, destination, authority, data)
         _publish_backup(destination, authority, data)
     return destination
+
+
+def _publication_fields_valid(data: dict[str, Any]) -> bool:
+    preparing = data["phase"] == "preparing"
+    return (
+        isinstance(data.get("source"), str)
+        and all(isinstance(data.get(name), list) for name in ("source_identity", "source_parents"))
+        and (isinstance(data.get("identity"), list) or (preparing and data.get("identity", 0) is None))
+        and (isinstance(data.get("verification"), dict) or (preparing and data.get("verification", 0) is None))
+    )
 
 
 def _pending(root: Path, snapshot: NativeSnapshot) -> dict[str, Any]:
@@ -303,8 +389,13 @@ def _pending(root: Path, snapshot: NativeSnapshot) -> dict[str, Any]:
         or data.get("phase") not in {"preparing", "verified"}
     ):
         raise DatabaseRefused("backup journal belongs to another root/generation")
+    if not isinstance(data.get("destination"), str) or not isinstance(data.get("prepared"), str):
+        raise DatabaseRefused("backup journal is malformed")
+    # Path spellings are refused first, before any other journal field matters.
     destination = _canonical_destination(Path(data["destination"]))
     prepared = _canonical_destination(Path(data["prepared"]))
+    if not _publication_fields_valid(data):
+        raise DatabaseRefused("backup journal is malformed")
     if (
         prepared.parent != destination.parent
         or prepared == destination
@@ -317,8 +408,32 @@ def _pending(root: Path, snapshot: NativeSnapshot) -> dict[str, Any]:
     return data
 
 
-def recover_backups(root: Path, *, lease: ExclusiveLease) -> None:
+def _finish_interrupted_link(prepared: Path, destination: Path, identity: Any) -> None:
+    """A POSIX rename is link then unlink; a crash between leaves one inode under both names."""
+    if os.name != "posix":
+        return
+    try:
+        staged, published = prepared.lstat(), destination.lstat()
+    except FileNotFoundError:
+        return
+    if (staged.st_dev, staged.st_ino) != (published.st_dev, published.st_ino):
+        return  # distinct files: the proof and the rename below refuse them
+    if [staged.st_dev, staged.st_ino, staged.st_mode, staged.st_uid] != identity:
+        raise DatabaseRefused("backup recovery identity/schema proof failed")
+    with open_private_directory(prepared.parent) as directory, directory.transaction() as tx:
+        tx.finish_interrupted_rename(prepared.name, destination.name)
+
+
+@dataclass(frozen=True)
+class BackupRecovery:
+    outcome: Literal["none", "published", "deleted"]
+    path: Path | None  # published destination, or the unregistered path for a deletion
+
+
+def recover_backups(root: Path, *, lease: ExclusiveLease) -> BackupRecovery:
     ExclusiveLease.assert_held(lease, root)
+    if not _journal_present(root):
+        return BackupRecovery("none", None)  # before any native authentication
     snapshot, key = _migrate._authenticate(root, None, lease)
     if snapshot is None:
         raise DatabaseRefused("backup recovery requires native source proof")
@@ -328,13 +443,17 @@ def recover_backups(root: Path, *, lease: ExclusiveLease) -> None:
         pending = _migrate._read_json(root, _JOURNAL)
         deleting = isinstance(pending, dict) and pending.get("operation") == "delete"
         data = pending if deleting else _pending(root, snapshot)
+        if not deleting:
+            _refuse_stale_registration(root, snapshot, data["destination"], data["identity"])
     if deleting:
         _recover_delete(root, snapshot, data)
-        return
+        entry = data["entry"]
+        return BackupRecovery("deleted", Path(entry["path"]) if isinstance(entry.get("path"), str) else None)
     if data["phase"] != "verified":
         _recover_preparing(root, data, key)
     destination, prepared = Path(data["destination"]), Path(data["prepared"])
     _migrate._refuse_if_open([_migrate.Database(p, str(p), "") for p in (prepared, destination)], None)
+    _finish_interrupted_link(prepared, destination, data["identity"])
     candidate = prepared if prepared.exists() else destination
     if (
         _migrate._file_identity(candidate) != data["identity"]
@@ -349,6 +468,107 @@ def recover_backups(root: Path, *, lease: ExclusiveLease) -> None:
         if _migrate._read_json(root, _JOURNAL) != data:
             raise DatabaseRefused("backup recovery journal changed")
         _register(root, snapshot, data)
+    return BackupRecovery("published", destination)
+
+
+_PathState = Literal["present", "absent", "unknown"]
+
+
+@dataclass(frozen=True)
+class BackupAbandonment:
+    phase: str
+    destination: Path
+    staging: Path
+    destination_state: _PathState
+    staging_state: _PathState
+    registered: bool  # the inventory already protects this exact destination file
+    removed: bool
+
+    @property
+    def copy_may_remain(self) -> bool:
+        """Could a copy outlive the journal with nothing telling key teardown about it?"""
+        return self.staging_state != "absent" or (self.destination_state != "absent" and not self.registered)
+
+
+def _lexical_state(path: Path) -> _PathState:
+    """Metadata-only and no-follow; remote/device spellings are never touched."""
+    try:
+        refuse_windows_remote_path(path)
+        path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent"
+    except (DatabaseRefused, OSError, ValueError):
+        return "unknown"
+    return "present"
+
+
+def _abandonable(data: Any, snapshot: NativeSnapshot) -> tuple[str, Path, Path]:
+    """Structural validation only: _pending() opens the destination directory."""
+    if isinstance(data, dict) and data.get("operation") == "delete":
+        raise DatabaseRefused(
+            f"the backup journal records a deletion in progress and cannot be abandoned; run `{RECOVER_COMMAND}`, "
+            "and if that also refuses, the journal needs manual review"
+        )
+    if (
+        not isinstance(data, dict)
+        or data.get("version") != 1
+        or data.get("snapshot") != asdict(snapshot)
+        or data.get("phase") not in {"preparing", "verified"}
+    ):
+        raise DatabaseRefused(
+            "backup journal belongs to another root/generation or is malformed; it needs manual review"
+        )
+    destination, prepared = data.get("destination"), data.get("prepared")
+    if (
+        not isinstance(destination, str)
+        or not isinstance(prepared, str)
+        or not Path(destination).is_absolute()
+        or not Path(prepared).is_absolute()
+        or Path(prepared).parent != Path(destination).parent
+        or not Path(prepared).name.startswith(Path(destination).name + ".mordred-backup-")
+    ):
+        raise DatabaseRefused("invalid backup journal paths; the journal needs manual review")
+    return data["phase"], Path(destination), Path(prepared)
+
+
+def _registered_intact(root: Path, snapshot: NativeSnapshot, data: dict[str, Any]) -> bool:
+    """Does the inventory hold this journal's file? Any doubt answers no, the cautious side."""
+    try:
+        entries = _load_inventory(root, snapshot)["entries"]
+    except (DatabaseRefused, OSError, ValueError):
+        return False
+    return any(e["path"] == data["destination"] and e["identity"] == data.get("identity") for e in entries)
+
+
+def abandon_backup_journal(
+    root: Path, *, lease: ExclusiveLease, commit: bool, accept_unmanaged_copy: bool = False
+) -> BackupAbandonment | None:
+    """Forget an interrupted publication. Removes only the journal; never a file.
+
+    A copy that may remain loses its only key dependency with the journal, so
+    commit alone leaves the journal in place unless the caller accepts that.
+    """
+    ExclusiveLease.assert_held(lease, root)
+    if not _journal_present(root):
+        return None
+    snapshot, _ = _migrate._authenticate(root, None, lease)
+    if snapshot is None:
+        raise DatabaseRefused("backup journal abandonment requires native source proof")
+    with _registry(root):
+        data = _migrate._read_json(root, _JOURNAL)
+        phase, destination, staging = _abandonable(data, snapshot)
+        registered = _registered_intact(root, snapshot, data)
+    plan = BackupAbandonment(
+        phase, destination, staging, _lexical_state(destination), _lexical_state(staging), registered, False
+    )
+    if not commit or (plan.copy_may_remain and not accept_unmanaged_copy):
+        return plan
+    ExclusiveLease.assert_held(lease, root)
+    with _registry(root):
+        if _migrate._read_json(root, _JOURNAL) != data:
+            raise DatabaseRefused("backup journal changed")
+        _migrate._remove_record(root, _JOURNAL)
+    return replace(plan, removed=True)
 
 
 def _offline_copy(source: Path, staged: Path, key: DatabaseKey, root: Path) -> None:

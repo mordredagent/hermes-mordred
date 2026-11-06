@@ -37,6 +37,7 @@ from tests.test_windows_memory_lifecycle import (
     normalized,
     put,
 )
+from tests.test_windows_memory_proof import custody_env as custody_env
 from tests.test_windows_memory_proof import installed_runtime as installed_runtime
 from tests.test_windows_memory_proof import proof_env as proof_env
 
@@ -193,10 +194,10 @@ def test_ceremony_refuses_without_helper_before_any_custody_write(win, monkeypat
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="this host is Windows")
-def test_ceremony_refuses_off_windows(proof_env, capsys):
-    assert keyvault_windows_cli.native_init(home=proof_env.home) == 1
+def test_ceremony_refuses_off_windows(custody_env, capsys):
+    assert keyvault_windows_cli.native_init(home=custody_env.home) == 1
     assert "only on native Windows" in capsys.readouterr().err
-    assert not (proof_env.home / "mordred").exists()
+    assert not (custody_env.home / "mordred").exists()
 
 
 def test_ceremony_native_failure_keeps_intent_and_creates_no_wrapper(win, monkeypatch, capsys):

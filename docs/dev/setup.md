@@ -200,7 +200,7 @@ released package:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --reinstall "hermes-mordred[macos,extension,ethereum]==0.3.0a5"
+  --reinstall "hermes-mordred[macos,extension,ethereum]==0.3.0a6"
 
 uv pip check --python ~/.hermes/hermes-agent/venv/bin/python3
 ~/.hermes/hermes-agent/venv/bin/python3 -c \
@@ -239,7 +239,7 @@ Run everything via `uv run` (= uses the repo `.venv`). Invoking `.venv/bin/…` 
 
 | Purpose | Command | Notes |
 |---|---|---|
-| Run tests | `uv run pytest -q` | Excludes the integration marker by default (`addopts` in `pyproject.toml`). For coverage use `uv run pytest --cov=src/mordred_hermes` (same as CI, floor 80%). The root `tests/conftest.py` defaults `HERMES_HOME` to a fresh temp directory before anything imports `mordred_hermes`, so a bare run never touches your real `~/.hermes`; an explicit `HERMES_HOME` set beforehand still wins untouched |
+| Run tests | `uv run pytest -q` | Excludes the integration marker by default (`addopts` in `pyproject.toml`). For coverage use `uv run pytest --cov=src/mordred_hermes` (same as CI, floor 80%). The root `tests/conftest.py` defaults `HERMES_HOME` to a fresh temp directory before anything imports `mordred_hermes`, so a bare run never touches your real `~/.hermes`; an explicit `HERMES_HOME` set beforehand still wins untouched in serial runs (including `-n 0` and nested serial pytest). Real xdist workers each replace the inherited home before collection and remove only their own temporary home |
 | Integration tests | `uv run pytest -m integration` | Requires Docker / a real Mullvad account / a real network. `integration` extra required |
 | Lint | `uv run ruff check src tests scripts` | Blocking in CI |
 | Format check | `uv run ruff format --check src tests scripts` | Blocking in CI |
@@ -485,6 +485,30 @@ hermes-mordred databases backup export --source /absolute/path/backup.zip --memb
 These commands leave the source unchanged. Output is a verified plaintext DB;
 existing files are never overwritten. Keep it private. This is export, not an
 automatic replacement of a live Hermes database.
+
+If a backup was interrupted, `databases status` shows `backup recovery: required`
+and later backup, restore and export commands refuse. Stop Hermes, then finish it,
+or forget it if the destination cannot be finished:
+
+```sh
+hermes-mordred databases backup recover
+hermes-mordred databases backup recover --abandon        # preview only
+hermes-mordred databases backup recover --abandon --yes  # removes only the journal
+```
+
+`--abandon --yes` keeps the journal when a copy may remain, and the preview names
+the flag that accepts it, `--accept-unmanaged-copy`. If `recover` can still finish
+the backup, prefer that: an accepted copy loses its key dependency.
+
+Abandoning never deletes files. A `<destination>.mordred-backup-*` file or a
+published destination left behind is an unmanaged encrypted copy: key teardown
+will not detect it, and its retention and key are your responsibility. A journal
+that is unreadable or belongs to another generation is refused by both commands;
+inspect `<root>/mordred/db-backups.journal.json` and remove it by hand only once you have
+accounted for the destination and staging paths it names. Never remove a journal
+containing `"operation": "delete"` by hand: if its backup file is already gone, the
+registry keeps an entry with no file, and uninstall and key teardown refuse with
+no command to clear it yet.
 
 `--purge-data` refuses before restoration if known encrypted backups would be
 stranded. Export or manage those backups separately; uninstall never silently

@@ -115,15 +115,23 @@ const MESSAGES = {
   // The page needs a newer Mordred (its status lacks the version 4 keys).
   mordred_update_required: 'Update Mordred to use this. The running Mordred does not report this step yet; the update is under Maintenance.',
   // Database encryption, the import store and mail (closed sets of the version 4 API).
-  databases_unsupported: 'Protected storage is unavailable for this runtime. Run hermes-mordred databases status in Terminal for the platform requirements. Windows Server storage validation does not establish Windows 11 or Desktop support.',
+  databases_unsupported: 'Database encryption is not supported on this system. Run hermes-mordred databases status in Terminal for the platform requirements.',
   databases_key_missing: 'The database key is not available yet. Finish the memory step and restart Hermes Desktop first.',
-  databases_failed: 'Database capability and authentication are not checked by this page. The step shows the current state again. Run hermes-mordred databases status, then explicitly run hermes-mordred databases diagnose in Terminal. If authority was lost, restart Hermes before another foreground operation.',
+  databases_failed: 'The database encryption state could not be read or changed. The step shows the current state again. Run hermes-mordred databases status in Terminal to see what it needs.',
   databases_busy: 'A database conversion is already running. Try again when it finishes.',
   // Step 1.3 attention states (the second design revision's table).
   plaintext_in_armed_home: 'A plaintext database is in a Hermes home whose databases are already encrypted (a new or restored file). Quit Hermes Desktop, then run hermes-mordred databases encrypt in Terminal.',
   stale_pending: 'The databases are already encrypted, but an older conversion request is still pending. Run hermes-mordred databases status in Terminal.',
   decrypt_pending: 'Database decryption is pending: the databases become plain files again at the next start. Run hermes-mordred databases status in Terminal.',
   journal: 'A database conversion was interrupted and left its journal. Run hermes-mordred databases status in Terminal.',
+  // Why the last start postponed the scheduled conversion (`startup_outcome`, see startupCode).
+  startup_busy: 'Another Hermes process had the databases open at the last start, so they were not encrypted. Quit all Hermes processes, then restart Hermes Desktop.',
+  startup_memory_required: 'Memory encryption was off at the last start, so the databases were not encrypted. Go to the memory step and turn it on, then restart Hermes Desktop.',
+  startup_key_unavailable: 'The database key was not available at the last start, so the databases were not encrypted. Restart Hermes Desktop, approving a key prompt if one appears; otherwise run hermes-mordred databases encrypt in Terminal.',
+  startup_refused: 'Hermes could not encrypt the databases at the last start. Run hermes-mordred databases encrypt in Terminal.',
+  startup_too_large: 'These databases are too large to encrypt while Hermes Desktop starts. Run hermes-mordred databases encrypt in Terminal.',
+  startup_auth_interrupted: 'The last attempt stopped before it finished, so Hermes will not retry it on its own. Cancel and press Encrypt databases again, or run hermes-mordred databases encrypt in Terminal.',
+  databases_cancel_refused: 'A database conversion has already started or finished, so it cannot be cancelled. Run hermes-mordred databases status in Terminal.',
   vault_anchor_stale: 'A Mordred vault was removed from this Mac earlier, but its Keychain anchor remains, so a new vault cannot be created.',
   mail_already_configured: 'A mailbox is already set up. Remove it below first.',
   mail_setup_flow_expired: 'This mail setup expired. Start again; nothing was stored.',
@@ -231,8 +239,8 @@ const BLOCKERS = {
   needs_question_model: { step: 'question_model', text: 'Set the question model first.' },
 }
 
-// macOS/Linux steps in reading order. Linux has no 1.2a, 1.3 and 2.5, and its memory
-// step is 1.2 (see stepNumbers).
+// macOS/Linux steps in reading order. Linux has no 1.2a and 2.5, and its memory
+// step is 1.2 (see stepNumbers). Windows numbers its steps itself (WindowsSetup).
 const STEP_NUMBERS = {
   enclave: '1.1',
   vault: '1.2a',
@@ -586,7 +594,7 @@ function Why({ children }) {
 }
 
 // Before the state model: a numbered card whose body disappears when `done`.
-// Every Windows step still renders this way (no `state`), unchanged.
+// Windows's numbered steps still render this way (no `state`), unchanged.
 function legacyStep({ n, title, done, children }) {
   return jsxs('section', {
     style: { border: '1px solid var(--border, #333)', borderRadius: 10, padding: 16, marginBottom: 12 },
@@ -637,7 +645,7 @@ function stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, keepO
     const reasonFor = BLOCKERS[blocker] || null
     return [
       jsx('p', { key: 'reason', children: reasonFor ? reasonFor.text : 'Finish the earlier steps first.' }),
-      reasonFor
+      reasonFor && goto !== false
         ? jsx(Button, {
             key: 'go',
             variant: 'outline',
@@ -663,8 +671,9 @@ function stepBody({ state, id, open, setOpen, onCollapse, summary, toggle, keepO
 // closes), blocked replaces it by the BLOCKERS reason and a "Go to step" button,
 // running disables its controls under a polite progress line. `failure` is an alert
 // under the title in every state but blocked, so a failed change of a done step shows
-// too. Without `state` (the Windows steps pass `done`) the step renders as it always did.
-// `goto` is the number of the step that lifts `blocker` on this page (stepNumbers);
+// too. Without `state` (Windows's numbered steps pass `done`) the step renders as it always did.
+// `goto` is the number of the step that lifts `blocker` on this page (stepNumbers), or
+// false where that step has no anchor to go to, which leaves the reason without a button;
 // `keepOpen` keeps a done step's body visible (the mail card: fetching is its daily use).
 function Step({
   id = null,
@@ -886,20 +895,36 @@ const countsWhere = (counts) => (counts.store ? ' in Mordred’s store (all acco
 
 const databaseRows = (db) => (Array.isArray(db && db.databases) ? db.databases.filter((row) => row && typeof row.relative === 'string') : [])
 
-// Step 1.3 from the databases facts (the second design revision): an attention code; done
-// (armed, this process protected, no plaintext file); or a restart that finishes it (armed
-// but this process started before, or a conversion scheduled for the next start).
-const databaseFactsUnknown = (db) => ['encrypt_pending', 'decrypt_pending', 'journal'].some((key) => db[key] == null)
+// Step 1.3 from the databases facts: an attention code; done (armed, this process
+// protected); or a restart that finishes it (armed but this process started before,
+// or a conversion scheduled for the next start). The same table as the route
+// (desktop/_databases.py): a null fact is unknown, never absent, and the journal comes
+// first because a startup record can coexist with one. `databases` is always empty
+// (classifying a file needs SQL), so nothing here reads it.
+const databaseFactsUnknown = (db) => ['armed', 'encrypt_pending', 'decrypt_pending', 'journal'].some((key) => db[key] == null)
+
+const STARTUP_CODES = {
+  busy: 'startup_busy',
+  memory_not_enabled: 'startup_memory_required',
+  source_unavailable: 'startup_key_unavailable',
+  too_large: 'startup_too_large',
+  auth_interrupted: 'startup_auth_interrupted',
+}
+const startupCode = (outcome) => (outcome == null ? null : own(STARTUP_CODES, outcome) ? STARTUP_CODES[outcome] : 'startup_refused')
+// The postponements a plain restart retries: the step offers the restart with its remedy.
+const RESTART_RETRIES = ['startup_busy', 'startup_memory_required', 'startup_key_unavailable']
 
 function databaseState(db) {
   if (databaseFactsUnknown(db)) return { code: 'databases_failed' }
-  const plaintext = databaseRows(db).some((row) => row.state === 'plaintext')
-  if (db.decrypt_pending) return { code: 'decrypt_pending' }
   if (db.journal) return { code: 'journal' }
-  if (db.armed && db.encrypt_pending) return { code: 'stale_pending' }
-  if (db.armed && plaintext) return { code: 'plaintext_in_armed_home' }
-  if (db.armed) return db.runtime_protected ? { done: true } : { restart: true }
-  return db.encrypt_pending ? { restart: true } : {}
+  if (db.decrypt_pending) return { code: 'decrypt_pending' }
+  if (db.armed) {
+    if (db.encrypt_pending) return { code: 'stale_pending' }
+    return db.runtime_protected ? { done: true } : { restart: true }
+  }
+  if (!db.encrypt_pending) return {}
+  const code = startupCode(db.startup_outcome)
+  return code ? { code } : { restart: true }
 }
 
 // The first unmet prerequisite, in reading order: rules are [met, blocker] pairs.
@@ -909,16 +934,48 @@ function firstBlocker(...rules) {
 }
 
 // Steps 2.4 and 2.5 write to mordred.db, which opens only once the databases are
-// armed (step 1.3) and Hermes restarted. null on Linux and from an older API.
+// armed (step 1.3) and Hermes restarted. null on Linux and from an older API: step 1.3 is
+// opt-in there, and an unarmed Linux import keeps writing its Telegram archive.
 function storeBlocker(status) {
   if (!(pageLayout(status) === 'macos' && reportsV4(status))) return null
   const db = status.databases
-  if (!db.armed) return db.encrypt_pending ? 'needs_restart' : 'needs_databases'
+  if (db.armed == null && db.supported !== false) return null // unknown: the explicit operation performs admission
+  if (!db.armed) return db.encrypt_pending && !startupCode(db.startup_outcome) ? 'needs_restart' : 'needs_databases'
   if (databaseFactsUnknown(db)) return null // the explicit foreground operation performs admission
   if (!db.runtime_protected) return 'needs_restart'
   const code = status.imports.available === false ? status.imports.code : null
   if (code === 'conversion_pending' || code === 'unprotected_process') return 'needs_restart'
   return code === 'not_armed' ? 'needs_databases' : null
+}
+
+// A step's state from its rule: facts decide first (done, then an attention code), then
+// unmet prerequisites (`blocked`), then a running job, then page state.
+function stepEntry({ done = false, fact = null, blocker = null, job = null, page = null }) {
+  if (done) return { state: 'done' }
+  if (fact) return { state: 'attention', code: fact }
+  if (blocker) return { state: 'blocked', blocker }
+  if (job) return { state: 'running', job: job.job_id }
+  return page || { state: 'todo' }
+}
+
+// Step 1.3's rule on every layout, from the facts and the prerequisites each reports in
+// `status.checks`. A schedule is never hidden behind a prerequisite: its Cancel must stay
+// reachable, because a retained pending marker blocks memory disable and reset.
+function databasesRule(status) {
+  const checks = status.checks || {}
+  const db = databaseState(status.databases)
+  return {
+    done: Boolean(db.done),
+    fact: status.databases.supported === false ? 'databases_unsupported' : db.code || null,
+    blocker:
+      db.restart && status.databases.encrypt_pending
+        ? null
+        : firstBlocker(
+            [Boolean(checks.hardware && checks.hardware.ok), 'needs_enclave'],
+            [Boolean(checks.memory_encryption && checks.memory_encryption.ok), 'needs_memory'],
+          ),
+    page: db.restart ? { state: 'todo', restart: true } : null,
+  }
 }
 
 // The state of every step of the macOS/Linux page: {key: {state, blocker?, code?, job?}}.
@@ -943,16 +1000,8 @@ function stepStates(status, sync = null) {
   const v4 = macos && reportsV4(status)
   const store = storeBlocker(status)
   const states = {}
-  const decide = (key, { done = false, fact = null, blocker = null, job = null, page = null }) => {
-    states[key] = done
-      ? { state: 'done' }
-      : fact
-        ? { state: 'attention', code: fact }
-        : blocker
-          ? { state: 'blocked', blocker }
-          : job
-            ? { state: 'running', job: job.job_id }
-            : page || { state: 'todo' }
+  const decide = (key, rule) => {
+    states[key] = stepEntry(rule)
   }
   decide('enclave', { done: hardware, job: runningJob('enclave', 'hardware') })
   // macOS with a version 4 API: the vault (1.2a) comes first, and memory (1.2b) needs
@@ -968,15 +1017,7 @@ function stepStates(status, sync = null) {
   const vaultReady = !vault || Boolean(vault.env_enrolled && vault.env_injecting)
   decide('memory', { done: memory, blocker: firstBlocker([hardware, 'needs_enclave'], [vaultReady, 'needs_vault']) })
   if (macos && !v4) states.databases = { state: 'attention', code: 'mordred_update_required' }
-  else if (v4) {
-    const db = databaseState(status.databases)
-    decide('databases', {
-      done: Boolean(db.done),
-      fact: status.databases.supported === false ? 'databases_unsupported' : db.code || null,
-      blocker: firstBlocker([hardware, 'needs_enclave'], [memory, 'needs_memory']),
-      page: db.restart ? { state: 'todo', restart: true } : null,
-    })
-  }
+  else if (reportsV4(status)) decide('databases', databasesRule(status))
   decide('hermes_model', { done: model })
   decide('question_model', { done: llm, blocker: firstBlocker([hardware, 'needs_enclave'], [model, 'needs_hermes_model']) })
   decide('telegram', {
@@ -1042,10 +1083,6 @@ function protectionRow(status, layout, hardware, memory) {
     ...(vault ? [vaultFact(vault)] : []),
     memory ? 'memory encrypted' : 'memory not encrypted',
   ]
-  if (layout === 'linux') {
-    const dot = hardware && memory ? 'done' : hardware || memory ? 'partial' : 'not_started'
-    return { ...row, dot, detail: [...facts, 'Databases: not available on Linux'].join(' · ') }
-  }
   if (!reportsV4(status)) return { ...row, dot: 'attention', detail: [...facts, 'databases: Update Mordred to use this'].join(' · ') }
   const db = status.databases
   const state = databaseState(db)
@@ -2219,7 +2256,7 @@ function UpdateRequiredStep({ id, n, title, why }) {
 
 function DatabaseTable({ rows, unknown = false }) {
   if (unknown) return jsx('p', { children: 'Database files and encryption state: not checked by passive status.' })
-  if (!rows.length) return jsx('p', { children: 'No Hermes database files were found yet.' })
+  if (!rows.length) return null // an empty list is unknown, never "no files" or "no plaintext"
   const cell = { textAlign: 'left', padding: '2px 16px 2px 0' }
   return jsxs('table', {
     style: { borderCollapse: 'collapse', margin: '8px 0' },
@@ -2246,10 +2283,12 @@ function DatabaseTable({ rows, unknown = false }) {
   })
 }
 
-// Step 1.3 (macOS, version 4 API). The table is the preview: discovery runs on every
-// status read without a key or Touch ID. "Encrypt databases" never converts from the
-// backend: Hermes Desktop holds the files open, so it schedules the conversion for the
-// next start, and the step then offers the restart. Attention states point to Terminal.
+// Step 1.3 (version 4 API, every layout). Status is passive, so it never says which file
+// is encrypted. "Encrypt databases" never converts from the backend: Hermes Desktop holds
+// the files open, so it schedules the conversion for the next start, and the step then
+// offers the restart and a Cancel. Attention codes come from the facts, so a startup
+// failure shows on page load, not only after a press. Nothing here promises a prompt: a
+// key's policy is not readable from status.
 function DatabasesStep({ id, n, state, blocker = null, goto = null, code = null, restart = false, status, refresh }) {
   const db = status.databases || {}
   const [busy, setBusy] = useState(false)
@@ -2257,48 +2296,67 @@ function DatabasesStep({ id, n, state, blocker = null, goto = null, code = null,
   // The answer that asks for a restart: `scheduled` (converted at the next start) or
   // `needs_restart` (armed, but this Hermes Desktop opened the databases before).
   const [restartFor, setRestartFor] = useState(null)
+  const [cancelled, setCancelled] = useState(false)
   const noteRef = useFocusOn(failure)
   const resultRef = useFocusOn(restartFor)
+  const cancelledRef = useFocusOn(cancelled)
   useDropOnDone(state, () => setFailure(null))
-  const encrypt = async () => {
+  // One request at a time; an answer may not say what changed (databases_failed), so
+  // the facts are always read again.
+  const send = async (path, answered) => {
     setBusy(true)
     setFailure(null)
+    setCancelled(false)
     try {
-      const r = await call('/databases/encrypt', {})
+      const r = await call(path, {})
       // An attention answer carries its code; only a well-formed one is shown.
       if (r.action === 'attention') throw new MordredError(safeCode(r.code) || 'databases_failed', {})
+      answered(r)
+    } catch (e) {
+      setFailure(asMordredError(e))
+    } finally {
+      setBusy(false)
+      refresh()
+    }
+  }
+  const encrypt = () =>
+    send('/databases/encrypt', (r) => {
       if (r.action === 'scheduled' || r.action === 'needs_restart') {
         setRestartFor(r.action)
         if (r.action === 'scheduled') host.notify({ kind: 'info', message: 'Database encryption is scheduled for the next start of Hermes Desktop.' })
       } else if (r.action !== 'done') throw new MordredError('invalid_response', {})
       // `done`: already on; the status read below makes the step done.
-    } catch (e) {
-      setFailure(asMordredError(e))
-    } finally {
-      setBusy(false)
-      // An answer may not say what changed (databases_failed): read the facts again.
-      refresh()
-    }
-  }
+    })
+  const cancel = () =>
+    send('/databases/cancel', (r) => {
+      if (r.action !== 'cancelled') throw new MordredError('invalid_response', {})
+      setRestartFor(null)
+      setCancelled(true)
+    })
   const rows = databaseRows(db)
-  const unreadable = rows.filter((row) => row.state === 'unreadable').length
-  const unknown = databaseFactsUnknown(db)
+  const unsupported = db.supported === false
+  const unknown = !unsupported && databaseFactsUnknown(db)
   const backups = Number(db.plaintext_backups) || 0
   const waiting = Boolean(restartFor) || restart
   const shown = state === 'done' || state === 'blocked' ? state : busy ? 'running' : failure ? 'attention' : state
   const scheduledText = restartFor ? restartFor === 'scheduled' : !db.armed
+  const retryByRestart = !waiting && RESTART_RETRIES.includes(code)
   const notice =
-    waiting && shown !== 'done'
+    (waiting || retryByRestart || cancelled) && shown !== 'done'
       ? jsxs('div', {
           ref: resultRef,
           tabIndex: -1,
           style: { marginTop: 10 },
           children: [
-            jsx('p', { key: 'text', role: 'status', children: scheduledText ? DATABASES_RESTART.scheduled : DATABASES_RESTART.armed }),
-            jsx(RestartHermesControl, { key: 'restart' }),
+            cancelled ? jsx('p', { key: 'cancelled', ref: cancelledRef, tabIndex: -1, role: 'status', children: 'The scheduled encryption is cancelled. Nothing was converted.' }) : null,
+            waiting ? jsx('p', { key: 'text', role: 'status', children: scheduledText ? DATABASES_RESTART.scheduled : DATABASES_RESTART.armed }) : null,
+            waiting || retryByRestart ? jsx(RestartHermesControl, { key: 'restart' }) : null,
           ],
         })
       : null
+  // The route would refuse a Cancel once a conversion started or finished.
+  const canCancel = db.encrypt_pending === true && db.armed === false && db.journal === false
+  const canEncrypt = !waiting && !code && !unknown && !unsupported && !db.armed && !db.encrypt_pending
   return jsx(Step, {
     id,
     n,
@@ -2306,30 +2364,41 @@ function DatabasesStep({ id, n, state, blocker = null, goto = null, code = null,
     state: shown,
     blocker,
     goto,
-    summary: unknown ? 'Database encryption: not checked.' : `Database encryption: on (${plural(unreadable, 'file')} encrypted or unreadable).`,
-    progress: 'Scheduling the database encryption…',
+    summary: 'Database encryption: on.',
+    progress: 'Working on the database encryption…',
     failure: stepFailure(failure, code),
     noteRef,
     notice,
     why: WHY.databases,
-    children: jsxs(Fragment, {
-      children: [
-        jsx(DatabaseTable, { key: 'table', rows, unknown }),
-        db.plaintext_backups == null ? jsx('p', { key: 'backups-unknown', children: 'Backup archive count: unknown.' }) : null,
-        backups > 0
-          ? jsx('p', { key: 'backups', children: `${plural(backups, 'backup archive')} in your Hermes home may contain plaintext copies; delete them when you no longer need them.` })
-          : null,
-        waiting || code || unknown
-          ? null
-          : jsx(Row, {
-              key: 'encrypt',
-              children: [
-                jsx(Button, { key: 'go', disabled: busy, onClick: encrypt, children: busy ? 'Scheduling…' : 'Encrypt databases' }),
-                jsx('span', { key: 'hint', style: { fontSize: 12, color: MUTED_TEXT }, children: 'Takes effect the next time Hermes Desktop starts.' }),
-              ],
-            }),
-      ],
-    }),
+    children: unsupported
+      ? null
+      : jsxs(Fragment, {
+          children: [
+            jsx(DatabaseTable, { key: 'table', rows, unknown }),
+            db.plaintext_backups == null ? jsx('p', { key: 'backups-unknown', children: 'Backup archive count: unknown.' }) : null,
+            backups > 0
+              ? jsx('p', { key: 'backups', children: `${plural(backups, 'backup archive')} in your Hermes home may contain plaintext copies; delete them when you no longer need them.` })
+              : null,
+            canEncrypt
+              ? jsx(Row, {
+                  key: 'encrypt',
+                  children: [
+                    jsx(Button, { key: 'go', disabled: busy, onClick: encrypt, children: busy ? 'Scheduling…' : 'Encrypt databases' }),
+                    jsx('span', { key: 'hint', style: { fontSize: 12, color: MUTED_TEXT }, children: 'Takes effect the next time Hermes Desktop starts.' }),
+                  ],
+                })
+              : null,
+            canCancel
+              ? jsx(Row, {
+                  key: 'cancel',
+                  children: [
+                    jsx(Button, { key: 'cancel', variant: 'outline', disabled: busy, onClick: cancel, children: 'Cancel' }),
+                    jsx('span', { key: 'hint', style: { fontSize: 12, color: MUTED_TEXT }, children: 'Removes the schedule. Nothing is converted.' }),
+                  ],
+                })
+              : null,
+          ],
+        }),
   })
 }
 
@@ -3118,6 +3187,12 @@ function WindowsLogout({ refresh, loggedIn }) {
   })
 }
 
+// Step 1.3 between Windows's numbered steps: 2a keeps the later numbers (and the copy that
+// cites them). The prerequisites are the two steps right above it, which have no anchors.
+function WindowsDatabasesStep({ status, refresh }) {
+  return jsx(DatabasesStep, { id: 'databases', n: '2a', ...stepEntry(databasesRule(status)), goto: false, status, refresh })
+}
+
 function WindowsSetup({ status, refresh }) {
   const [presenceAck, setPresenceAck] = useState(false)
   const c = status.checks || {}
@@ -3135,6 +3210,8 @@ function WindowsSetup({ status, refresh }) {
       jsx(HermesModelStep, { check: status.hermes_model, refresh }),
       jsx(HelperStep, { helper: status.helper, done: ok('hardware'), refresh }),
       jsx(WindowsMemoryStep, { status, refresh }),
+      // Spread: an older API's answer renders the very tree it always did.
+      ...(reportsV4(status) ? [jsx(WindowsDatabasesStep, { status, refresh })] : []),
       status.telegram_supported
         ? jsxs(Fragment, {
             children: [
@@ -3762,11 +3839,11 @@ function GroupedSetup({ status, health, sync = null, onSync = null, onImportStar
           jsx(EnclaveStep, { ...step('enclave'), refresh, hardwareKind: kind }),
           split ? jsx(VaultStep, { ...step('vault'), vault: status.vault, refresh }) : null,
           jsx(MemoryStep, { ...step('memory'), refresh, hardwareKind: kind, split }),
-          macos
-            ? v4
-              ? jsx(DatabasesStep, { ...step('databases'), status, refresh })
-              : jsx(UpdateRequiredStep, { key: 'databases', id: 'databases', n: STEP_NUMBERS.databases, title: 'Encrypt Hermes databases', why: WHY.databases })
-            : null,
+          reportsV4(status)
+            ? jsx(DatabasesStep, { ...step('databases'), status, refresh })
+            : macos
+              ? jsx(UpdateRequiredStep, { key: 'databases', id: 'databases', n: STEP_NUMBERS.databases, title: 'Encrypt Hermes databases', why: WHY.databases })
+              : null,
         ],
       }),
       jsx(Group, {

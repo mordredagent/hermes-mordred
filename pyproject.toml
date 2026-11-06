@@ -142,6 +142,7 @@ dev = [
   "hatchling>=1.18",
   "pytest>=8,!=9.1.0,!=9.1.1",
   "pytest-cov",
+  "pytest-xdist>=3.8,<4",
   # Pin the linters exactly. CI installs this extra with unpinned pip, so a
   # floating ruff/mypy silently reformats or re-type-checks the whole tree on
   # every new release and turns CI red with no code change (an unpinned float

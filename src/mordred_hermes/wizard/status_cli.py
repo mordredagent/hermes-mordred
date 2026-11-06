@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..__about__ import __version__
+from .._core._config_io import passive_canonical_reads
 from .._core._home import hermes_home as _hermes_home
 from .._core._policy_io import (
     policy_transaction_marker_for_config,
@@ -43,6 +44,7 @@ from .._core._policy_io import (
 )
 from ..keyvault._identity import resolve_root
 from . import _term
+from ._network_status import NETWORK_UNAVAILABLE, NETWORK_UNAVAILABLE_DETAIL, read_configured_network_path
 from .encryption_cli import (
     EXPOSED_LEGEND_BODY,
     STATUS_LEGEND_BODY,
@@ -142,12 +144,8 @@ def _network_state(home: Path) -> tuple[str, bool, str | None, bool | None]:
     """(configured_path, live, active_path, ready) without bringing anything up."""
     from ..network import api
     from ..network._exceptions import MordredNetworkError
-    from ..network.settings import read_default_path
 
-    # log= must be passed: with ``log=None`` the shared YAML loader swallows
-    # the malformed-config warning entirely and corrupted config.yaml would
-    # silently render as the clearnet default (review 2026-07-29).
-    configured = read_default_path(home / "config.yaml", log=_LOG)
+    configured = read_configured_network_path(home / "config.yaml", log=_LOG)
     try:
         live_status = api.status()
     except MordredNetworkError:
@@ -294,6 +292,7 @@ def _default_helper_finder(platform: str) -> str | None:
 # -----------------------------------------------------------------------------
 # Aggregation + rendering
 # -----------------------------------------------------------------------------
+@passive_canonical_reads()
 def collect(
     *,
     home: Path,
@@ -344,6 +343,8 @@ def render_text(report: StatusReport, *, color: bool = False) -> str:
     if report.network_live:
         ready = "ready" if report.network_ready else "not ready"
         network = f"{report.network_active_path} (live, {ready})"
+    elif report.network_configured_path == NETWORK_UNAVAILABLE:
+        network = f"{NETWORK_UNAVAILABLE} ({NETWORK_UNAVAILABLE_DETAIL})"
     else:
         network = f"{report.network_configured_path} (configured; runtime not active in this process)"
     helper = "hardware helper installed" if report.keyvault_helper_installed else "no hardware helper"
@@ -383,6 +384,7 @@ def render_json(report: StatusReport) -> str:
     return json.dumps(report.to_dict(), indent=2)
 
 
+@passive_canonical_reads()
 def status(
     *,
     home: Path,

@@ -320,3 +320,17 @@ def test_export_copy_does_not_follow_replaced_staging(native_root, monkeypatch):
         _backup.export_database(root, backup, output, lease=lease)
     assert victim.read_bytes() == b"preserve unrelated data"
     assert not output.exists()
+
+
+def test_uninstall_preflight_refuses_until_backup_recovered(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup
+    from mordred_hermes.dbcrypt._uninstall import preflight
+    from tests.test_dbcrypt_backup import _crashed_backup
+
+    root, _, _, _ = native_root
+    _crashed_backup(native_root, monkeypatch, "published")
+    with acquire_exclusive(root) as lease:
+        with pytest.raises(DatabaseRefused, match="recover before uninstall"):
+            preflight(root, lease=lease, purge=False)
+        assert _backup.recover_backups(root, lease=lease).outcome == "published"
+        assert preflight(root, lease=lease, purge=False) is not None

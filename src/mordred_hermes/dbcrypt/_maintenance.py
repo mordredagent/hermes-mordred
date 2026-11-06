@@ -14,15 +14,39 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .._core._database_contracts import DatabaseRefused, NativeSnapshot
+from .._core._database_contracts import BackupRecoveryRequired, DatabaseRefused, NativeSnapshot
 from .._core._database_lifecycle import ExclusiveLease, current_thread_exclusive_leases
-from ..keyvault._database_authority import CheckedDatabaseDomain, observe_database_source, resolve_database_domain
+from ..keyvault._database_authority import (
+    CheckedDatabaseDomain,
+    enroll_database_source,
+    observe_database_source,
+    require_database_memory_enabled,
+    resolve_database_domain,
+)
 from . import _migrate
 from ._connection import _check_sql, _MaintenanceConnection, _parameters, _PathBinding, _sql_action_denied
 from ._key import DatabaseKey
-from ._marker import Marker, read_marker
+from ._marker import LegacyMarker, Marker, read_marker
 from ._policy import in_scope
 from ._shim import apply_key
+
+
+def convert_home(root: Path, *, lease: ExclusiveLease, decrypting: bool) -> _migrate.Report:
+    """Convert every database under ``root``; the caller owns the preceding exclusive lease."""
+    from ._runtime import arm
+
+    ExclusiveLease.assert_held(lease, root)
+    if not decrypting:
+        require_database_memory_enabled(root=root)
+    marker = read_marker(root)
+    if isinstance(marker, LegacyMarker):
+        _migrate.adopt_legacy(root, lease=lease)
+    elif not isinstance(marker, Marker) and not decrypting:
+        with _migrate.native_source():
+            enroll_database_source(root=root, lease=lease)
+    # The conversion owner authenticates exactly under actual EX. A
+    # runtime SH provider cannot authorize this offline operation.
+    return _migrate.decrypt_all(root, None) if decrypting else _migrate.migrate(root, None, arm=arm)
 
 
 @dataclass(frozen=True)
@@ -203,6 +227,9 @@ class MaintenanceScope:
             if observe_database_source(root=self._domain.root) != self._snapshot:
                 raise DatabaseRefused("maintenance native source changed")
             ExclusiveLease.assert_held(self._lease, self._domain.root)
+        except BackupRecoveryRequired:
+            self._invalidate()
+            raise
         except Exception:
             self._invalidate()
             raise DatabaseRefused("maintenance source or exclusive lease changed") from None

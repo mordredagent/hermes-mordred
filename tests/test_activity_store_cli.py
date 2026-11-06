@@ -335,3 +335,32 @@ def test_real_restore_of_an_unregistered_copy_is_refused(protected_runtime, monk
 
     assert "refused (store_unavailable)" in capsys.readouterr().err
     assert _count_events(home, protected_runtime) == before == 2
+
+
+def test_activity_backup_reports_backup_recovery_required(protected_runtime, monkeypatch, capsys) -> None:
+    from mordred_hermes.activity._gate import open_store
+
+    root, _, _ = protected_runtime
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    store = open_store(root)
+    (root / "mordred/db-backups.journal.json").write_bytes(b"{}")  # only lstat'ed by the refusal
+    dest = root.parent / (root.name + "-refused.db")
+
+    with pytest.raises(ActivityRefused) as refused:
+        store.backup(dest)
+    assert refused.value.code == "backup_recovery_required"
+    assert not dest.exists()
+
+    capsys.readouterr()
+    assert cli.main(["activity", "backup", "--output", str(dest)]) == 1
+    err = capsys.readouterr().err
+    assert "refused (backup_recovery_required)" in err
+    assert "hermes-mordred databases backup recover" in err
+
+
+def test_restore_preview_scope_refusal_keeps_the_backup_recovery_code():
+    from mordred_hermes._core._database_contracts import BackupRecoveryRequired, DatabaseRefused
+    from mordred_hermes.wizard.activity_store_cli import _refusal_code
+
+    assert _refusal_code(BackupRecoveryRequired("x")) == "backup_recovery_required"
+    assert _refusal_code(DatabaseRefused("x")) == "store_unavailable"

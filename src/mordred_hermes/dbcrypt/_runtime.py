@@ -184,8 +184,8 @@ def _native_home(home: Path | None) -> tuple[Path, Path]:
     return requested, root_home(requested)
 
 
-def _refuse_deferred_native_state(base: Path) -> None:
-    """Native recovery/adoption remain closed until the offline transaction layer."""
+def _refuse_deferred_native_state(base: Path, *, allow_pending: bool = False) -> None:
+    """Refuse recovery state; only the unarmed path may tolerate a retained schedule."""
     from .._core._database_contracts import DatabaseRefused
 
     for name in (
@@ -193,6 +193,8 @@ def _refuse_deferred_native_state(base: Path) -> None:
         "db-encryption.pending",
         "db-decryption.pending",
     ):
+        if allow_pending and name == "db-encryption.pending" and not marker_path(base).is_file():
+            continue
         try:
             (base / "mordred" / name).lstat()
         except FileNotFoundError:
@@ -204,10 +206,13 @@ def _install_native(home: Path | None, provider: KeyProvider | None) -> bool:
     from .._core._database_contracts import DatabaseRefused
     from . import _shim
     from ._locking import runtime_lease
+    from ._startup import run_scheduled_conversion
 
     global _PROVIDER
     requested_home, base = _native_home(home)
-    _refuse_deferred_native_state(base)
+    # True: the conversion stays scheduled and this process holds its plain lease.
+    deferred = run_scheduled_conversion(base)
+    _refuse_deferred_native_state(base, allow_pending=deferred)
     if _PROVIDER is not None and _PROVIDER.runtime_native and _PROVIDER.current_authority is not None:
         existing = _PROVIDER.current_authority
         existing.check()
@@ -215,14 +220,14 @@ def _install_native(home: Path | None, provider: KeyProvider | None) -> bool:
             raise DatabaseRefused("installed database authority cannot be rebound")
         return True
     candidate = provider or KeyProvider(home=requested_home)
-    # Offline adoption, recovery and pending conversion stay closed.
+    # Offline adoption and recovery stay closed; run_scheduled_conversion owns pending.
     try:
         marker_path(base).lstat()
     except FileNotFoundError:
         # Preserve plain-runtime exclusion and first-time home initialization.
         # This lease uses no native custody and never enters offline recovery.
         with runtime_lease(base):
-            _refuse_deferred_native_state(base)
+            _refuse_deferred_native_state(base, allow_pending=deferred)
             try:
                 marker_path(base).lstat()
             except FileNotFoundError:
@@ -254,9 +259,12 @@ def _require_native_runtime_capability(base: Path) -> None:
 def install(*, home: Path | None = None, provider: KeyProvider | None = None) -> bool:
     """Swap ``sqlite3`` for SQLCipher if database encryption is armed. Returns whether it did.
 
-    Runs a scheduled conversion first, and completes an interrupted one.
-    Raises when armed but SQLCipher cannot be loaded: Hermes's databases are
-    encrypted then, and the stdlib module cannot open them.
+    Runs a scheduled encryption first, and resumes one it interrupted, before any
+    database opens (:mod:`._startup`). When that cannot run without a journal left
+    behind, Hermes continues plain and the conversion stays scheduled. Raises when a
+    journal remains, or when armed but SQLCipher cannot be loaded: Hermes's databases
+    are encrypted then, and the stdlib module cannot open them. Maintenance processes
+    run nothing here.
     """
     # Maintenance commands explicitly open databases through _migrate. Running
     # queued work here would mutate a home before status/--dry-run/confirmation,

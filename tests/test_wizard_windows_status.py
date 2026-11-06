@@ -8,17 +8,26 @@ excluded artifacts, copied profiles and held locks print a classified reason.
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import threading
+import time
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 
 from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core import _yaml_io
 from mordred_hermes.keyvault import _seckey_helper, wrap
-from mordred_hermes.wizard import encryption_cli, keyvault_windows_cli, memory_cli, setup_cli, status_cli
+from mordred_hermes.network import _windows_policy, settings
+from mordred_hermes.privacy_check import _runtime
+from mordred_hermes.wizard import encryption_cli, keyvault_windows_cli, memory_cli, network_cli, setup_cli, status_cli
 from mordred_hermes.wizard._encryption_status import status_mark
 from mordred_hermes.wizard._workspace_paths import WorkspacePaths
+from mordred_hermes.wizard.policy_writer import PolicyWriter
+from tests.test_config_io import RecordingLock
 from tests.test_windows_custody import fs as fs
 from tests.test_windows_memory_lifecycle import ORIGINALS, put
 from tests.test_windows_memory_proof import installed_runtime as installed_runtime
@@ -37,18 +46,26 @@ ORDER = (
     "per-use presence",
     "secret store",
 )
+# The autouse fixture below pins these; the held-lock reader tests need the real ones.
+REAL_NETWORK_STATE = status_cli._network_state
+REAL_POLICY_MODE = status_cli._policy_mode
 
 
 def forbid_native(monkeypatch, env):
     """Status may read checked files only: no backend, unwrap or subprocess."""
 
+    attempts = []
+
     def tripwire(*args, **kwargs):
+        attempts.append((args, kwargs))
         raise AssertionError("status reached a native, unwrap or subprocess operation")
 
     monkeypatch.setattr(env.custody, "windows_backend", tripwire)
     monkeypatch.setattr(wrap, "unwrap_dek", tripwire)
+    monkeypatch.setattr(wrap, "wrap_dek", tripwire)
     monkeypatch.setattr(subprocess, "Popen", tripwire)
     monkeypatch.setattr(subprocess, "run", tripwire)
+    return attempts
 
 
 def workspace(tmp_path):
@@ -165,9 +182,22 @@ def test_copied_profile_prints_the_classified_reason(win, capsys):
     assert "memory custody: supported, unavailable (custody-broken)" in out
 
 
-def test_held_lock_is_reported_not_awaited(seeded, capsys):
+def test_held_lock_is_reported_not_awaited(seeded, monkeypatch, capsys):
     env = seeded
     enable(env)
+    capsys.readouterr()
+    native_attempts = forbid_native(monkeypatch, env)
+    from mordred_hermes.keyvault._windows_custody import WindowsCustodySession
+
+    mutations = []
+
+    def tripwire(*args, **kwargs):
+        mutations.append((args, kwargs))
+        raise AssertionError("passive status attempted creation or mutation")
+
+    for name in ("enroll_role", "enroll_memory", "_publish", "_remove"):
+        monkeypatch.setattr(WindowsCustodySession, name, tripwire)
+    before = {p.relative_to(env.home): p.read_bytes() for p in env.home.rglob("*") if p.is_file()}
     holding, release = threading.Event(), threading.Event()
 
     def holder():
@@ -179,13 +209,258 @@ def test_held_lock_is_reported_not_awaited(seeded, capsys):
     thread.start()
     try:
         assert holding.wait(30)
+        lock = RecordingLock(cio._lock)
+        monkeypatch.setattr(cio, "_lock", lock)
+        start = time.monotonic()
         status = memory_line(env)[0]
+        collected = status_cli.collect(
+            home=env.home, root=env.home / "vault", platform="win32", workspace=workspace(env.home.parent)
+        )
+        assert (
+            encryption_cli.status(
+                home=env.home,
+                root=env.home / "vault",
+                platform="win32",
+                workspace=workspace(env.home.parent),
+                as_json=True,
+            )
+            == 0
+        )
+        direct = json.loads(capsys.readouterr().out)
         out = report(env, capsys)
+        setup_result = setup_cli._resolve_step_memory_encryption(
+            home=env.home,
+            root=env.home / "vault",
+            platform="win32",
+            prompt_io=None,
+            options=setup_cli.SetupOptions(),
+        )
+        elapsed = time.monotonic() - start
     finally:
         release.set()
         thread.join(30)
-    assert "custody-uncertain" in status.detail
+    assert not thread.is_alive()
+    assert setup_result.action == "blocked" and "custody-uncertain" in setup_result.detail
+    # Five status surfaces at the one-second budget each; the pre-fix wait took 10.52s.
+    # Exact admission arguments below are the precise check; this only catches other waits.
+    assert elapsed < 5.0
+    assert lock.calls and all(kwargs == {"blocking": False} for _, _, kwargs in lock.calls)
+    assert "custody-uncertain" in status.detail and not status.active
+    assert all(not target.active for target in collected.encryption)
+    assert all(not row["active"] for row in direct)
+    assert "custody-uncertain" in direct[2]["detail"]
+    assert all(not row.available for row in collected.windows_capabilities)
     assert "memory custody: supported, unavailable (custody-uncertain)" in out
+    after = {p.relative_to(env.home): p.read_bytes() for p in env.home.rglob("*") if p.is_file()}
+    assert after == before
+    assert native_attempts == [] and mutations == []
+
+
+TOR_POLICY_OFF = (
+    b"plugins:\n"
+    b"  mordred_network:\n"
+    b"    default_path: tor\n"
+    b"    tor_binary_path: /opt/custom/tor\n"
+    b"  mordred_privacy_check:\n"
+    b"    policy: 'off'\n"
+)
+
+
+class NoPrompts:
+    def __getattr__(self, name):
+        raise AssertionError(f"an unreadable network configuration must refuse before prompting ({name})")
+
+
+def put_config(env, data):
+    paths = cio.CanonicalPaths(env.home)
+    with cio.canonical_session(paths, scope="policy", create=True) as session, session.policy_update() as update:
+        update.put_config(data)
+        update.commit()
+
+
+def home_files(env):
+    return {p.relative_to(env.home): p.read_bytes() for p in env.home.rglob("*") if p.is_file()}
+
+
+def policy_writer(env):
+    mordred = env.home / "mordred"
+    return PolicyWriter(env.home / "config.yaml", mordred / "policy.json", mordred)
+
+
+@contextmanager
+def held_canonical_lock(env):
+    paths = cio.CanonicalPaths(env.home)
+    holding, release = threading.Event(), threading.Event()
+
+    def holder():
+        with cio.canonical_session(paths, scope="policy"):
+            holding.set()
+            release.wait(30)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        assert holding.wait(30)
+        yield
+    finally:
+        release.set()
+        thread.join(30)
+    assert not thread.is_alive()
+
+
+@pytest.fixture
+def checked_readers(win, monkeypatch):
+    """Route the config readers through their Windows paths; the real readers are exercised."""
+    monkeypatch.setattr(_yaml_io, "_platform", "nt")
+    monkeypatch.setattr(_runtime, "_platform", "nt")
+    windows = SimpleNamespace(platform="win32")
+    monkeypatch.setattr(settings, "sys", windows)
+    monkeypatch.setattr(_windows_policy, "sys", windows)
+    monkeypatch.setattr(status_cli, "_network_state", REAL_NETWORK_STATE)
+    monkeypatch.setattr(status_cli, "_policy_mode", REAL_POLICY_MODE)
+    return win
+
+
+@pytest.fixture
+def tor_home(checked_readers):
+    put_config(checked_readers, TOR_POLICY_OFF)
+    return checked_readers
+
+
+def test_held_lock_reports_network_unavailable_not_the_clearnet_default(tor_home):
+    env = tor_home
+    assert REAL_NETWORK_STATE(env.home)[0] == "tor"
+    with held_canonical_lock(env):
+        collected = status_cli.collect(
+            home=env.home, root=env.home / "vault", platform="win32", workspace=workspace(env.home.parent)
+        )
+    assert collected.network_configured_path == "unavailable"
+    rendered = status_cli.render_text(collected)
+    assert "network     : unavailable (" in rendered and "clearnet" not in rendered
+
+
+def test_held_lock_network_status_is_unavailable_not_the_clearnet_default(tor_home, capsys):
+    env = tor_home
+    config = env.home / "config.yaml"
+    assert network_cli.handle_status(argparse.Namespace(config_path=config)) == 0
+    assert "configured default_path = tor " in capsys.readouterr().out
+    with held_canonical_lock(env):
+        assert network_cli.handle_status(argparse.Namespace(config_path=config)) == 0
+        text = capsys.readouterr().out
+        assert network_cli.handle_status(argparse.Namespace(config_path=config, json=True)) == 0
+        body = json.loads(capsys.readouterr().out)
+    assert text == "configured default_path = unavailable  (configuration could not be safely read)\n"
+    assert body == {"live": False, "configured_path": "unavailable"}
+
+
+def test_held_lock_blocks_the_setup_network_step_before_prompting(tor_home):
+    env = tor_home
+    before = home_files(env)
+    with held_canonical_lock(env):
+        result = setup_cli._resolve_step_network(home=env.home, prompt_io=NoPrompts(), policy_writer=policy_writer(env))
+    assert result.action == "blocked"
+    assert "could not be safely read" in result.detail and "not configured" not in result.detail
+    assert home_files(env) == before
+    released = setup_cli._resolve_step_network(home=env.home, prompt_io=NoPrompts(), policy_writer=policy_writer(env))
+    assert (released.action, released.detail) == ("done", "default path = tor")
+
+
+@pytest.mark.parametrize("mode", ["interactive", "non-interactive"])
+def test_held_lock_refuses_network_init_without_replacing_saved_settings(tor_home, monkeypatch, capsys, mode):
+    env = tor_home
+
+    def never(*args, **kwargs):
+        raise AssertionError("an unreadable seed must refuse before writing")
+
+    monkeypatch.setattr(PolicyWriter, "merge_mordred_sections", never)
+    monkeypatch.setattr(network_cli.DotEnvFileWriter, "upsert", never)
+    monkeypatch.setattr(network_cli.JSONCredentialsWriter, "write_network", never)
+    before = home_files(env)
+    with held_canonical_lock(env):
+        if mode == "interactive":
+            rc = network_cli.run_init(
+                prompt_io=NoPrompts(),
+                policy_writer=policy_writer(env),
+                env_writer=network_cli.DotEnvFileWriter(),
+                credentials_writer=network_cli.JSONCredentialsWriter(),
+            )
+        else:
+            rc = network_cli.handle_init(
+                argparse.Namespace(config_path=env.home / "config.yaml", non_interactive=True, clear_mullvad=False)
+            )
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "invalid or unavailable network configuration" in captured.err and captured.out == ""
+    assert home_files(env) == before
+
+
+def test_checked_network_path_without_config_is_the_clearnet_default(checked_readers):
+    env = checked_readers
+    assert REAL_NETWORK_STATE(env.home)[0] == "clearnet"
+    assert REAL_NETWORK_STATE(env.home.parent / "never-created")[0] == "clearnet"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"plugins: [\n  TOP-SECRET-SENTINEL: {",
+        b"plugins:\n  mordred_network:\n    default_path: TOP-SECRET-SENTINEL\n",
+    ],
+    ids=["malformed-yaml", "invalid-path"],
+)
+def test_checked_damaged_config_is_network_unavailable(checked_readers, caplog, data):
+    env = checked_readers
+    put_config(env, data)
+    assert REAL_NETWORK_STATE(env.home)[0] == "unavailable"
+    assert "TOP-SECRET-SENTINEL" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"- a\n", b"plugins: [1]\n", b"plugins:\n  mordred_network: tor\n"],
+    ids=["non-mapping-root", "non-mapping-plugins", "non-mapping-section"],
+)
+def test_checked_shape_damage_refuses_setup_and_network_init(checked_readers, capsys, data):
+    env = checked_readers
+    put_config(env, data)
+    before = home_files(env)
+    result = setup_cli._resolve_step_network(home=env.home, prompt_io=NoPrompts(), policy_writer=policy_writer(env))
+    assert result.action == "blocked"
+    rc = network_cli.run_init(
+        prompt_io=NoPrompts(),
+        policy_writer=policy_writer(env),
+        env_writer=network_cli.DotEnvFileWriter(),
+        credentials_writer=network_cli.JSONCredentialsWriter(),
+    )
+    assert rc == 1
+    assert "invalid or unavailable network configuration" in capsys.readouterr().err
+    assert home_files(env) == before
+
+
+def test_setup_is_not_done_when_the_checked_reader_refuses_the_section(checked_readers):
+    env = checked_readers
+    put_config(env, b"plugins:\n  mordred_network:\n    default_path: tor\n    tor_socks_port: bad\n")
+    assert REAL_NETWORK_STATE(env.home)[0] == "unavailable"
+    result = setup_cli._resolve_step_network(home=env.home, prompt_io=NoPrompts(), policy_writer=policy_writer(env))
+    assert result.action == "blocked"
+    assert "could not be safely read" in result.detail
+
+
+@pytest.mark.parametrize("data", [b"plugins:\n", b"plugins:\n  mordred_network:\n"], ids=["plugins", "section"])
+def test_checked_blank_keys_seed_network_init_as_unconfigured(checked_readers, data):
+    env = checked_readers
+    put_config(env, data)
+    assert network_cli._read_network_seed(env.home / "config.yaml") == {}
+
+
+def test_held_lock_policy_line_fails_closed_to_strict(tor_home):
+    env = tor_home
+    assert REAL_POLICY_MODE(env.home) == "off"
+    with held_canonical_lock(env):
+        collected = status_cli.collect(
+            home=env.home, root=env.home / "vault", platform="win32", workspace=workspace(env.home.parent)
+        )
+    assert collected.policy_mode == "strict"
 
 
 def test_retained_secret_store_and_excluded_artifacts_are_reported(win, monkeypatch, capsys):
@@ -258,6 +533,32 @@ def test_setup_skips_excluded_steps_and_runs_the_windows_memory_enable(seeded, m
     assert NO_PRESENCE_NO_RECOVERY in out and keyvault_windows_cli.CUSTODY_NOTICE in out
     assert not setup_cli._stops_run(keyvault)
     assert run_steps(env, monkeypatch)[2].action == "done"
+
+
+def test_setup_observation_is_passive_but_enable_uses_ordinary_admission(seeded, monkeypatch):
+    env = seeded
+    lock = RecordingLock(cio._lock)
+    monkeypatch.setattr(cio, "_lock", lock)
+    enable_calls = []
+
+    def run_enable(**kwargs):
+        before = len(lock.calls)
+        cio.read_canonical_snapshot(cio.CanonicalPaths(env.home))
+        enable_calls.extend(lock.calls[before:])
+        return 0
+
+    monkeypatch.setattr(setup_cli, "_run_memory_encryption", run_enable)
+    result = setup_cli._resolve_step_memory_encryption(
+        home=env.home,
+        root=env.home / "vault",
+        platform="win32",
+        prompt_io=None,
+        options=setup_cli.SetupOptions(),
+    )
+    assert result.action == "ran"
+    assert enable_calls and all(kwargs == {"timeout": 2.0} for _, _, kwargs in enable_calls)
+    observation_calls = lock.calls[: -len(enable_calls)]
+    assert observation_calls and all(kwargs == {"blocking": False} for _, _, kwargs in observation_calls)
 
 
 def test_setup_memory_step_respects_state(seeded, monkeypatch):

@@ -398,6 +398,42 @@ class _Transaction:
         validate_leaf(destination)
         self._move(name, destination, expected_identity)
 
+    def finish_interrupted_rename(self, name: str, destination: str) -> None:
+        """Drop the source link a crash left between rename_file's link and unlink.
+
+        Removes a name only when both names are one private regular inode with
+        exactly these two links, so no file content can be lost.
+        """
+        validate_leaf(name)
+        validate_leaf(destination)
+        self._check()
+        changed = [False]
+        fd = self.directory.fd
+        try:
+            source = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            target = os.stat(destination, dir_fd=fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(source.st_mode)
+                or (source.st_dev, source.st_ino) != (target.st_dev, target.st_ino)
+                or source.st_nlink != 2
+                or source.st_uid != os.geteuid()
+                or stat.S_IMODE(source.st_mode) != 0o600
+            ):
+                raise PrivateFSError("unsafe", "finish_interrupted_rename")
+            os.unlink(name, dir_fd=fd)
+            changed[0] = True
+            _absent(fd, name)
+            _flush(fd)
+        except PrivateFSError as exc:
+            if changed[0]:
+                exc.commit_state = "uncertain"
+            raise
+        except OSError as exc:
+            raise _error(exc, "rename", changed[0]) from exc
+        finally:
+            if changed[0]:
+                self._mark_mutated()
+
     def _move(self, name: str, destination: str | None, expected: FileIdentity | None) -> None:
         validate_leaf(name)
         self._check()

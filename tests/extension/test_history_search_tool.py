@@ -704,3 +704,32 @@ def test_search_history_reads_records_directly() -> None:
     assert (result.candidates, result.complete, result.truncated) == (2, False, False)
     tight = search.search_history(records, search.SearchRequest(query="later"), budget=10)
     assert tight.items == () and tight.truncated is True and tight.conversations == ()
+
+
+@pytest.mark.parametrize(
+    ("query", "executes", "selects", "returned"), [("budget", 8, 5, 3), ("unmatchedtoken", 4, 1, 0)]
+)
+def test_store_found_selects_and_hydrates_with_one_open(tmp_path, query, executes, selects, returned):
+    seed = ImportStore(tmp_path / "mordred.db", _plain_opener)
+    seed.initialize(tmp_path)
+    _commit(seed, tg_conv(), [authored(i, text="budget item") for i in range(1, 11)])
+    statements = []
+    opens = []
+
+    class CountedConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            statements.append(sql)
+            return super().execute(sql, parameters)
+
+    def counted_opener(path):
+        opens.append(path)
+        return sqlite3.connect(path, factory=CountedConnection)
+
+    imports = ImportStore(seed.path, counted_opener)
+    found = search._store_found(imports, search.SearchRequest(query=query, limit=3))
+    assert len(found.parts) == returned
+    assert found.candidates == (10 if returned else 0)
+    assert not found.partial
+    assert len(opens) == 1
+    assert len(statements) == executes
+    assert sum(sql.lstrip().upper().startswith(("SELECT", "WITH")) for sql in statements) == selects

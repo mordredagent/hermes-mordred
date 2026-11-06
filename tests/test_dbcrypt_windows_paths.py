@@ -552,3 +552,55 @@ def test_public_backup_routes_refuse_remote_operator_paths_first(monkeypatch, na
         _forbid_remote_io(guard, remote)
         with pytest.raises(DatabaseRefused, match="namespace"):
             attempt()
+
+
+@pytest.mark.parametrize("remote", [r"\\server\share\x.db", r"\\?\C:\private\x.db", "//server/share/x.db"])
+def test_abandon_state_never_touches_remote_or_device_paths(monkeypatch, remote):
+    backup = _simulate_windows_backup(monkeypatch)
+    monkeypatch.setattr(Path, "lstat", lambda self: pytest.fail("lstat reached a remote backup path"))
+    assert backup._lexical_state(Path(remote)) == "unknown"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the native_root fixture uses POSIX custody")
+def test_abandon_with_remote_journal_paths_reports_unknown_without_io(monkeypatch, native_root):
+    import json
+
+    from mordred_hermes._core._database_lifecycle import acquire_exclusive
+    from mordred_hermes.dbcrypt._authority import Authority
+    from tests.test_dbcrypt_adoption import cipher
+
+    root, _, key, _ = native_root
+    cipher(root / "state.db", key)
+    destination = root.parent / (root.name + "-remote.backup")
+    from mordred_hermes.dbcrypt import _backup
+
+    def crash(point):
+        if point == "verified":
+            raise RuntimeError("crash")
+
+    authority = Authority.acquire(root)
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_backup, "_transition", crash)
+            with pytest.raises(RuntimeError, match="crash"):
+                _backup.backup_database(root / "state.db", destination, authority=authority)
+    finally:
+        authority.close()
+    journal = root / "mordred/db-backups.journal.json"
+    data = json.loads(journal.read_bytes())
+    data["destination"] = "//server/share/x.db"
+    data["prepared"] = "//server/share/x.db.mordred-backup-ab"
+    journal.write_text(json.dumps(data))
+    backup = _simulate_windows_backup(monkeypatch)
+    real_lstat = Path.lstat
+
+    def guarded(self):
+        if str(self).startswith("//server"):
+            pytest.fail("lstat reached a remote backup path")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", guarded)
+    with acquire_exclusive(root) as lease:
+        preview = backup.abandon_backup_journal(root, lease=lease, commit=False)
+    assert preview is not None
+    assert (preview.destination_state, preview.staging_state) == ("unknown", "unknown")

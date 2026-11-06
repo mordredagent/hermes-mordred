@@ -12,7 +12,12 @@ import stat
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
+
+_MARKER: Final = "db-encryption.marker"
+_ENCRYPT_PENDING: Final = "db-encryption.pending"
+_DECRYPT_PENDING: Final = "db-decryption.pending"
+_JOURNAL: Final = "db-encryption.journal.json"
 
 
 @dataclass(frozen=True)
@@ -24,15 +29,27 @@ class DatabaseStatus:
     reason: str | None
 
 
+@dataclass(frozen=True)
+class DatabaseIntent:
+    """Which lifecycle records exist, from metadata alone; never proof of protection."""
+
+    armed: bool
+    encrypt_pending: bool
+    decrypt_pending: bool
+    journal: bool
+    unsafe: bool
+
+
 def _root(home: Path) -> Path:
     # Lexical observation only. Explicit diagnosis later resolves the physical
     # domain through Authority; status never turns realpath into authorization.
     return home.parent.parent if home.parent.name == "profiles" else home
 
 
-def _intent(home: Path) -> tuple[bool, bool]:
+def _observe_intent(home: Path) -> tuple[frozenset[str], bool]:
+    """The lifecycle records present and whether the path requires checked diagnosis."""
     directory = _root(home) / "mordred"
-    configured = False
+    present: set[str] = set()
     unsafe = ".." in home.parts or home.name.casefold() == "profiles"
     unsafe |= home.parent.name.casefold() == "profiles" and home.parent.name != "profiles"
     for parent in (*reversed(home.absolute().parents), home.absolute()):
@@ -41,27 +58,49 @@ def _intent(home: Path) -> tuple[bool, bool]:
         except FileNotFoundError:
             break
         if not stat.S_ISDIR(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 0x400:
-            return False, True
+            return frozenset(), True
     for parent in (*reversed(directory.parents), directory):
         try:
             metadata = parent.lstat()
         except FileNotFoundError:
-            return configured, unsafe
+            return frozenset(), unsafe
         if not stat.S_ISDIR(metadata.st_mode):
-            return configured, True
-    for name in (
-        "db-encryption.marker",
-        "db-encryption.pending",
-        "db-decryption.pending",
-        "db-encryption.journal.json",
-    ):
+            return frozenset(), True
+    for name in (_MARKER, _ENCRYPT_PENDING, _DECRYPT_PENDING, _JOURNAL):
         try:
             metadata = (directory / name).lstat()
         except FileNotFoundError:
             continue
-        configured = True
+        present.add(name)
         unsafe |= not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
-    return configured, unsafe
+    return frozenset(present), unsafe
+
+
+def _intent(home: Path) -> tuple[bool, bool]:
+    present, unsafe = _observe_intent(home)
+    return bool(present), unsafe
+
+
+def database_intent(home: Path) -> DatabaseIntent:
+    """Observe the lifecycle records with lstat only; unobservable metadata is unsafe."""
+    try:
+        present, unsafe = _observe_intent(home)
+    except OSError:
+        return DatabaseIntent(False, False, False, False, True)
+    return DatabaseIntent(
+        _MARKER in present, _ENCRYPT_PENDING in present, _DECRYPT_PENDING in present, _JOURNAL in present, unsafe
+    )
+
+
+def backup_recovery_required(home: Path) -> bool | None:
+    """Metadata-only: is an interrupted backup journal present? None when unreadable."""
+    try:
+        (_root(home) / "mordred" / "db-backups.journal.json").lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return None
+    return True
 
 
 def _driver_present() -> bool:

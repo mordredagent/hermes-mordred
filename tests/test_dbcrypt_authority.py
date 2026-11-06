@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -69,6 +70,125 @@ class HeldConnection:
         self.authority.check()
         assert not self.invalidated
         return (1,)
+
+
+@pytest.mark.parametrize("admission", ["operation", "registration"])
+def test_admission_observes_metadata_once_under_lock(native_root, monkeypatch, admission):
+    from mordred_hermes.dbcrypt import _authority
+
+    authority = _authority.Authority.acquire(native_root[0])
+    observations = []
+    lock = threading.RLock()
+
+    class ObservedLock:
+        depth = 0
+
+        def __enter__(self):
+            lock.acquire()
+            self.depth += 1
+
+        def __exit__(self, *args):
+            self.depth -= 1
+            lock.release()
+
+    observed_lock = ObservedLock()
+    authority._lock = observed_lock
+    observe = _authority.observe_database_source
+
+    def counted_observation(*, root):
+        observations.append(observed_lock.depth)
+        return observe(root=root)
+
+    monkeypatch.setattr(_authority, "observe_database_source", counted_observation)
+    try:
+        if admission == "registration":
+            held = HeldConnection(authority)
+            authority.register_connection(held)
+            assert authority._connections == [held]
+        else:
+            with authority.operation():
+                assert authority._operations == 1
+                assert observed_lock.depth == 0  # No authority lock during caller I/O.
+            assert authority._operations == 0
+        assert observations == [2]  # Admission lock plus check()'s reentrant lock.
+    finally:
+        authority.close()
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_unchecked_operation_is_cleanup_admission_without_metadata(native_root, monkeypatch, terminal):
+    from mordred_hermes.dbcrypt import _authority
+
+    root = native_root[0]
+    authority = _authority.Authority.acquire(root)
+    (root / "mordred/db-encryption.marker").unlink()
+    if terminal:
+        authority.close()
+
+    def forbidden_observation(*, root):
+        raise AssertionError("cleanup must not validate metadata")
+
+    monkeypatch.setattr(_authority, "observe_database_source", forbidden_observation)
+    try:
+        with authority.operation(check=False):
+            assert authority._operations == 1
+        assert authority._operations == 0
+        assert authority.terminal is terminal
+        with pytest.raises(DatabaseRefused), authority.operation():
+            pytest.fail("checked admission must still refuse")
+        assert authority.terminal
+    finally:
+        authority.close()
+
+
+@pytest.mark.filterwarnings("ignore:This process.*multi-threaded:DeprecationWarning")
+@pytest.mark.parametrize("admission", ["operation", "cleanup", "registration"])
+def test_admission_refuses_fork_before_held_inherited_lock(native_root, admission):
+    import signal
+
+    from mordred_hermes.dbcrypt._authority import Authority
+
+    if not hasattr(os, "fork"):
+        pytest.skip("POSIX fork lifetime")
+    root = native_root[0]
+    authority = Authority.acquire(root)
+    held = HeldConnection(authority)
+    authority.register_connection(held)
+    ready, release = threading.Event(), threading.Event()
+
+    def holder():
+        with authority._lock:
+            ready.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert ready.wait(3)
+    pid = os.fork()
+    if pid == 0:
+        signal.alarm(3)
+        try:
+            if admission == "registration":
+                authority.register_connection(held)
+            else:
+                with authority.operation(check=admission != "cleanup"):
+                    os._exit(2)
+        except DatabaseRefused:
+            os._exit(0 if authority.terminal and held.invalidated else 3)
+        except BaseException:
+            os._exit(4)
+        os._exit(2)
+    release.set()
+    thread.join(5)
+    try:
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        authority.check()
+        assert not held.invalidated
+        with pytest.raises(DatabaseBusy), acquire_exclusive(root):
+            pass
+    finally:
+        authority.close()
 
 
 def test_child_profile_uses_root_key_not_memory_key(native_root, monkeypatch):
@@ -553,7 +673,7 @@ def test_fork_refuses_before_entering_inherited_thread_lock(native_root, operati
         provider.close()
 
 
-@pytest.mark.parametrize("kind", ["journal", "encrypt-pending", "decrypt-pending"])
+@pytest.mark.parametrize("kind", ["journal", "decrypt-pending"])
 def test_default_startup_without_marker_preserves_recovery_state(tmp_path, monkeypatch, kind):
     from mordred_hermes import dbcrypt
     from mordred_hermes.dbcrypt import _migrate, _shim
@@ -566,7 +686,6 @@ def test_default_startup_without_marker_preserves_recovery_state(tmp_path, monke
     prepared.write_bytes(b"prepared database bytes")
     state = {
         "journal": _migrate.journal_path(root),
-        "encrypt-pending": _migrate.pending_path(root),
         "decrypt-pending": _migrate.decrypt_pending_path(root),
     }[kind]
     state.write_text(
@@ -593,6 +712,42 @@ def test_default_startup_without_marker_preserves_recovery_state(tmp_path, monke
     finally:
         if dbcrypt._runtime._PROVIDER is not None:
             dbcrypt._runtime._PROVIDER.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes; Windows native proof is explicit")
+def test_default_startup_without_marker_retains_a_scheduled_conversion_it_cannot_run(tmp_path, monkeypatch):
+    """Encrypt-pending now reaches the startup seam, whose refusal keeps the files untouched."""
+    from mordred_hermes import dbcrypt
+    from mordred_hermes.dbcrypt import _locking, _migrate, _shim, _startup
+
+    root = tmp_path
+    (root / "mordred").mkdir(mode=0o700)
+    original, prepared = root / "state.db", root / "state.db.prepared"
+    original.write_bytes(b"original database bytes")
+    prepared.write_bytes(b"prepared database bytes")
+    pending = _migrate.pending_path(root)
+    pending.write_bytes(b"1\n")
+    pending.chmod(0o600)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    monkeypatch.setattr(dbcrypt._runtime, "sys", policy_sys("darwin"))
+    monkeypatch.setattr(sys, "argv", ["hermes"])
+    monkeypatch.setattr(_shim, "is_installed", lambda: False)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
+    monkeypatch.setattr(
+        _migrate, "resume_at_startup", lambda *a, **k: pytest.fail("native startup entered legacy recovery")
+    )
+    try:
+        assert dbcrypt.install(home=root) is False
+        after = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+        assert {path: after.get(path) for path in before} == before
+        assert _startup.read_outcome(root) == "refused"  # The unknown sibling leaves the inventory incomplete.
+        assert not dbcrypt.marker_path(root).exists()
+        assert not _migrate.journal_path(root).exists()
+    finally:
+        entry = _locking._LEASES.pop(root.absolute(), None)
+        if entry is not None:
+            entry[0].__exit__(None, None, None)
 
 
 def test_explicit_native_provider_cannot_enter_legacy_install(native_root, monkeypatch):

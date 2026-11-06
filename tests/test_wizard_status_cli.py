@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import warnings
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,63 @@ class TestNetworkSection:
         )
         report = _collect(tmp_path)
         assert report.network_configured_path == "tor"
+
+    def test_missing_config_is_the_clearnet_default(self, tmp_path: Path) -> None:
+        assert _collect(tmp_path).network_configured_path == "clearnet"
+
+    def test_parser_warnings_do_not_expose_config(self, tmp_path: Path) -> None:
+        (tmp_path / "config.yaml").write_text(
+            "%YAML 1.1\n---\nvalue: 1234567e+04\nplugins:\n  mordred_network:\n    default_path: tor\n",
+            encoding="utf-8",
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            configured = status_cli._network_state(tmp_path)[0]
+            status_cli._policy_mode(tmp_path)
+        assert configured == "tor"
+        assert not [str(warning.message) for warning in caught]
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            "plugins: [\n  TOP-SECRET-SENTINEL: {",
+            "plugins:\n  mordred_network:\n    default_path: TOP-SECRET-SENTINEL\n",
+            "plugins:\n  mordred_network: TOP-SECRET-SENTINEL\n",
+            "- TOP-SECRET-SENTINEL\n",
+        ],
+        ids=["malformed-yaml", "invalid-path", "non-mapping-section", "non-mapping-root"],
+    )
+    def test_damaged_config_is_unavailable_not_the_clearnet_default(
+        self, tmp_path: Path, config: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        (tmp_path / "config.yaml").write_text(config, encoding="utf-8")
+        report = _collect(tmp_path)
+        assert report.network_configured_path == "unavailable"
+        rendered = status_cli.render_text(report)
+        assert "network     : unavailable (configuration could not be safely read)" in rendered
+        assert json.loads(status_cli.render_json(report))["network"]["configured_path"] == "unavailable"
+        assert "TOP-SECRET-SENTINEL" not in rendered + caplog.text
+        assert "could not read network configuration" in caplog.text
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            b"a: !!bool TOP-SECRET-SENTINEL\n",
+            b"a: !!float TOP-SECRET-SENTINEL\n",
+            b"a: \xff\xfe\n",
+            b"[" * 3000 + b"]" * 3000,
+            b"a: TOP-SECRET-SENTINEL\na: 2\n",
+        ],
+        ids=["bool-keyerror", "float-valueerror", "undecodable", "too-deep", "duplicate-key"],
+    )
+    def test_any_parser_failure_is_reported_without_raising_or_exposing_config(
+        self, tmp_path: Path, data: bytes, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        (tmp_path / "config.yaml").write_bytes(data)
+        report = _collect(tmp_path)
+        assert report.network_configured_path == "unavailable"
+        assert report.policy_mode == "strict"
+        assert "SENTINEL" not in caplog.text.upper()
 
 
 class TestKeyvaultSection:

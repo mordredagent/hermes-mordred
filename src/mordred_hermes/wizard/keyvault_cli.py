@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib
-import shutil
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -39,10 +38,10 @@ from typing import TYPE_CHECKING, Any
 from .._core._database_lifecycle import ExclusiveLease
 from .._core._home import hermes_home as _hermes_home
 from ..keyvault import _native_key_id, _storage
-from ..keyvault._reset_journal import _encode_reset_journal, _load_reset_journal
 from ..keyvault._uninstall_authority import UninstallAuthorization
 from . import _term
-from ._defaults import resolve_backend, resolve_prompt_io
+from ._defaults import resolve_backend as resolve_backend
+from ._defaults import resolve_prompt_io
 from ._keyvault_init import (
     TerminalSeedSurface,
     _provision_audit_log_key,
@@ -528,9 +527,12 @@ def _confirm_reset(
         "\n"
         "WARNING: keyvault reset DESTROYS the listed profile-owned key material — "
         "this cannot be undone.\n"
-        "  The only way back is `keyvault recover` with your 24-word Seed Phrase,\n"
+        "  Mail and Telegram credentials, keys and ALL local history (including previous accounts) are deleted.\n"
+        "  Shared database encryption and other profile data are retained. No remote messages are deleted.\n"
+        "  Recovering keyvault keys requires `keyvault recover` with your 24-word Seed Phrase,\n"
         "  Passphrase and backup blob. Without them, any wallet or secret derived\n"
         "  from this keyvault is lost permanently.\n"
+        "  Keyvault recovery does not restore Mail/Telegram credentials or local history; set them up again.\n"
         f"  Keys to destroy: {displayed_key_ids}\n"
         f"{retained_note}",
         file=sys.stderr,
@@ -545,6 +547,7 @@ def _delete_wrapping_keys(
     root: Path,
     backend: NativeBackend | None,
     database_lease: ExclusiveLease,
+    _prepared: bool = False,
 ) -> list[str]:
     """Delete native wrapping keys and return the ids that could not be removed.
 
@@ -556,15 +559,17 @@ def _delete_wrapping_keys(
 
     if not key_ids:
         return []
-    try:
-        backend = resolve_backend(backend)
-    except Exception as exc:
-        _term.emit_error(
-            f"could not initialize the native wrapping-key backend ({exc}); "
-            "the on-disk keyvault was retained so cleanup can be retried."
-        )
-        return list(key_ids)
-    backend = _native_key_id.bind_backend_to_root(backend, root)
+    if not _prepared:
+        try:
+            backend = _native_key_id.bind_backend_to_root(resolve_backend(backend), root)
+        except Exception as exc:
+            _term.emit_error(
+                f"could not initialize the native wrapping-key backend ({exc}); "
+                "the on-disk keyvault was retained so cleanup can be retried."
+            )
+            return list(key_ids)
+    if backend is None:
+        raise ValueError("prepared reset deletion requires its checked backend")
 
     from ..keyvault._native_deletion import _owned_delete_scope
 
@@ -584,25 +589,6 @@ def _delete_wrapping_keys(
     return failures
 
 
-def _assert_reset_database_safe(
-    home: Path, lease: ExclusiveLease, uninstall: UninstallAuthorization | None = None
-) -> None:
-    """Helper reset cannot retire an enrolled root source owned elsewhere."""
-    from .._core._database_contracts import DatabaseRefused
-    from ..keyvault._database_authority import resolve_database_domain
-    from ..keyvault._database_mutation import assert_database_helper_removal_safe
-
-    assert_database_helper_removal_safe(home, lease, uninstall=uninstall)
-    domain = resolve_database_domain(home)
-    try:
-        (domain.root / "mordred" / "db-key-source.json").lstat()
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise DatabaseRefused("database source binding cannot be checked") from exc
-    raise DatabaseRefused("database source binding must first be retired by its checked source owner")
-
-
 def reset_keyvault(
     *,
     home: Path | None = None,
@@ -610,25 +596,25 @@ def reset_keyvault(
     prompt_io: PromptIO | None = None,
     assume_yes: bool = False,
 ) -> int:
-    """Hold database exclusion before any custody through final tree removal."""
-    from .._core._database_contracts import DatabaseRefused
-    from ..keyvault._database_mutation import database_key_mutation
-
+    """Reset local profile data while retaining independent native custody."""
     unported = unported_refusal("secret_store", "keyvault reset")
     if unported is not None:
         return unported
+    from .._core._database_contracts import DatabaseRefused
+    from .._core._database_lifecycle import acquire_exclusive
+    from ..keyvault._database_authority import resolve_database_domain
+
     resolved_home = _resolve_root(home).parent.parent
     try:
-        with database_key_mutation(root=resolved_home, generation=None) as lease:
-            return _reset_with_memory_guard(
-                home=resolved_home,
-                backend=backend,
-                prompt_io=prompt_io,
-                assume_yes=assume_yes,
-                database_lease=lease,
+        domain = resolve_database_domain(resolved_home)
+        with acquire_exclusive(domain.root) as lease:
+            if resolve_database_domain(resolved_home) != domain:
+                raise DatabaseRefused("reset profile mapping changed")
+            return _reset_keyvault(
+                home=resolved_home, backend=backend, prompt_io=prompt_io, assume_yes=assume_yes, database_lease=lease
             )
-    except DatabaseRefused as exc:
-        _term.emit_error(f"cannot reset keyvault while database state depends on its custody: {exc}")
+    except (DatabaseRefused, OSError) as exc:
+        _term.emit_error(f"cannot reset keyvault: {exc}")
         return 1
 
 
@@ -641,43 +627,9 @@ def _reset_with_memory_guard(
     database_lease: ExclusiveLease,
     uninstall: UninstallAuthorization | None = None,
 ) -> int:
-    """Reset keyvault only after independent TPM memory custody is removed.
-
-    On Windows the secret store is not ported: refuse first, before the Linux
-    memory-key lock, the keyvault lifecycle lock or any ``_storage`` read.
-    """
-    unported = unported_refusal("secret_store", "keyvault reset")
-    if unported is not None:
-        return unported
-    from ..keyvault._memory_key import MemoryKeyError, memory_key_lock, memory_key_path
-
-    root = _resolve_root(home)
-    resolved_home = root.parent.parent
-    wrapped = memory_key_path(resolved_home)
-    if (sys.platform == "linux" and root.exists()) or wrapped.exists() or wrapped.is_symlink():
-        try:
-            # Same lock as provision/purge: no new memory key can appear between
-            # this guard and recursive removal of its native keyvault/tpm store.
-            with memory_key_lock(resolved_home):
-                if wrapped.exists() or wrapped.is_symlink() or (root.parent / "memory-vault.marker").exists():
-                    _term.emit_error(
-                        "TPM memory depends on this keyvault directory. Run `hermes-mordred encryption purge memory` "
-                        "to restore plaintext and remove its key before keyvault reset. Nothing was deleted."
-                    )
-                    return 1
-                return _reset_keyvault(
-                    home=resolved_home,
-                    backend=backend,
-                    prompt_io=prompt_io,
-                    assume_yes=assume_yes,
-                    database_lease=database_lease,
-                    uninstall=uninstall,
-                )
-        except MemoryKeyError:
-            _term.emit_error("cannot lock TPM memory before keyvault reset; nothing was deleted")
-            return 1
+    """Compatibility entry for the uninstall controller's preceding EX lease."""
     return _reset_keyvault(
-        home=resolved_home,
+        home=home,
         backend=backend,
         prompt_io=prompt_io,
         assume_yes=assume_yes,
@@ -686,7 +638,7 @@ def _reset_with_memory_guard(
     )
 
 
-def _reset_keyvault(  # noqa: C901, PLR0912, PLR0915 - destructive state machine is intentionally explicit
+def _reset_keyvault(
     *,
     home: Path | None = None,
     backend: NativeBackend | None = None,
@@ -695,219 +647,16 @@ def _reset_keyvault(  # noqa: C901, PLR0912, PLR0915 - destructive state machine
     database_lease: ExclusiveLease,
     uninstall: UninstallAuthorization | None = None,
 ) -> int:
-    """Destroy the keyvault: delete every provably profile-owned native
-    wrapping key and remove the on-disk keyvault directory. Irreversible.
+    unported = unported_refusal("secret_store", "keyvault reset")
+    if unported is not None:
+        return unported
+    from ._keyvault_reset import coordinate_reset
 
-    Ambiguous and legacy ownership retains the entire keyvault for explicit
-    recovery. Only checked scoped ownership permits native destruction.
-
-    Returns 0 once the keyvault is gone (or was already absent), 1 if the operator
-    declines the confirmation. ``assume_yes`` skips the interactive prompt for
-    scripted use; tests inject ``prompt_io`` / ``backend``.
-    """
-    root = _resolve_root(home)
-    journal_path = _storage.reset_journal_path(root)
-    try:
-        root.lstat()
-    except FileNotFoundError:
-        root_seen = False
-    except OSError as exc:
-        _term.emit_error(f"cannot inspect keyvault root before reset: {exc}")
-        return 1
-    else:
-        # ``lstat`` is intentional: a dangling root symlink is an unsafe
-        # existing object, not an absent keyvault.
-        root_seen = True
-    try:
-        journal_path.lstat()
-    except FileNotFoundError:
-        journal_seen = False
-    except OSError as exc:
-        _term.emit_error(f"cannot inspect keyvault reset journal: {exc}")
-        return 1
-    else:
-        journal_seen = True
-    if not root_seen and not journal_seen:
-        # Do not create ~/.hermes/mordred merely to report a no-op.
-        print("No keyvault found — nothing to reset.")
-        return 0
-
-    try:
-        with _storage.keyvault_lifecycle_lock(root):
-            try:
-                journal = _load_reset_journal(root)
-            except FileNotFoundError:
-                journal = None
-            except (OSError, _storage.KeyvaultCorruptError) as exc:
-                _term.emit_error(f"cannot inspect pending keyvault reset journal: {exc}")
-                return 1
-
-            if journal is not None:
-                # Resume from the durable exact target set even when a prior
-                # rmtree removed meta.json or the whole root. The journal is
-                # recovery state, not proof of operator consent: every
-                # interactive invocation confirms again before native deletion.
-                try:
-                    root_meta = root.lstat()
-                except FileNotFoundError:
-                    root_meta = None
-                if root_meta is not None:
-                    try:
-                        _storage._check_dir_mode(root)
-                    except OSError as exc:
-                        _term.emit_error(f"refusing to resume reset against unsafe keyvault root {root}: {exc}")
-                        return 1
-                    if (root_meta.st_dev, root_meta.st_ino) != journal.root_identity:
-                        _term.emit_error(
-                            "cannot resume keyvault reset: the keyvault root was replaced "
-                            "after the reset journal was committed"
-                        )
-                        return 1
-                if not assume_yes:
-                    prompt_io = resolve_prompt_io(prompt_io)
-                    if not _confirm_reset(prompt_io, list(journal.key_ids), journal.retained_legacy):
-                        print("Reset aborted — nothing was deleted.")
-                        return 1
-            else:
-                try:
-                    _storage._check_dir_mode(root)
-                except FileNotFoundError:
-                    # A concurrent reset completed between the unlocked
-                    # preflight and this lifecycle acquisition.
-                    print("No keyvault found — nothing to reset.")
-                    return 0
-                except OSError as exc:
-                    _term.emit_error(f"refusing to reset unsafe keyvault root {root}: {exc}")
-                    return 1
-
-                try:
-                    key_ids, retained_legacy, metadata_incomplete = _collect_reset_key_ids(root)
-                except (OSError, _storage.KeyvaultCorruptError) as exc:
-                    _term.emit_error(f"cannot inspect keyvault metadata before reset: {exc}")
-                    return 1
-
-                # Keep the stable lifecycle lock across confirmation. This
-                # makes the displayed key list authoritative: no concurrent
-                # generation can add a key after the operator approves
-                # destruction.
-                if not assume_yes:
-                    prompt_io = resolve_prompt_io(prompt_io)
-                    if not _confirm_reset(prompt_io, list(key_ids), retained_legacy):
-                        print("Reset aborted — nothing was deleted.")
-                        return 1
-
-                _assert_reset_database_safe(home or root.parent.parent, database_lease, uninstall)
-                journal, encoded_journal = _encode_reset_journal(
-                    root,
-                    key_ids,
-                    retained_legacy,
-                    metadata_incomplete,
-                )
-                try:
-                    _storage.write_reset_journal(root, encoded_journal)
-                except Exception as exc:
-                    _term.emit_error(f"could not durably journal keyvault reset ({exc}); no native keys were deleted.")
-                    return 1
-
-            _assert_reset_database_safe(home or root.parent.parent, database_lease, uninstall)
-            # Rotate the independent generation lease after the stable journal
-            # is durable and before native deletion. This invalidates cached
-            # writers even if a later re-init happens to reuse root dev/inode.
-            try:
-                _storage.ensure_generation_epoch(root, force_new=True)
-            except Exception as exc:
-                _term.emit_error(
-                    f"could not rotate the keyvault generation lease ({exc}); "
-                    "the reset journal was retained and no native keys were deleted."
-                )
-                return 1
-
-            failures = _delete_wrapping_keys(journal.key_ids, root=root, backend=backend, database_lease=database_lease)
-            if failures:
-                _term.emit_error(
-                    "Keyvault reset is incomplete; the on-disk key list and reset "
-                    "journal were retained. Retry after resolving native backend access."
-                )
-                return 1
-
-            _assert_reset_database_safe(home or root.parent.parent, database_lease, uninstall)
-            try:
-                current_root = root.lstat()
-            except FileNotFoundError:
-                current_root = None
-            if current_root is not None:
-                if (current_root.st_dev, current_root.st_ino) != journal.root_identity:
-                    _term.emit_error(
-                        "Native wrapping keys were deleted, but the keyvault root "
-                        "was replaced before directory removal; reset journal retained."
-                    )
-                    return 1
-                try:
-                    shutil.rmtree(root)
-                except OSError as exc:
-                    # The stable parent journal survives even if rmtree removed
-                    # in-root metadata before failing, keeping cached writers
-                    # fail-closed and preserving exact retry targets.
-                    _term.emit_error(
-                        f"Native wrapping keys deleted, but the keyvault directory could "
-                        f"not be removed ({exc}); retry reset to finish cleanup."
-                    )
-                    return 1
-            try:
-                root.lstat()
-            except FileNotFoundError:
-                pass
-            else:
-                _term.emit_error(
-                    "Native wrapping keys were deleted, but the keyvault directory "
-                    "still exists; reset journal retained."
-                )
-                return 1
-
-            try:
-                # Commit the root-directory removal before clearing the
-                # recovery journal. A crash between these two flushes can only
-                # leave an absent root with a retained journal, never resurrect
-                # an old root whose native keys have already been destroyed.
-                _storage.fsync_keyvault_parent(root)
-            except OSError as exc:
-                _term.emit_error(
-                    f"Native wrapping keys and keyvault files were removed, but "
-                    f"directory removal could not be made durable ({exc}); retry reset."
-                )
-                return 1
-
-            try:
-                _storage.clear_reset_journal(root)
-            except _storage.KeyvaultResetJournalRestoreError as exc:
-                _term.emit_error(
-                    "CRITICAL: keyvault reset removed all profile-owned material, but "
-                    f"its fail-closed reset journal could not be restored after a storage "
-                    f"flush failure ({exc}). Do not recreate or use this profile until "
-                    "the filesystem is healthy and reset has been retried."
-                )
-                return 1
-            except OSError as exc:
-                _term.emit_error(
-                    f"Keyvault files and native keys were removed, but the completed "
-                    f"reset journal could not be durably cleared ({exc}); retry reset."
-                )
-                return 1
-    except OSError as exc:
-        _term.emit_error(f"cannot lock keyvault lifecycle for reset: {exc}")
-        return 1
-
-    if journal.retained_legacy or journal.metadata_incomplete:
-        print("Keyvault files reset — all provably profile-owned key material was destroyed.")
-        if journal.retained_legacy:
-            displayed_retained = ", ".join(_term.terminal_safe(key_id) for key_id in journal.retained_legacy)
-            print(
-                "Legacy global native key(s) were retained because exclusive profile ownership "
-                f"cannot be proven: {displayed_retained}."
-            )
-        if journal.metadata_incomplete:
-            print("Metadata was incomplete; unknown legacy/custom native keys may require manual cleanup.")
-    else:
-        print("Keyvault reset — all profile-owned key material destroyed.")
-    print("Run `hermes-mordred keyvault init` to create a new key.")
-    return 0
+    return coordinate_reset(
+        home=_resolve_root(home).parent.parent,
+        backend=backend,
+        prompt_io=prompt_io,
+        assume_yes=assume_yes,
+        database_lease=database_lease,
+        uninstall=uninstall,
+    )

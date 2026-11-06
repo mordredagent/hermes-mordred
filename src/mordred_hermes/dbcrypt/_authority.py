@@ -91,13 +91,17 @@ class Authority:
                 raise DatabaseRefused("database runtime authority is terminal")
             return self._key
 
-    def check(self) -> None:
-        """Metadata-only checks never reauthenticate hardware or change generation."""
+    def _check_pid(self) -> None:
+        """Refuse inherited authority before touching any inherited lock."""
         # Never wait on an RLock inherited from a vanished parent thread.
         if self._pid != os.getpid():
             self._lock = threading.RLock()
             self.invalidate("forked runtime")
             raise DatabaseRefused("database runtime authority cannot survive fork")
+
+    def check(self) -> None:
+        """Metadata-only checks never reauthenticate hardware or change generation."""
+        self._check_pid()
         with self._lock:
             if self._terminal:
                 raise DatabaseRefused("database runtime authority is terminal")
@@ -115,7 +119,7 @@ class Authority:
                 raise DatabaseRefused("database runtime authority is no longer valid") from None
 
     def register_connection(self, connection: GuardedConnection) -> None:
-        self.check()
+        self._check_pid()
         with self._lock:
             self.check()
             if not any(existing is connection for existing in self._connections):
@@ -129,8 +133,8 @@ class Authority:
         caller's workflow run outside it, so connections progress independently
         and revocation never waits behind them. Fork is checked before the lock.
         """
-        if self._pid != os.getpid() or check:
-            self.check()
+        # Cleanup admission skips metadata/terminal checks, but never fork refusal.
+        self._check_pid()
         with self._lock:
             if check:
                 self.check()
