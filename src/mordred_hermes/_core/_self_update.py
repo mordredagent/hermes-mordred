@@ -408,12 +408,29 @@ def auto_check_enabled(home: Path | None = None) -> bool:
     """Hermes's ``plugins.auto_update_check_hours: 0`` also opts out of our check.
 
     Read the way Hermes does (``float(value)``): a quoted ``"0"`` disables too.
-    """
-    from ._yaml_io import load_yaml_mapping
 
-    config = load_yaml_mapping((home or hermes_home()) / "config.yaml")
-    plugins = config.get("plugins")
-    if not isinstance(plugins, dict) or "auto_update_check_hours" not in plugins:
+    Only a missing ``config.yaml`` means "no setting" (enabled, as in Hermes).
+    A file that exists but cannot be read or parsed, whose top level is not a
+    mapping (an empty document included), or whose ``plugins`` is not a
+    mapping fails closed: the opt-out cannot be ruled out, so no PyPI request.
+    """
+    from ruamel.yaml.error import YAMLError
+
+    path = (home or hermes_home()) / "config.yaml"
+    if not path.exists():
+        return True
+    try:
+        config = _read_config_mapping(path)
+    except (OSError, ValueError, YAMLError):
+        return False
+    if "plugins" not in config:
+        return True
+    plugins = config["plugins"]
+    if plugins is None:
+        return True
+    if not isinstance(plugins, dict):
+        return False
+    if "auto_update_check_hours" not in plugins:
         return True
     hours = plugins.get("auto_update_check_hours")
     if isinstance(hours, bool):
@@ -424,6 +441,27 @@ def auto_check_enabled(home: Path | None = None) -> bool:
         return float(str(hours).strip()) > 0
     except ValueError:
         return True
+
+
+def _read_config_mapping(path: Path) -> dict[str, Any]:
+    """Strictly read ``config.yaml``: every read/parse failure raises.
+
+    Windows canonical config goes through the checked snapshot, which already
+    raises ``ValueError`` for a non-mapping top level. Elsewhere the tolerant
+    :func:`load_yaml_mapping` would collapse a non-mapping to ``{}``, so parse
+    with the same safe loader directly.
+    """
+    from . import _yaml_io
+
+    if _yaml_io._platform == "nt":
+        return _yaml_io.load_yaml_mapping(path, catch=())
+    from ruamel.yaml import YAML
+
+    with path.open(encoding="utf-8") as f:
+        data = _yaml_io._parse_yaml(YAML(typ="safe", pure=True), f)
+    if not isinstance(data, dict):
+        raise ValueError("config YAML must contain a mapping")
+    return data
 
 
 def _cache_path(home: Path) -> Path:

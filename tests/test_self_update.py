@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -363,7 +364,8 @@ class TestAutoCheckEnabled:
             ("plugins:\n  auto_update_check_hours: 24\n", True),
             ("plugins:\n  auto_update_check_hours: 0\n", False),
             ("plugins:\n  auto_update_check_hours: false\n", False),
-            ("plugins: []\n", True),
+            ("plugins:\n", True),
+            ("other: 1\n", True),
             ('plugins:\n  auto_update_check_hours: "0"\n', False),
             ('plugins:\n  auto_update_check_hours: "12"\n', True),
             ("plugins:\n  auto_update_check_hours: nonsense\n", True),
@@ -373,6 +375,57 @@ class TestAutoCheckEnabled:
         if yaml:
             (tmp_path / "config.yaml").write_text(yaml, encoding="utf-8")
         assert core.auto_check_enabled(tmp_path) is expected
+
+    def test_missing_config_is_enabled(self, tmp_path: Path) -> None:
+        assert not (tmp_path / "config.yaml").exists()
+        assert core.auto_check_enabled(tmp_path) is True
+
+    @pytest.mark.parametrize(
+        "yaml",
+        [
+            "plugins: [unclosed\n",  # malformed
+            "- plugins\n- auto_update_check_hours\n",  # top level is a list
+            "just a string\n",  # top level is a scalar
+            "",  # empty document
+            "plugins: []\n",  # plugins is not a mapping
+            "plugins: off\n",
+            "plugins: !!python/object:os.system {}\n",  # safe loader refuses the tag
+        ],
+    )
+    def test_unparseable_config_fails_closed(self, tmp_path: Path, yaml: str) -> None:
+        (tmp_path / "config.yaml").write_text(yaml, encoding="utf-8")
+        assert core.auto_check_enabled(tmp_path) is False
+
+    def test_undecodable_config_fails_closed(self, tmp_path: Path) -> None:
+        (tmp_path / "config.yaml").write_bytes(b"plugins:\n  auto_update_check_hours: \xff\xfe\n")
+        assert core.auto_check_enabled(tmp_path) is False
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_unreadable_config_fails_closed(self, tmp_path: Path) -> None:
+        if os.geteuid() == 0:
+            pytest.skip("root ignores permission bits")
+        path = tmp_path / "config.yaml"
+        path.write_text("plugins:\n  auto_update_check_hours: 24\n", encoding="utf-8")
+        path.chmod(0o000)
+        try:
+            assert core.auto_check_enabled(tmp_path) is False
+        finally:
+            path.chmod(0o600)
+
+    @pytest.mark.parametrize("error", [OSError("locked"), ValueError("not a mapping")])
+    def test_checked_snapshot_failure_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+    ) -> None:
+        from mordred_hermes._core import _config_io, _yaml_io
+
+        (tmp_path / "config.yaml").write_text("plugins:\n  auto_update_check_hours: 24\n", encoding="utf-8")
+        monkeypatch.setattr(_yaml_io, "_platform", "nt")
+
+        def _raise(_paths: object) -> object:
+            raise error
+
+        monkeypatch.setattr(_config_io, "read_canonical_snapshot", _raise)
+        assert core.auto_check_enabled(tmp_path) is False
 
 
 class TestCache:
@@ -455,6 +508,17 @@ class TestCachedCheck:
             raise AssertionError("must not contact PyPI")
 
         assert core.cached_check(tmp_path, fetch=fetch) is None
+
+    def test_unparseable_config_asks_nothing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A half-written opt-out must not be mistaken for "no opt-out".
+        (tmp_path / "config.yaml").write_text("plugins:\n  auto_update_check_hours: [0\n", encoding="utf-8")
+        monkeypatch.setattr(core, "installed", lambda home=None: _installed())
+
+        def fetch(url: str) -> bytes:
+            raise AssertionError("must not contact PyPI")
+
+        assert core.cached_check(tmp_path, fetch=fetch) is None
+        assert not (tmp_path / "mordred" / core.CACHE_FILE_NAME).exists()
 
     def test_failure_is_cached(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(core, "installed", lambda home=None: _installed())
