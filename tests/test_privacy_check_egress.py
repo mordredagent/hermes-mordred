@@ -266,6 +266,22 @@ def test_load_policy_picks_up_valid_rewrite_after_damage(tmp_path):
         ("localhost\\evil.example", False),
         ("http://0.0.0.0:3000/", True),
         ("http://localhost:99999/", False),
+        # Only http(s) to loopback; file URLs that are UNC paths; control characters.
+        ("ftp://localhost/x", False),
+        ("gopher://127.0.0.1/x", False),
+        ("custom://localhost/x", False),
+        ("http://LOCALHOST/x", True),
+        ("HTTPS://localhost/x", True),
+        ("file:////evil.example/share/x", False),
+        ("file://localhost//evil.example/share", False),
+        ("file:///%2F%2Fevil.example/share", False),
+        ("http://localhost/%00", False),
+        ("http://localhost/%7F", False),
+        ("http://localhost/%1f", False),
+        ("http://localhost/\x00", False),
+        ("http://localhost/\t", False),
+        ("localhost:3000/\x7f", False),
+        ("http://localhost/%20ok", True),
     ],
 )
 def test_is_local_target_matches_loopback_hosts_exactly(target, local):

@@ -101,7 +101,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final, Literal
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from ._audit_reasons import EgressRule
 
@@ -497,6 +497,10 @@ def is_first_party_command(command: Any) -> bool:
 _LOCAL_HOST_TARGET = re.compile(r"(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?(?:/|\Z)", re.IGNORECASE)
 
 
+# An ASCII control character, raw or percent-encoded.
+_CONTROL_CHAR = re.compile(r"[\x00-\x1f\x7f]|%(?:[01][0-9a-f]|7f)", re.IGNORECASE)
+
+
 def _is_local_target(url: str) -> bool:
     """A file path or a loopback address (e.g. a local dev server).
 
@@ -504,11 +508,15 @@ def _is_local_target(url: str) -> bool:
     count as local. A backslash is rejected anywhere: browsers treat it as
     ``/`` in http(s) URLs, so ``http://evil.example\\@localhost/`` loads
     ``evil.example`` although ``urlsplit`` reports host ``localhost``. Userinfo
-    (``user@host``) is rejected for the same reason, a ``//host`` network-path
-    reference is a remote host, and a ``file`` URL is local only without a host
-    or with ``localhost`` (Windows opens ``file://host/share`` as a UNC path).
+    (``user@host``) is rejected for the same reason, and so is any control
+    character, raw or percent-encoded (parsers strip or split on them
+    differently). A ``//host`` network-path reference is a remote host. A
+    ``file`` URL is local only without a host or with ``localhost`` and with a
+    path that does not decode to ``//...`` (Windows opens ``file://host/share``
+    and ``file:////host/share`` as UNC paths). Other URLs are local only for
+    ``http``/``https`` to a loopback host; any other scheme is not.
     """
-    if "\\" in url:
+    if "\\" in url or _CONTROL_CHAR.search(url):
         return False
     if "://" not in url:
         if url.startswith("//"):
@@ -524,8 +532,11 @@ def _is_local_target(url: str) -> bool:
         return False
     if "@" in parts.netloc:
         return False
-    if parts.scheme == "file":
-        return parts.netloc.casefold() in {"", "localhost"}
+    scheme = parts.scheme.casefold()
+    if scheme == "file":
+        return parts.netloc.casefold() in {"", "localhost"} and not unquote(parts.path).startswith("//")
+    if scheme not in {"http", "https"}:
+        return False
     host = (parts.hostname or "").casefold()
     return host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}  # noqa: S104 - a target, not a bind
 
