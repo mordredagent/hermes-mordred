@@ -421,8 +421,9 @@ def pre_gateway_dispatch(
     """Decrypt inbound ciphertext / drop key-exchange, before the agent."""
     # The concrete platform adapters are directory-based plugins that only exist
     # once the gateway is up, so register() cannot reach them by import path.
-    # Wrap the LIVE adapter classes here (idempotent) — otherwise the reply goes
-    # out through the real, unwrapped send in cleartext.
+    # register() hooks the platform registry, which wraps them at creation; this
+    # live wrap (idempotent) is the backstop for builds whose gateway bypasses
+    # the registry — otherwise the reply goes out through the unwrapped send.
     outbound = None
     profile = _profile_name(event)
     if gateway is not None:
@@ -514,7 +515,8 @@ def register(ctx: Any) -> None:
 
     Wires the full E2E transport with no core fork:
       * inbound decrypt / key-exchange drop  → ``pre_gateway_dispatch`` hook
-      * outbound reply re-encryption         → platform ``send`` wrappers
+      * outbound reply re-encryption         → platform ``send`` wrappers,
+        installed at adapter creation via the platform-registry hook
       * standalone tool/cron text encryption → required common sender guard
     The browser-extension WebSocket server ships as the standalone
     ``hermes-mordred extension serve`` command (``extension.api``); it does not
@@ -539,6 +541,16 @@ def register(ctx: Any) -> None:
         logger.warning("mordred_e2e: Telegram tools not registered: %s", type(e).__name__)
 
     # Outbound: wrap each installed platform adapter's send (best-effort).
+    # The registry hook comes first: plugin discovery precedes adapter creation,
+    # so every Slack/Discord adapter is wrapped before it connects (cron output
+    # can go out before any inbound message reaches pre_gateway_dispatch).
+    try:
+        from . import outbound
+
+        if outbound.install_registry_hook():
+            logger.debug("mordred_e2e: outbound E2E wraps Slack/Discord adapters at creation")
+    except Exception as e:
+        logger.warning("mordred_e2e: platform registry hook install failed: %s", type(e).__name__)
     try:
         from . import outbound
 

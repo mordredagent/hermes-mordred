@@ -59,6 +59,13 @@ outbound-encryption gap and a release validation gate remain actionable:
   module import order (`tests/extension/test_standalone_outbound.py`). Protected
   text uses the existing v3 wire and routed HTTP; failures never delegate to
   the plaintext sender. Hermes 0.13.0 and the locked version are checked.
+- [x] **Priority: plaintext through the live adapter before the first inbound
+  message.** Cron delivery uses the live adapter's `send` first and only falls
+  back to the guarded standalone sender, but the class was wrapped only on the
+  first `pre_gateway_dispatch`. E2E registration now hooks
+  `PlatformRegistry.create_adapter`, so each Slack/Discord adapter is wrapped
+  before it connects; an adapter that cannot be wrapped is withheld (`None`)
+  (`tests/extension/test_extension_outbound.py`).
 - [ ] Before releasing the standalone sender guard, verify browser-extension
   decryption on explicitly authorized Slack and Discord test destinations and
   append the results to `VALIDATION_LOG.md`. Automated round trips are not live

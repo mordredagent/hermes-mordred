@@ -88,6 +88,27 @@ def _memory_key_holder_isolation() -> Iterator[None]:
     os.environ.pop(_memory_key_holder.MEMORY_KEY_ENV, None)
 
 
+@pytest.fixture(autouse=True)
+def _platform_registry_hook_isolation() -> Iterator[None]:
+    """Undo the E2E ``PlatformRegistry.create_adapter`` hook after each test.
+
+    Tests that call the real plugin ``register()`` hook the installed Hermes
+    registry class; without this it stays hooked for the rest of the session.
+    Only an already-imported registry is touched: importing ``gateway`` here
+    would cache it for tests that simulate an unimportable gateway.
+    """
+    yield
+    registry_module = sys.modules.get("gateway.platform_registry")
+    registry_cls = getattr(registry_module, "PlatformRegistry", None)
+    if registry_cls is None:
+        return
+    create = registry_cls.__dict__.get("create_adapter")
+    while getattr(create, "__mordred_wrapped__", False) and getattr(create, "__wrapped__", None) is not None:
+        create = create.__wrapped__
+    if create is not None and create is not registry_cls.__dict__.get("create_adapter"):
+        registry_cls.create_adapter = create
+
+
 def pytest_collection_finish(session: pytest.Session) -> None:
     """Refuse extension execution if the runner loses its local autouse fixtures.
 
