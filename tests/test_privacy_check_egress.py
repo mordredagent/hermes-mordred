@@ -290,6 +290,29 @@ def test_desktop_preview_backslash_userinfo_is_egress():
     assert not asked.allow and asked.approve
 
 
+_BACKSLASH_URL = "http://evil.example\\@localhost/x"
+
+
+def test_backslash_url_hosts_are_parsed_as_a_browser_does():
+    assert egress._host_blocked(_BACKSLASH_URL, ("evil.example",)) == "evil.example"
+    assert egress._host_blocked("https://discord.com\\api\\webhooks/1/x", egress.DEFAULT_BLOCKLIST) == (
+        "discord.com/api/webhooks"
+    )
+    assert egress._prompt_host(_BACKSLASH_URL) == "evil.example"
+    key = egress._url_rule_key("desktop_preview", [_BACKSLASH_URL])
+    assert key == "mordred.egress:desktop_preview:evil.example" and "localhost" not in key
+
+
+def test_backslash_url_is_blocklisted_and_prompt_names_the_real_host():
+    args = {"action": "open", "url": _BACKSLASH_URL}
+    refused = _decide("blocklist", "desktop_preview", args, blocklist=("evil.example",))
+    assert not refused.allow and not refused.approve and refused.reason == "egress.blocklisted_domain"
+    assert "(evil.example)" in refused.message
+    asked = _decide("ask", "desktop_preview", args)
+    assert asked.approve and "(evil.example)" in asked.message and "(localhost)" not in asked.message
+    assert asked.rule_key == "mordred.egress:desktop_preview:evil.example"
+
+
 # -- hook integration ---------------------------------------------------------------------
 
 
@@ -663,3 +686,8 @@ def test_browser_history_tool_taints_through_the_bridge_and_then_locks_the_sessi
     assert egress.decide("memory", {}, "history-hook", untainted).reason == "egress.reader_locked"
     web = egress.decide("web_search", {"query": "x"}, "history-hook", untainted)
     assert web.approve and web.reason == "egress.reader_web"
+
+
+def test_reader_web_prompt_names_the_real_host_of_a_backslash_url():
+    decision = egress._reader_web("desktop_preview", {"action": "open", "url": _BACKSLASH_URL}, egress.EgressPolicy())
+    assert decision.approve and "(evil.example)" in decision.message and "(localhost)" not in decision.message

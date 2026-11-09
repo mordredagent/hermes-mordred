@@ -457,7 +457,18 @@ def _ip_literal(host: str) -> bool:
 _URL_IP_IN_TEXT = re.compile(r"[a-z][a-z0-9+.-]*://(\[[0-9a-f:.]+\]|\d{1,3}(?:\.\d{1,3}){3})", re.IGNORECASE)
 
 
+def _browser_url(url: str) -> str:
+    """``url`` as a browser's URL parser reads it, for :func:`urlsplit`.
+
+    Browsers treat ``\\`` as ``/`` in http(s) URLs, so
+    ``http://evil.example\\@localhost/`` loads ``evil.example`` while
+    ``urlsplit`` alone would report host ``localhost``.
+    """
+    return url.replace("\\", "/")
+
+
 def _host_blocked(url: str, blocklist: tuple[str, ...]) -> str | None:
+    url = _browser_url(url)
     lowered = url.casefold()
     try:
         host = (urlsplit(url if "://" in url else f"https://{url}").hostname or "").casefold()
@@ -656,7 +667,8 @@ _UNPARSEABLE: Final = "an unparseable address"
 def _prompt_host(url: str) -> str:
     """The host an approval prompt names for ``url``; never the raw URL, which may carry credentials."""
     try:
-        host = urlsplit(url if "://" in url else f"https://{url}").hostname
+        browser = _browser_url(url)
+        host = urlsplit(browser if "://" in browser else f"https://{browser}").hostname
     except ValueError:
         host = None
     return host or _UNPARSEABLE
@@ -946,7 +958,8 @@ def _reader_web(tool: str, args: dict[str, Any], policy: EgressPolicy) -> Decisi
     if not hard.allow:
         return hard
     urls = _urls(tool, args)
-    where = ", ".join(sorted({(urlsplit(u if "://" in u else f"https://{u}").hostname or u) for u in urls}))
+    browser = [_browser_url(u) for u in urls]
+    where = ", ".join(sorted({(urlsplit(u if "://" in u else f"https://{u}").hostname or u) for u in browser}))
     digest = hashlib.sha256(json.dumps(args, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
     return Decision(
         allow=False,
