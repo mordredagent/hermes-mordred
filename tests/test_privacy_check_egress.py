@@ -367,8 +367,8 @@ def test_authority_has_backslash_follows_the_browser_scheme_separator(url, ambig
     [
         "http://evil.example\t@localhost/x",
         "ht\ttp://localhost/",
-        "http://localhost/%0a",
-        "http://localhost/%7F",
+        "http://local%0ahost/",
+        "http://ok.example%09/x",
         "http://localhost/\r\n",
         "\x00http://localhost/",
         " http://localhost/",
@@ -381,10 +381,29 @@ def test_control_characters_and_surrounding_whitespace_make_a_url_unparseable(ur
     assert egress._host_blocked(url, ()) == "unparseable URL"
 
 
-def test_percent_encoded_printable_characters_keep_the_host():
-    assert not egress._ambiguous_url("http://ok.example/x%20y")
-    assert egress._prompt_host("http://ok.example/x%20y") == "ok.example"
-    assert egress._host_blocked("http://ok.example/x%20y", ()) is None
+@pytest.mark.parametrize(
+    ("url", "host"),
+    [
+        ("http://ok.example/x%20y", "ok.example"),
+        ("http://ok.example/x?q=a%0Ab", "ok.example"),
+        ("https://x.example/p%7Fq", "x.example"),
+        ("https://x.example/p#%00", "x.example"),
+        ("http://localhost/%0a", "localhost"),
+    ],
+)
+def test_encoded_characters_outside_the_authority_keep_the_host(url, host):
+    # An encoded control character in the path, query or fragment cannot change the host contacted.
+    assert not egress._ambiguous_url(url)
+    assert egress._prompt_host(url) == host
+    assert egress._host_blocked(url, ()) is None
+
+
+def test_encoded_control_in_a_local_path_prompts_under_ask():
+    args = {"action": "open", "url": "http://localhost/%0a"}
+    assert not egress._is_local_target("http://localhost/%0a")
+    asked = _decide("ask", "desktop_preview", args)
+    assert not asked.allow and asked.approve and "(localhost)" in asked.message
+    assert not _decide("lockdown", "desktop_preview", args).allow
 
 
 def test_backslash_in_authority_is_refused_at_every_restricted_level():

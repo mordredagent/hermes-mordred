@@ -462,6 +462,21 @@ _AUTHORITY_END = re.compile(r"[/?#]")
 _SCHEME_PREFIX = re.compile(r"(?P<scheme>[a-z][a-z0-9+.-]*):(?P<sep>[/\\]*)(?P<rest>.*)", re.IGNORECASE | re.DOTALL)
 
 
+def _scheme_and_authority(url: str) -> str:
+    """The part of ``url`` that decides its host: the scheme separator and the authority.
+
+    A browser takes any run of ``/`` or ``\\`` after ``scheme:`` as the
+    authority separator (``http:/\\evil.example/``, ``http:\\evil.example/``),
+    so for a value with a scheme this is the separator and the authority after
+    it (up to ``/``, ``?`` or ``#``); for a value without one, the text up to
+    the first ``/``, ``?`` or ``#``.
+    """
+    match = _SCHEME_PREFIX.match(url)
+    if match is None:
+        return _AUTHORITY_END.split(url, maxsplit=1)[0]
+    return match["sep"] + _AUTHORITY_END.split(match["rest"], maxsplit=1)[0]
+
+
 def _authority_has_backslash(url: str) -> bool:
     """Whether a backslash appears in ``url``'s scheme separator or authority.
 
@@ -469,35 +484,43 @@ def _authority_has_backslash(url: str) -> bool:
     ``evil.example`` from ``http://evil.example\\@localhost/x``, while
     :func:`urlsplit` (and Python HTTP clients) read host ``localhost``. It is
     therefore never named as a host, never keyed as one, and never matched
-    against the domain blocklist as one.
-
-    A browser takes any run of ``/`` or ``\\`` after ``scheme:`` as the
-    authority separator (``http:/\\evil.example/``, ``http:\\evil.example/``),
-    so for a value with a scheme the separator and the authority after it (up
-    to ``/``, ``?`` or ``#``) are checked; for a value without one, the text up
-    to the first ``/``, ``?`` or ``#``.
+    against the domain blocklist as one (:func:`_scheme_and_authority`).
     """
-    match = _SCHEME_PREFIX.match(url)
-    if match is None:
-        return "\\" in _AUTHORITY_END.split(url, maxsplit=1)[0]
-    return "\\" in match["sep"] or "\\" in _AUTHORITY_END.split(match["rest"], maxsplit=1)[0]
+    return "\\" in _scheme_and_authority(url)
 
 
 # An ASCII control character, raw or percent-encoded.
 _CONTROL_CHAR = re.compile(r"[\x00-\x1f\x7f]|%(?:[01][0-9a-f]|7f)", re.IGNORECASE)
+_RAW_CONTROL_CHAR = re.compile(r"[\x00-\x1f\x7f]")
+_ENCODED_CONTROL_CHAR = re.compile(r"%(?:[01][0-9a-f]|7f)", re.IGNORECASE)
 
 
 def _ambiguous_url(url: str) -> bool:
     """Whether parsers may disagree on ``url``'s host, so none may be named or keyed.
 
-    True for a backslash in the scheme separator or authority
-    (:func:`_authority_has_backslash`), for any ASCII control character, raw
-    or percent-encoded (WHATWG parsers strip tab, LF and CR anywhere and
-    leading/trailing C0 controls; other clients differ), and for leading or
-    trailing whitespace (browsers strip it, :func:`urlsplit` and HTTP clients
-    may not).
+    True for:
+
+    - a backslash in the scheme separator or authority
+      (:func:`_authority_has_backslash`);
+    - a raw ASCII control character anywhere: WHATWG parsers strip tab, LF
+      and CR anywhere (and leading/trailing C0 controls), which can move the
+      host, and other clients differ;
+    - a percent-encoded control character in the scheme separator or
+      authority (:func:`_scheme_and_authority`). One in the path, query or
+      fragment cannot change which host is contacted, so ``?q=a%0Ab`` is fine;
+    - leading or trailing whitespace (browsers strip it, :func:`urlsplit` and
+      HTTP clients may not).
+
+    :func:`_is_local_target` is stricter: it rejects an encoded control
+    character anywhere before calling a target local.
     """
-    return _authority_has_backslash(url) or _CONTROL_CHAR.search(url) is not None or url != url.strip()
+    authority = _scheme_and_authority(url)
+    return (
+        "\\" in authority
+        or _ENCODED_CONTROL_CHAR.search(authority) is not None
+        or _RAW_CONTROL_CHAR.search(url) is not None
+        or url != url.strip()
+    )
 
 
 def _host_blocked(url: str, blocklist: tuple[str, ...]) -> str | None:
