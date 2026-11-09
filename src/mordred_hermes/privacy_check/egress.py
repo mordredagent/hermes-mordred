@@ -457,19 +457,38 @@ def _ip_literal(host: str) -> bool:
 _URL_IP_IN_TEXT = re.compile(r"[a-z][a-z0-9+.-]*://(\[[0-9a-f:.]+\]|\d{1,3}(?:\.\d{1,3}){3})", re.IGNORECASE)
 
 
-def _browser_url(url: str) -> str:
-    """``url`` as a browser's URL parser reads it, for :func:`urlsplit`.
+_AUTHORITY_END = re.compile(r"[/?#]")
 
-    Browsers treat ``\\`` as ``/`` in http(s) URLs, so
-    ``http://evil.example\\@localhost/`` loads ``evil.example`` while
-    ``urlsplit`` alone would report host ``localhost``.
+
+def _authority_has_backslash(url: str) -> bool:
+    """Whether a backslash appears in ``url``'s scheme or authority.
+
+    Parsers disagree on such a URL: a browser reads ``\\`` as ``/`` and loads
+    ``evil.example`` from ``http://evil.example\\@localhost/x``, while
+    :func:`urlsplit` (and Python HTTP clients) read host ``localhost``. It is
+    therefore never named as a host, never keyed as one, and never matched
+    against the domain blocklist as one.
     """
-    return url.replace("\\", "/")
+    head, sep, tail = url.partition("://")
+    if not sep:
+        head, tail = "", url
+    return "\\" in head or "\\" in _AUTHORITY_END.split(tail, maxsplit=1)[0]
 
 
 def _host_blocked(url: str, blocklist: tuple[str, ...]) -> str | None:
-    url = _browser_url(url)
-    lowered = url.casefold()
+    """The blocklist entry (or reason) that refuses ``url``, or ``None``.
+
+    Path entries (``discord.com/api/webhooks``) match with ``\\`` read as
+    ``/`` too, which only widens what is refused. A URL whose host cannot be
+    determined the same way by every parser (:func:`_authority_has_backslash`)
+    is refused as unparseable.
+    """
+    lowered = url.replace("\\", "/").casefold()
+    for entry in blocklist:
+        if "/" in entry and entry in lowered:
+            return entry
+    if _authority_has_backslash(url):
+        return "unparseable URL"
     try:
         host = (urlsplit(url if "://" in url else f"https://{url}").hostname or "").casefold()
     except ValueError:
@@ -477,10 +496,7 @@ def _host_blocked(url: str, blocklist: tuple[str, ...]) -> str | None:
     if _ip_literal(host):
         return f"bare IP address {host}"
     for entry in blocklist:
-        if "/" in entry:
-            if entry in lowered:
-                return entry
-        elif host == entry or host.endswith("." + entry):
+        if "/" not in entry and (host == entry or host.endswith("." + entry)):
             return entry
     return None
 
@@ -512,8 +528,9 @@ def _is_local_target(url: str) -> bool:
     character, raw or percent-encoded (parsers strip or split on them
     differently). A ``//host`` network-path reference is a remote host. A
     ``file`` URL is local only without a host or with ``localhost`` and with a
-    path that does not decode to ``//...`` (Windows opens ``file://host/share``
-    and ``file:////host/share`` as UNC paths). Other URLs are local only for
+    path that neither decodes to ``//...`` nor holds a (``%5C``) backslash:
+    Windows opens ``file://host/share``, ``file:////host/share`` and
+    ``file:///%5C%5Chost/share`` as UNC paths. Other URLs are local only for
     ``http``/``https`` to a loopback host; any other scheme is not.
     """
     if "\\" in url or _CONTROL_CHAR.search(url):
@@ -534,7 +551,9 @@ def _is_local_target(url: str) -> bool:
         return False
     scheme = parts.scheme.casefold()
     if scheme == "file":
-        return parts.netloc.casefold() in {"", "localhost"} and not unquote(parts.path).startswith("//")
+        # ``%5C`` survives the raw-backslash check; decoded, a backslash can form a UNC path.
+        decoded = unquote(parts.path)
+        return parts.netloc.casefold() in {"", "localhost"} and "\\" not in decoded and not decoded.startswith("//")
     if scheme not in {"http", "https"}:
         return False
     host = (parts.hostname or "").casefold()
@@ -676,10 +695,15 @@ _UNPARSEABLE: Final = "an unparseable address"
 
 
 def _prompt_host(url: str) -> str:
-    """The host an approval prompt names for ``url``; never the raw URL, which may carry credentials."""
+    """The host an approval prompt names for ``url``; never the raw URL, which may carry credentials.
+
+    A backslash in the authority makes the host ambiguous between parsers
+    (:func:`_authority_has_backslash`), so such a URL is unparseable here.
+    """
+    if _authority_has_backslash(url):
+        return _UNPARSEABLE
     try:
-        browser = _browser_url(url)
-        host = urlsplit(browser if "://" in browser else f"https://{browser}").hostname
+        host = urlsplit(url if "://" in url else f"https://{url}").hostname
     except ValueError:
         host = None
     return host or _UNPARSEABLE
@@ -969,8 +993,7 @@ def _reader_web(tool: str, args: dict[str, Any], policy: EgressPolicy) -> Decisi
     if not hard.allow:
         return hard
     urls = _urls(tool, args)
-    browser = [_browser_url(u) for u in urls]
-    where = ", ".join(sorted({(urlsplit(u if "://" in u else f"https://{u}").hostname or u) for u in browser}))
+    where = ", ".join(sorted({_prompt_host(u) for u in urls}))
     digest = hashlib.sha256(json.dumps(args, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
     return Decision(
         allow=False,

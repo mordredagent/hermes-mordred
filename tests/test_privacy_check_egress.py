@@ -275,6 +275,9 @@ def test_load_policy_picks_up_valid_rewrite_after_damage(tmp_path):
         ("file:////evil.example/share/x", False),
         ("file://localhost//evil.example/share", False),
         ("file:///%2F%2Fevil.example/share", False),
+        ("file:///%5C%5Cevil.example/share", False),
+        ("file:///tmp/%5Cx", False),
+        ("file:///tmp/x%20y.html", True),
         ("http://localhost/%00", False),
         ("http://localhost/%7F", False),
         ("http://localhost/%1f", False),
@@ -302,31 +305,48 @@ def test_desktop_preview_backslash_userinfo_is_egress():
     args = {"action": "open", "url": "http://evil.example\\@localhost/x"}
     blocked = _decide("lockdown", "desktop_preview", args)
     assert not blocked.allow and not blocked.approve and blocked.reason == "egress.url_fetch"
-    asked = _decide("ask", "desktop_preview", args)
-    assert not asked.allow and asked.approve
+    # Under "ask" an ambiguous authority is refused outright, never offered for approval.
+    refused = _decide("ask", "desktop_preview", args)
+    assert not refused.allow and not refused.approve
+    userinfo = _decide("ask", "desktop_preview", {"action": "open", "url": "http://user@localhost/x"})
+    assert not userinfo.allow and userinfo.approve
 
 
 _BACKSLASH_URL = "http://evil.example\\@localhost/x"
 
 
-def test_backslash_url_hosts_are_parsed_as_a_browser_does():
-    assert egress._host_blocked(_BACKSLASH_URL, ("evil.example",)) == "evil.example"
+def test_backslash_in_authority_is_never_named_or_keyed_as_a_host():
+    # Browsers load evil.example, urlsplit and Python HTTP clients localhost: neither is named.
+    assert egress._host_blocked(_BACKSLASH_URL, ("evil.example",)) == "unparseable URL"
+    assert egress._host_blocked(_BACKSLASH_URL, ()) == "unparseable URL"
+    assert egress._host_blocked("evil.example\\@localhost/x", ()) == "unparseable URL"
+    # A backslash only in the path keeps the host; path entries still match with "\\" read as "/".
+    assert egress._host_blocked("https://localhost/a\\b", ()) is None
     assert egress._host_blocked("https://discord.com\\api\\webhooks/1/x", egress.DEFAULT_BLOCKLIST) == (
         "discord.com/api/webhooks"
     )
-    assert egress._prompt_host(_BACKSLASH_URL) == "evil.example"
+    assert egress._host_blocked("https://discord.com/api\\webhooks/1/x", egress.DEFAULT_BLOCKLIST) == (
+        "discord.com/api/webhooks"
+    )
+    assert egress._authority_has_backslash(_BACKSLASH_URL)
+    assert egress._authority_has_backslash("ht\\tp://localhost/")
+    assert not egress._authority_has_backslash("http://localhost/a\\b?q=\\#\\")
+    assert egress._prompt_host(_BACKSLASH_URL) == egress._UNPARSEABLE
+    assert egress._prompt_host("http://localhost/a\\b") == "localhost"
     key = egress._url_rule_key("desktop_preview", [_BACKSLASH_URL])
-    assert key == "mordred.egress:desktop_preview:evil.example" and "localhost" not in key
+    other = egress._url_rule_key("desktop_preview", ["http://other.example\\@localhost/x"])
+    assert key.startswith("mordred.egress:desktop_preview:unparseable-") and key != other
+    assert "localhost" not in key and "evil.example" not in key
 
 
-def test_backslash_url_is_blocklisted_and_prompt_names_the_real_host():
+def test_backslash_in_authority_is_refused_at_every_restricted_level():
     args = {"action": "open", "url": _BACKSLASH_URL}
-    refused = _decide("blocklist", "desktop_preview", args, blocklist=("evil.example",))
-    assert not refused.allow and not refused.approve and refused.reason == "egress.blocklisted_domain"
-    assert "(evil.example)" in refused.message
-    asked = _decide("ask", "desktop_preview", args)
-    assert asked.approve and "(evil.example)" in asked.message and "(localhost)" not in asked.message
-    assert asked.rule_key == "mordred.egress:desktop_preview:evil.example"
+    for level in ("blocklist", "ask"):
+        refused = _decide(level, "desktop_preview", args)
+        assert not refused.allow and not refused.approve and refused.reason == "egress.blocklisted_domain"
+        assert "(unparseable URL)" in refused.message
+        assert "localhost" not in refused.message and "evil.example" not in refused.message
+    assert not _decide("lockdown", "desktop_preview", args).allow
 
 
 # -- hook integration ---------------------------------------------------------------------
@@ -704,6 +724,11 @@ def test_browser_history_tool_taints_through_the_bridge_and_then_locks_the_sessi
     assert web.approve and web.reason == "egress.reader_web"
 
 
-def test_reader_web_prompt_names_the_real_host_of_a_backslash_url():
-    decision = egress._reader_web("desktop_preview", {"action": "open", "url": _BACKSLASH_URL}, egress.EgressPolicy())
-    assert decision.approve and "(evil.example)" in decision.message and "(localhost)" not in decision.message
+def test_reader_web_never_shows_a_raw_url_or_an_ambiguous_host():
+    policy = egress.EgressPolicy()
+    refused = egress._reader_web("desktop_preview", {"action": "open", "url": _BACKSLASH_URL}, policy)
+    assert not refused.approve and "(unparseable URL)" in refused.message
+    # A URL with no host used to be shown raw in the prompt; it is named unparseable.
+    asked = egress._reader_web("web_extract", {"url": "http:///secret-path?token=abc"}, policy)
+    assert asked.approve and f"({egress._UNPARSEABLE})" in asked.message
+    assert egress._prompt_host("http://evil.example\\@localhost/x") == egress._UNPARSEABLE
