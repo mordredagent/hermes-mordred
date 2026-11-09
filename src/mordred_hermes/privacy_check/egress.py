@@ -70,7 +70,7 @@ Configuration (``config.yaml``)::
           blocked_tools: []        # extra tool names blocked below "off"
           taint: true              # lockdown after private data is read
 
-A missing section means ``search``; an unreadable or invalid one fails closed
+A missing section means ``ask``; an unreadable or invalid one fails closed
 to ``lockdown``.
 
 Prompt text. Hermes writes an approval prompt, and the denial that quotes it
@@ -101,7 +101,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final, Literal
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from ._audit_reasons import EgressRule
 
@@ -363,10 +363,16 @@ _cache: dict[str, Any] = {}
 def load_policy(config_path: Path | None = None) -> EgressPolicy:
     """Read tool-egress settings; Windows refreshes the pair and propagates refusal.
 
-    POSIX retains the historical mtime cache and lockdown fallback.
+    POSIX keeps an mtime/size cache and fails closed: a file that exists but
+    cannot be read or parsed, a top-level document that is not a mapping, or a
+    ``plugins`` / ``mordred_privacy_check`` value that is present but not a
+    mapping all yield ``lockdown`` (the shape rules of
+    :func:`._checked_policy.read_checked_policy`). A missing file, an empty
+    document, or an absent ``plugins`` / section yields the default level. The
+    result is cached against the file's stamp, so a degraded (``lockdown``)
+    policy persists until the file's mtime or size changes.
     """
     from .._core._home import hermes_home
-    from .._core._yaml_io import load_plugin_section
 
     path = config_path or (hermes_home() / "config.yaml")
     if _platform == "nt":
@@ -384,13 +390,42 @@ def load_policy(config_path: Path | None = None) -> EgressPolicy:
         cached: EgressPolicy = _cache["policy"]
         return cached
     try:
-        section = load_plugin_section(path, "mordred_privacy_check")
+        policy = parse_policy(_read_egress_section(path))
     except Exception:
         policy = EgressPolicy(level="lockdown")
-    else:
-        policy = parse_policy(section.get("tool_egress") if isinstance(section, dict) else None)
     _cache.update(stamp=stamp, policy=policy)
     return policy
+
+
+def _read_egress_section(path: Path) -> Any:
+    """The raw ``plugins.mordred_privacy_check.tool_egress`` value (``None`` when absent).
+
+    Raises on a read or parse error and on a ``plugins`` / section value that
+    is present but not a mapping, so :func:`load_policy` fails closed. Unlike
+    :func:`mordred_hermes._core._yaml_io.load_yaml_mapping`, nothing here
+    collapses a damaged file to "no configuration".
+    """
+    from ruamel.yaml import YAML
+
+    from .._core._yaml_io import _parse_yaml
+
+    with path.open(encoding="utf-8") as f:
+        data = _parse_yaml(YAML(typ="safe", pure=True), f)
+    if data is None:
+        return None  # an empty document configures nothing, like a missing file
+    if not isinstance(data, dict):
+        raise ValueError("config YAML must contain a mapping")
+    if "plugins" not in data:
+        return None
+    plugins = data["plugins"]
+    if not isinstance(plugins, dict):
+        raise ValueError("plugins must be a mapping")
+    if "mordred_privacy_check" not in plugins:
+        return None
+    section = plugins["mordred_privacy_check"]
+    if not isinstance(section, dict):
+        raise ValueError("privacy section must be a mapping")
+    return section.get("tool_egress")
 
 
 # -- classification -------------------------------------------------------------------
@@ -422,8 +457,86 @@ def _ip_literal(host: str) -> bool:
 _URL_IP_IN_TEXT = re.compile(r"[a-z][a-z0-9+.-]*://(\[[0-9a-f:.]+\]|\d{1,3}(?:\.\d{1,3}){3})", re.IGNORECASE)
 
 
+_AUTHORITY_END = re.compile(r"[/?#]")
+# ``scheme:`` and the run of ``/`` or ``\`` a browser reads as the authority separator.
+_SCHEME_PREFIX = re.compile(r"(?P<scheme>[a-z][a-z0-9+.-]*):(?P<sep>[/\\]*)(?P<rest>.*)", re.IGNORECASE | re.DOTALL)
+
+
+def _scheme_and_authority(url: str) -> str:
+    """The part of ``url`` that decides its host: the scheme separator and the authority.
+
+    A browser takes any run of ``/`` or ``\\`` after ``scheme:`` as the
+    authority separator (``http:/\\evil.example/``, ``http:\\evil.example/``),
+    so for a value with a scheme this is the separator and the authority after
+    it (up to ``/``, ``?`` or ``#``); for a value without one, the text up to
+    the first ``/``, ``?`` or ``#``.
+    """
+    match = _SCHEME_PREFIX.match(url)
+    if match is None:
+        return _AUTHORITY_END.split(url, maxsplit=1)[0]
+    return match["sep"] + _AUTHORITY_END.split(match["rest"], maxsplit=1)[0]
+
+
+def _authority_has_backslash(url: str) -> bool:
+    """Whether a backslash appears in ``url``'s scheme separator or authority.
+
+    Parsers disagree on such a URL: a browser reads ``\\`` as ``/`` and loads
+    ``evil.example`` from ``http://evil.example\\@localhost/x``, while
+    :func:`urlsplit` (and Python HTTP clients) read host ``localhost``. It is
+    therefore never named as a host, never keyed as one, and never matched
+    against the domain blocklist as one (:func:`_scheme_and_authority`).
+    """
+    return "\\" in _scheme_and_authority(url)
+
+
+# An ASCII control character, raw or percent-encoded.
+_CONTROL_CHAR = re.compile(r"[\x00-\x1f\x7f]|%(?:[01][0-9a-f]|7f)", re.IGNORECASE)
+_RAW_CONTROL_CHAR = re.compile(r"[\x00-\x1f\x7f]")
+_ENCODED_CONTROL_CHAR = re.compile(r"%(?:[01][0-9a-f]|7f)", re.IGNORECASE)
+
+
+def _ambiguous_url(url: str) -> bool:
+    """Whether parsers may disagree on ``url``'s host, so none may be named or keyed.
+
+    True for:
+
+    - a backslash in the scheme separator or authority
+      (:func:`_authority_has_backslash`);
+    - a raw ASCII control character anywhere: WHATWG parsers strip tab, LF
+      and CR anywhere (and leading/trailing C0 controls), which can move the
+      host, and other clients differ;
+    - a percent-encoded control character in the scheme separator or
+      authority (:func:`_scheme_and_authority`). One in the path, query or
+      fragment cannot change which host is contacted, so ``?q=a%0Ab`` is fine;
+    - leading or trailing whitespace (browsers strip it, :func:`urlsplit` and
+      HTTP clients may not).
+
+    :func:`_is_local_target` is stricter: it rejects an encoded control
+    character anywhere before calling a target local.
+    """
+    authority = _scheme_and_authority(url)
+    return (
+        "\\" in authority
+        or _ENCODED_CONTROL_CHAR.search(authority) is not None
+        or _RAW_CONTROL_CHAR.search(url) is not None
+        or url != url.strip()
+    )
+
+
 def _host_blocked(url: str, blocklist: tuple[str, ...]) -> str | None:
-    lowered = url.casefold()
+    """The blocklist entry (or reason) that refuses ``url``, or ``None``.
+
+    Path entries (``discord.com/api/webhooks``) match with ``\\`` read as
+    ``/`` too, which only widens what is refused. A URL whose host cannot be
+    determined the same way by every parser (:func:`_ambiguous_url`) is then
+    refused as unparseable.
+    """
+    lowered = url.replace("\\", "/").casefold()
+    for entry in blocklist:
+        if "/" in entry and entry in lowered:
+            return entry
+    if _ambiguous_url(url):
+        return "unparseable URL"
     try:
         host = (urlsplit(url if "://" in url else f"https://{url}").hostname or "").casefold()
     except ValueError:
@@ -431,10 +544,7 @@ def _host_blocked(url: str, blocklist: tuple[str, ...]) -> str | None:
     if _ip_literal(host):
         return f"bare IP address {host}"
     for entry in blocklist:
-        if "/" in entry:
-            if entry in lowered:
-                return entry
-        elif host == entry or host.endswith("." + entry):
+        if "/" not in entry and (host == entry or host.endswith("." + entry)):
             return entry
     return None
 
@@ -447,18 +557,51 @@ def is_first_party_command(command: Any) -> bool:
     )
 
 
+# A schemeless loopback target as Hermes's ``open_preview_tool`` recognises it.
+_LOCAL_HOST_TARGET = re.compile(r"(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?(?:/|\Z)", re.IGNORECASE)
+
+
 def _is_local_target(url: str) -> bool:
-    """A file path or a loopback address (e.g. a local dev server)."""
+    """A file path or a loopback address (e.g. a local dev server).
+
+    Only shapes that ``urlsplit`` and a browser's URL parser read the same way
+    count as local. A backslash is rejected anywhere: browsers treat it as
+    ``/`` in http(s) URLs, so ``http://evil.example\\@localhost/`` loads
+    ``evil.example`` although ``urlsplit`` reports host ``localhost``. Userinfo
+    (``user@host``) is rejected for the same reason, and so is any control
+    character, raw or percent-encoded (parsers strip or split on them
+    differently). A ``//host`` network-path reference is a remote host. A
+    ``file`` URL is local only without a host or with ``localhost`` and with a
+    path that neither decodes to ``//...`` nor holds a (``%5C``) backslash:
+    Windows opens ``file://host/share``, ``file:////host/share`` and
+    ``file:///%5C%5Chost/share`` as UNC paths. Other URLs are local only for
+    ``http``/``https`` to a loopback host; any other scheme is not.
+    """
+    if "\\" in url or _CONTROL_CHAR.search(url):
+        return False
     if "://" not in url:
-        return url.startswith(("/", "~", "./", "../")) or url.casefold().startswith("localhost")
+        if url.startswith("//"):
+            return False
+        # Hermes's preview tool passes paths through and turns any other bare
+        # value into ``https://<value>``; only a loopback host (its own regex)
+        # stays on this machine, so ``localhost.attacker.example`` is egress.
+        return url.startswith(("/", "~", "./", "../")) or _LOCAL_HOST_TARGET.match(url) is not None
     try:
         parts = urlsplit(url)
+        parts.port  # noqa: B018 - raises ValueError on an invalid port
     except ValueError:
         return False
-    if parts.scheme == "file":
-        return True
+    if "@" in parts.netloc:
+        return False
+    scheme = parts.scheme.casefold()
+    if scheme == "file":
+        # ``%5C`` survives the raw-backslash check; decoded, a backslash can form a UNC path.
+        decoded = unquote(parts.path)
+        return parts.netloc.casefold() in {"", "localhost"} and "\\" not in decoded and not decoded.startswith("//")
+    if scheme not in {"http", "https"}:
+        return False
     host = (parts.hostname or "").casefold()
-    return host in {"localhost", "127.0.0.1", "::1"}
+    return host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}  # noqa: S104 - a target, not a bind
 
 
 def _is_local(tool: str) -> bool:
@@ -596,7 +739,14 @@ _UNPARSEABLE: Final = "an unparseable address"
 
 
 def _prompt_host(url: str) -> str:
-    """The host an approval prompt names for ``url``; never the raw URL, which may carry credentials."""
+    """The host an approval prompt names for ``url``; never the raw URL, which may carry credentials.
+
+    A URL whose host parsers may read differently (:func:`_ambiguous_url`: a
+    backslash in the authority, a control character, surrounding whitespace)
+    is unparseable here.
+    """
+    if _ambiguous_url(url):
+        return _UNPARSEABLE
     try:
         host = urlsplit(url if "://" in url else f"https://{url}").hostname
     except ValueError:
@@ -888,7 +1038,7 @@ def _reader_web(tool: str, args: dict[str, Any], policy: EgressPolicy) -> Decisi
     if not hard.allow:
         return hard
     urls = _urls(tool, args)
-    where = ", ".join(sorted({(urlsplit(u if "://" in u else f"https://{u}").hostname or u) for u in urls}))
+    where = ", ".join(sorted({_prompt_host(u) for u in urls}))
     digest = hashlib.sha256(json.dumps(args, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
     return Decision(
         allow=False,

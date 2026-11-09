@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -166,7 +167,253 @@ def test_load_policy_reads_config_and_notices_changes(tmp_path):
     config.write_text("plugins:\n  mordred_privacy_check:\n    tool_egress:\n      level: blocklist\n  x: 1\n")
     assert egress.load_policy(config).level == "blocklist"
     config.write_text("plugins: [not: valid\n")
-    assert egress.load_policy(config).level in {"ask", "lockdown"}
+    assert egress.load_policy(config).level == "lockdown"
+
+
+_LOCKDOWN_CONFIG = "plugins:\n  mordred_privacy_check:\n    tool_egress:\n      level: lockdown\n"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "plugins: [not: valid\n",  # malformed YAML
+        "plugins:\n  - mordred_privacy_check\n",  # plugins is a list
+        "- plugins\n- mordred_privacy_check\n",  # top level is a list
+        "plugins:\n  mordred_privacy_check:\n    - tool_egress\n",  # section is a list
+        "plugins:\n",  # plugins present but null
+        "plugins:\n  mordred_privacy_check:\n",  # section present but null
+        "plugins:\n  mordred_privacy_check:\n    tool_egress: [lockdown]\n",  # tool_egress not a mapping
+    ],
+)
+def test_load_policy_fails_closed_on_damaged_config(tmp_path, text):
+    config = tmp_path / "config.yaml"
+    config.write_text(text)
+    assert egress.load_policy(config).level == "lockdown"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",  # empty document: configures nothing, like a missing file
+        "model:\n  default: m\n",  # no plugins
+        "plugins:\n  enabled: [mordred]\n",  # no privacy section
+        "plugins:\n  mordred_privacy_check:\n    policy: lenient\n",  # no tool_egress
+    ],
+)
+def test_load_policy_absent_settings_use_default(tmp_path, text):
+    config = tmp_path / "config.yaml"
+    config.write_text(text)
+    assert egress.load_policy(config).level == egress.DEFAULT_LEVEL
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), reason="needs POSIX non-root")
+def test_load_policy_fails_closed_on_unreadable_config_and_recovers(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(_LOCKDOWN_CONFIG.replace("lockdown", "off"))
+    assert egress.load_policy(config).level == "off"
+    config.write_text(_LOCKDOWN_CONFIG.replace("lockdown", "blocklist"))
+    config.chmod(0o000)
+    try:
+        assert egress.load_policy(config).level == "lockdown"
+    finally:
+        config.chmod(0o600)
+    # A valid rewrite (new size) invalidates the cached degraded policy.
+    config.write_text(_LOCKDOWN_CONFIG.replace("lockdown", "search"))
+    assert egress.load_policy(config).level == "search"
+
+
+def test_load_policy_picks_up_valid_rewrite_after_damage(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("- not a mapping\n")
+    assert egress.load_policy(config).level == "lockdown"
+    config.write_text(_LOCKDOWN_CONFIG.replace("lockdown", "blocklist"))
+    assert egress.load_policy(config).level == "blocklist"
+
+
+@pytest.mark.parametrize(
+    ("target", "local"),
+    [
+        ("localhost", True),
+        ("localhost:3000", True),
+        ("localhost/", True),
+        ("LOCALHOST:8080/x", True),
+        ("127.0.0.1:3000/x", True),
+        ("0.0.0.0:8000", True),
+        ("[::1]:80/", True),
+        ("/tmp/x.html", True),
+        ("./a.html", True),
+        ("../a.html", True),
+        ("~/x", True),
+        ("http://localhost:3000", True),
+        ("file:///tmp/x.html", True),
+        ("localhost.attacker.example/x", False),
+        ("localhostevil.com", False),
+        ("localhost.evil", False),
+        ("localhost:3000.evil.example", False),
+        ("evil.example/localhost", False),
+        ("127.0.0.1.evil.example", False),
+        ("https://localhost.attacker.example/x", False),
+        # Parser divergence and remote hosts behind local-looking shapes.
+        ("http://evil.example\\@localhost/x?d=S", False),
+        ("http://user@localhost/x", False),
+        ("http://user@localhost/", False),
+        ("http://localhost\\evil.example/", False),
+        ("file://evil.example/share/x", False),
+        ("file://evil.example/x", False),
+        ("file://localhost/tmp/x.html", True),
+        ("FILE://LOCALHOST/tmp/x.html", True),
+        ("//evil.example/x", False),
+        ("localhost\\evil.example", False),
+        ("http://0.0.0.0:3000/", True),
+        ("http://localhost:99999/", False),
+        # Only http(s) to loopback; file URLs that are UNC paths; control characters.
+        ("ftp://localhost/x", False),
+        ("gopher://127.0.0.1/x", False),
+        ("custom://localhost/x", False),
+        ("http://LOCALHOST/x", True),
+        ("HTTPS://localhost/x", True),
+        ("file:////evil.example/share/x", False),
+        ("file://localhost//evil.example/share", False),
+        ("file:///%2F%2Fevil.example/share", False),
+        ("file:///%5C%5Cevil.example/share", False),
+        ("file:///tmp/%5Cx", False),
+        ("file:///tmp/x%20y.html", True),
+        ("http://localhost/%00", False),
+        ("http://localhost/%7F", False),
+        ("http://localhost/%1f", False),
+        ("http://localhost/\x00", False),
+        ("http://localhost/\t", False),
+        ("localhost:3000/\x7f", False),
+        ("http://localhost/%20ok", True),
+    ],
+)
+def test_is_local_target_matches_loopback_hosts_exactly(target, local):
+    assert egress._is_local_target(target) is local
+
+
+def test_desktop_preview_lookalike_localhost_is_egress():
+    args = {"action": "open", "url": "localhost.attacker.example/x?d=S"}
+    blocked = _decide("lockdown", "desktop_preview", args)
+    assert not blocked.allow and not blocked.approve and blocked.reason == "egress.url_fetch"
+    asked = _decide("ask", "desktop_preview", args)
+    assert not asked.allow and asked.approve
+    assert "localhost.attacker.example" in asked.message
+    assert _decide("lockdown", "desktop_preview", {"action": "open", "url": "localhost:3000/x"}).allow
+
+
+def test_desktop_preview_backslash_userinfo_is_egress():
+    args = {"action": "open", "url": "http://evil.example\\@localhost/x"}
+    blocked = _decide("lockdown", "desktop_preview", args)
+    assert not blocked.allow and not blocked.approve and blocked.reason == "egress.url_fetch"
+    # Under "ask" an ambiguous authority is refused outright, never offered for approval.
+    refused = _decide("ask", "desktop_preview", args)
+    assert not refused.allow and not refused.approve
+    userinfo = _decide("ask", "desktop_preview", {"action": "open", "url": "http://user@localhost/x"})
+    assert not userinfo.allow and userinfo.approve
+
+
+_BACKSLASH_URL = "http://evil.example\\@localhost/x"
+
+
+def test_backslash_in_authority_is_never_named_or_keyed_as_a_host():
+    # Browsers load evil.example, urlsplit and Python HTTP clients localhost: neither is named.
+    assert egress._host_blocked(_BACKSLASH_URL, ("evil.example",)) == "unparseable URL"
+    assert egress._host_blocked(_BACKSLASH_URL, ()) == "unparseable URL"
+    assert egress._host_blocked("evil.example\\@localhost/x", ()) == "unparseable URL"
+    # A backslash only in the path keeps the host; path entries still match with "\\" read as "/".
+    assert egress._host_blocked("https://localhost/a\\b", ()) is None
+    assert egress._host_blocked("https://discord.com\\api\\webhooks/1/x", egress.DEFAULT_BLOCKLIST) == (
+        "discord.com/api/webhooks"
+    )
+    assert egress._host_blocked("https://discord.com/api\\webhooks/1/x", egress.DEFAULT_BLOCKLIST) == (
+        "discord.com/api/webhooks"
+    )
+    assert egress._authority_has_backslash(_BACKSLASH_URL)
+    assert egress._authority_has_backslash("ht\\tp://localhost/")
+    assert not egress._authority_has_backslash("http://localhost/a\\b?q=\\#\\")
+    assert egress._prompt_host(_BACKSLASH_URL) == egress._UNPARSEABLE
+    assert egress._prompt_host("http://localhost/a\\b") == "localhost"
+    key = egress._url_rule_key("desktop_preview", [_BACKSLASH_URL])
+    other = egress._url_rule_key("desktop_preview", ["http://other.example\\@localhost/x"])
+    assert key.startswith("mordred.egress:desktop_preview:unparseable-") and key != other
+    assert "localhost" not in key and "evil.example" not in key
+
+
+@pytest.mark.parametrize(
+    ("url", "ambiguous"),
+    [
+        ("http://evil.example\\@localhost/x", True),
+        ("http:/\\evil.example/x", True),
+        ("http:\\\\evil.example/x", True),
+        ("HTTP:\\/evil.example/x", True),
+        ("http:\\evil.example/x", True),
+        ("ht\\tp://localhost/", True),
+        ("evil.example\\@localhost/x", True),
+        ("http://ok.example/a\\b", False),
+        ("http://localhost/a\\b?q=\\#\\", False),
+        ("/tmp/a\\b", False),
+        ("localhost:3000/a\\b", False),
+    ],
+)
+def test_authority_has_backslash_follows_the_browser_scheme_separator(url, ambiguous):
+    assert egress._authority_has_backslash(url) is ambiguous
+    if ambiguous:
+        assert egress._prompt_host(url) == egress._UNPARSEABLE
+        assert egress._host_blocked(url, ()) == "unparseable URL"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://evil.example\t@localhost/x",
+        "ht\ttp://localhost/",
+        "http://local%0ahost/",
+        "http://ok.example%09/x",
+        "http://localhost/\r\n",
+        "\x00http://localhost/",
+        " http://localhost/",
+        "http://localhost/ ",
+    ],
+)
+def test_control_characters_and_surrounding_whitespace_make_a_url_unparseable(url):
+    assert egress._ambiguous_url(url)
+    assert egress._prompt_host(url) == egress._UNPARSEABLE
+    assert egress._host_blocked(url, ()) == "unparseable URL"
+
+
+@pytest.mark.parametrize(
+    ("url", "host"),
+    [
+        ("http://ok.example/x%20y", "ok.example"),
+        ("http://ok.example/x?q=a%0Ab", "ok.example"),
+        ("https://x.example/p%7Fq", "x.example"),
+        ("https://x.example/p#%00", "x.example"),
+        ("http://localhost/%0a", "localhost"),
+    ],
+)
+def test_encoded_characters_outside_the_authority_keep_the_host(url, host):
+    # An encoded control character in the path, query or fragment cannot change the host contacted.
+    assert not egress._ambiguous_url(url)
+    assert egress._prompt_host(url) == host
+    assert egress._host_blocked(url, ()) is None
+
+
+def test_encoded_control_in_a_local_path_prompts_under_ask():
+    args = {"action": "open", "url": "http://localhost/%0a"}
+    assert not egress._is_local_target("http://localhost/%0a")
+    asked = _decide("ask", "desktop_preview", args)
+    assert not asked.allow and asked.approve and "(localhost)" in asked.message
+    assert not _decide("lockdown", "desktop_preview", args).allow
+
+
+def test_backslash_in_authority_is_refused_at_every_restricted_level():
+    args = {"action": "open", "url": _BACKSLASH_URL}
+    for level in ("blocklist", "ask"):
+        refused = _decide(level, "desktop_preview", args)
+        assert not refused.allow and not refused.approve and refused.reason == "egress.blocklisted_domain"
+        assert "(unparseable URL)" in refused.message
+        assert "localhost" not in refused.message and "evil.example" not in refused.message
+    assert not _decide("lockdown", "desktop_preview", args).allow
 
 
 # -- hook integration ---------------------------------------------------------------------
@@ -542,3 +789,13 @@ def test_browser_history_tool_taints_through_the_bridge_and_then_locks_the_sessi
     assert egress.decide("memory", {}, "history-hook", untainted).reason == "egress.reader_locked"
     web = egress.decide("web_search", {"query": "x"}, "history-hook", untainted)
     assert web.approve and web.reason == "egress.reader_web"
+
+
+def test_reader_web_never_shows_a_raw_url_or_an_ambiguous_host():
+    policy = egress.EgressPolicy()
+    refused = egress._reader_web("desktop_preview", {"action": "open", "url": _BACKSLASH_URL}, policy)
+    assert not refused.approve and "(unparseable URL)" in refused.message
+    # A URL with no host used to be shown raw in the prompt; it is named unparseable.
+    asked = egress._reader_web("web_extract", {"url": "http:///secret-path?token=abc"}, policy)
+    assert asked.approve and f"({egress._UNPARSEABLE})" in asked.message
+    assert egress._prompt_host("http://evil.example\\@localhost/x") == egress._UNPARSEABLE
