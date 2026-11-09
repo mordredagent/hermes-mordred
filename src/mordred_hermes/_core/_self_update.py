@@ -410,18 +410,20 @@ def auto_check_enabled(home: Path | None = None) -> bool:
     Read the way Hermes does (``float(value)``): a quoted ``"0"`` disables too.
 
     Only a missing ``config.yaml`` means "no setting" (enabled, as in Hermes).
-    A file that exists but cannot be read or parsed, whose top level is not a
-    mapping (an empty document included), or whose ``plugins`` is not a
-    mapping fails closed: the opt-out cannot be ruled out, so no PyPI request.
+    Anything else that hides the setting fails closed — the opt-out cannot be
+    ruled out, so no PyPI request: a file (or its directory) that cannot be
+    read, a parse or decode error, a top level that is not a mapping (an empty
+    or comment-only file included, matching the Windows checked snapshot), or
+    a ``plugins`` value that is not a mapping. Absence is decided by the read
+    itself, never a separate ``exists()`` probe, which reports an unsearchable
+    directory as "missing" on newer Pythons and races with deletion.
     """
     from ruamel.yaml.error import YAMLError
 
-    path = (home or hermes_home()) / "config.yaml"
-    if not path.exists():
-        return True
     try:
-        config = _read_config_mapping(path)
-    except (OSError, ValueError, YAMLError):
+        config = _read_config_mapping((home or hermes_home()) / "config.yaml")
+    except (OSError, ValueError, YAMLError) as exc:
+        _LOG.debug("update check skipped: config.yaml unreadable (%s)", type(exc).__name__)
         return False
     if "plugins" not in config:
         return True
@@ -444,11 +446,12 @@ def auto_check_enabled(home: Path | None = None) -> bool:
 
 
 def _read_config_mapping(path: Path) -> dict[str, Any]:
-    """Strictly read ``config.yaml``: every read/parse failure raises.
+    """Strictly read ``config.yaml``: ``{}`` only when it is absent, else raise.
 
-    Windows canonical config goes through the checked snapshot, which already
-    raises ``ValueError`` for a non-mapping top level. Elsewhere the tolerant
-    :func:`load_yaml_mapping` would collapse a non-mapping to ``{}``, so parse
+    Windows canonical config goes through the checked snapshot, which reports
+    checked absence (of the file or of the home) as ``{}`` and raises
+    ``ValueError`` for a non-mapping top level. Elsewhere the tolerant
+    :func:`load_yaml_mapping` would collapse every failure to ``{}``, so parse
     with the same safe loader directly.
     """
     from . import _yaml_io
@@ -457,7 +460,11 @@ def _read_config_mapping(path: Path) -> dict[str, Any]:
         return _yaml_io.load_yaml_mapping(path, catch=())
     from ruamel.yaml import YAML
 
-    with path.open(encoding="utf-8") as f:
+    try:
+        f = path.open(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    with f:
         data = _yaml_io._parse_yaml(YAML(typ="safe", pure=True), f)
     if not isinstance(data, dict):
         raise ValueError("config YAML must contain a mapping")
