@@ -458,21 +458,29 @@ _URL_IP_IN_TEXT = re.compile(r"[a-z][a-z0-9+.-]*://(\[[0-9a-f:.]+\]|\d{1,3}(?:\.
 
 
 _AUTHORITY_END = re.compile(r"[/?#]")
+# ``scheme:`` and the run of ``/`` or ``\`` a browser reads as the authority separator.
+_SCHEME_PREFIX = re.compile(r"(?P<scheme>[a-z][a-z0-9+.-]*):(?P<sep>[/\\]*)(?P<rest>.*)", re.IGNORECASE | re.DOTALL)
 
 
 def _authority_has_backslash(url: str) -> bool:
-    """Whether a backslash appears in ``url``'s scheme or authority.
+    """Whether a backslash appears in ``url``'s scheme separator or authority.
 
     Parsers disagree on such a URL: a browser reads ``\\`` as ``/`` and loads
     ``evil.example`` from ``http://evil.example\\@localhost/x``, while
     :func:`urlsplit` (and Python HTTP clients) read host ``localhost``. It is
     therefore never named as a host, never keyed as one, and never matched
     against the domain blocklist as one.
+
+    A browser takes any run of ``/`` or ``\\`` after ``scheme:`` as the
+    authority separator (``http:/\\evil.example/``, ``http:\\evil.example/``),
+    so for a value with a scheme the separator and the authority after it (up
+    to ``/``, ``?`` or ``#``) are checked; for a value without one, the text up
+    to the first ``/``, ``?`` or ``#``.
     """
-    head, sep, tail = url.partition("://")
-    if not sep:
-        head, tail = "", url
-    return "\\" in head or "\\" in _AUTHORITY_END.split(tail, maxsplit=1)[0]
+    match = _SCHEME_PREFIX.match(url)
+    if match is None:
+        return "\\" in _AUTHORITY_END.split(url, maxsplit=1)[0]
+    return "\\" in match["sep"] or "\\" in _AUTHORITY_END.split(match["rest"], maxsplit=1)[0]
 
 
 def _host_blocked(url: str, blocklist: tuple[str, ...]) -> str | None:

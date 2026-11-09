@@ -339,6 +339,29 @@ def test_backslash_in_authority_is_never_named_or_keyed_as_a_host():
     assert "localhost" not in key and "evil.example" not in key
 
 
+@pytest.mark.parametrize(
+    ("url", "ambiguous"),
+    [
+        ("http://evil.example\\@localhost/x", True),
+        ("http:/\\evil.example/x", True),
+        ("http:\\\\evil.example/x", True),
+        ("HTTP:\\/evil.example/x", True),
+        ("http:\\evil.example/x", True),
+        ("ht\\tp://localhost/", True),
+        ("evil.example\\@localhost/x", True),
+        ("http://ok.example/a\\b", False),
+        ("http://localhost/a\\b?q=\\#\\", False),
+        ("/tmp/a\\b", False),
+        ("localhost:3000/a\\b", False),
+    ],
+)
+def test_authority_has_backslash_follows_the_browser_scheme_separator(url, ambiguous):
+    assert egress._authority_has_backslash(url) is ambiguous
+    if ambiguous:
+        assert egress._prompt_host(url) == egress._UNPARSEABLE
+        assert egress._host_blocked(url, ()) == "unparseable URL"
+
+
 def test_backslash_in_authority_is_refused_at_every_restricted_level():
     args = {"action": "open", "url": _BACKSLASH_URL}
     for level in ("blocklist", "ask"):
