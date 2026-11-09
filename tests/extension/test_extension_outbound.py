@@ -1759,3 +1759,239 @@ def test_discord_encrypted_send_propagates_cancellation():
         asyncio.run(FakeDiscordAdapter(client).send(chat_id, _LONG_DISCORD_REPLY))
 
     assert channel.sent == []
+
+
+# --------------------------------------------------------------------------- #
+# Create-time wrapping through the gateway's platform registry
+# --------------------------------------------------------------------------- #
+
+_REGISTRY_SECRET = "xoxb-registry-config-secret"
+
+
+async def _plaintext_slack_send(self, chat_id, content, reply_to=None, metadata=None):
+    self._client.posts.append({"channel": chat_id, "text": content, "PLAINTEXT_LEAK": True})
+    return SimpleNamespace(success=True)
+
+
+async def _plaintext_discord_send(self, chat_id, content, reply_to=None, metadata=None):
+    self._client.channels[int(chat_id)].sent.append(f"PLAINTEXT_LEAK:{content}")
+    return SimpleNamespace(success=True)
+
+
+class _FrozenSendMeta(type):
+    """A third-party class that refuses a new ``send`` loudly."""
+
+    def __setattr__(cls, name, value):
+        if name == "send":
+            raise TypeError("adapter class is immutable")
+        super().__setattr__(name, value)
+
+
+class _SilentlyFrozenSendMeta(type):
+    """A third-party class that swallows a new ``send`` without raising."""
+
+    def __setattr__(cls, name, value):
+        if name != "send":
+            super().__setattr__(name, value)
+
+
+@pytest.fixture
+def fake_registry(monkeypatch):
+    """A fake ``gateway.platform_registry`` with a fresh registry class.
+
+    Fresh adapter classes are built per test (``type(...)``) so a wrapper
+    installed by one test never leaks into the next.
+    """
+
+    class PlatformRegistry:
+        def __init__(self) -> None:
+            self.factories: dict[str, object] = {}
+            self.calls: list[str] = []
+
+        def create_adapter(self, name, config):
+            self.calls.append(name)
+            factory = self.factories.get(name)
+            return None if factory is None else factory(config)
+
+    original_create = PlatformRegistry.create_adapter
+    registry_module = SimpleNamespace(PlatformRegistry=PlatformRegistry, platform_registry=PlatformRegistry())
+    # Only the submodule is faked: install_registry_hook resolves it through
+    # sys.modules, while the real gateway.platforms.base still supplies SendResult.
+    monkeypatch.setitem(sys.modules, "gateway.platform_registry", registry_module)
+    monkeypatch.setattr(outbound, "_patched", set())
+    return SimpleNamespace(cls=PlatformRegistry, registry=registry_module.platform_registry, original=original_create)
+
+
+def _fresh_slack_class(**namespace):
+    return type("SlackAdapter", (FakeSlackAdapter,), {"send": _plaintext_slack_send, **namespace})
+
+
+def test_registry_hook_wraps_slack_adapter_before_any_inbound_message(fake_registry):
+    """The cron window: no inbound message, no live wrap, a bound channel.
+
+    The adapter the registry hands the gateway must already send ciphertext.
+    """
+    slack_cls = _fresh_slack_class()
+    fake_registry.registry.factories["slack"] = lambda config: slack_cls()
+    assert outbound.install_registry_hook() is True
+
+    adapter = fake_registry.registry.create_adapter("slack", SimpleNamespace(token=_REGISTRY_SECRET))
+
+    assert type(adapter) is slack_cls
+    assert slack_cls.send.__mordred_wrapped__ is True
+    assert "slack" in outbound._patched
+
+    _seed_master_key()
+    chat_id = "C-registry-cron-1"
+    chan_key = _bind_channel_key(chat_id)
+    report = "cron: nightly report before any inbound message"
+    res = asyncio.run(adapter.send(chat_id, report))
+
+    posts = adapter._client.posts
+    assert not any(p.get("PLAINTEXT_LEAK") for p in posts)
+    assert len(posts) == 1
+    assert report not in posts[0]["text"]
+    assert posts[0]["text"].startswith(crypto.ENC_PREFIX_V3)
+    assert _decrypt_v3_replies([posts[0]["text"]], chan_key, "slack", chat_id) == report
+    assert res.success is True
+
+
+def test_registry_hook_wraps_discord_adapter_at_creation(fake_registry):
+    discord_cls = type("DiscordAdapter", (FakeDiscordAdapter,), {"send": _plaintext_discord_send})
+    client = FakeDiscordClient()
+    channel = client.add_channel("912001")
+    fake_registry.registry.factories["discord"] = lambda config: discord_cls(client)
+    outbound.install_registry_hook()
+
+    adapter = fake_registry.registry.create_adapter("discord", SimpleNamespace())
+
+    assert discord_cls.send.__mordred_wrapped__ is True
+    _seed_master_key()
+    _bind_channel_key("912001", platform="discord")
+    asyncio.run(adapter.send("912001", "discord cron output"))
+    assert channel.sent
+    assert all(wire.startswith(crypto.ENC_PREFIX_V3) for wire in channel.sent)
+
+
+def test_registry_hook_is_idempotent(fake_registry):
+    slack_cls = _fresh_slack_class()
+    fake_registry.registry.factories["slack"] = lambda config: slack_cls()
+
+    assert outbound.install_registry_hook() is True
+    hooked = fake_registry.cls.create_adapter
+    assert outbound.install_registry_hook() is True
+
+    assert fake_registry.cls.create_adapter is hooked
+    assert hooked.__wrapped__ is fake_registry.original
+    assert hooked.__name__ == "create_adapter"
+    adapter = fake_registry.registry.create_adapter("slack", None)
+    assert fake_registry.registry.calls == ["slack"]
+    assert slack_cls.send.__mordred_wrapped__ is True
+    # A second adapter of the already-wrapped class is not wrapped again.
+    wrapped_send = slack_cls.send
+    assert fake_registry.registry.create_adapter("slack", None) is not adapter
+    assert slack_cls.send is wrapped_send
+
+
+def test_registry_hook_passes_other_platforms_and_none_through(fake_registry):
+    class TelegramAdapter:
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            return SimpleNamespace(success=True)
+
+    original_send = TelegramAdapter.send
+    telegram = TelegramAdapter()
+    fake_registry.registry.factories["telegram"] = lambda config: telegram
+    outbound.install_registry_hook()
+
+    assert fake_registry.registry.create_adapter("telegram", None) is telegram
+    assert TelegramAdapter.send is original_send
+    assert not getattr(TelegramAdapter.send, "__mordred_wrapped__", False)
+    assert "telegram" not in outbound._patched
+    # The original's "no adapter" result stays None for a guarded platform too.
+    assert fake_registry.registry.create_adapter("slack", None) is None
+
+
+@pytest.mark.parametrize("meta", [_FrozenSendMeta, _SilentlyFrozenSendMeta], ids=["raises", "silent"])
+def test_registry_hook_withholds_slack_or_discord_adapter_it_cannot_wrap(fake_registry, caplog, meta):
+    """An adapter that would send unwrapped is never handed to the gateway."""
+    for platform in ("slack", "discord"):
+        unwrappable = meta(
+            "UnwrappableAdapter",
+            (),
+            {"send": _plaintext_slack_send, "__init__": lambda self: setattr(self, "_app", object())},
+        )
+        fake_registry.registry.factories[platform] = lambda config, cls=unwrappable: cls()
+    outbound.install_registry_hook()
+
+    with caplog.at_level("ERROR", logger=outbound.__name__):
+        slack = fake_registry.registry.create_adapter("slack", SimpleNamespace(token=_REGISTRY_SECRET))
+        discord = fake_registry.registry.create_adapter("discord", SimpleNamespace(token=_REGISTRY_SECRET))
+
+    assert slack is None
+    assert discord is None
+    assert fake_registry.registry.calls == ["slack", "discord"]
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert [r.getMessage().split(" adapter:")[0] for r in errors] == [
+        "mordred_e2e: refusing the slack",
+        "mordred_e2e: refusing the discord",
+    ]
+    assert _REGISTRY_SECRET not in caplog.text
+    assert "immutable" not in caplog.text  # exception text is never logged
+
+
+def test_registry_hook_reports_unavailable_registry(monkeypatch):
+    monkeypatch.setitem(sys.modules, "gateway.platform_registry", None)
+    assert outbound.install_registry_hook() is False
+
+
+def test_register_installs_registry_hook_before_static_fallback(fake_registry, monkeypatch):
+    """``register`` runs during plugin discovery, before the gateway creates
+    any adapter; the hook must be in place by the time it returns."""
+    from mordred_hermes.extension import standalone_outbound
+    from mordred_hermes.extension.telegram import hermes_tools
+
+    monkeypatch.setattr(standalone_outbound, "install_standalone_guard", lambda: None)
+    monkeypatch.setattr(hermes_tools, "register_tools", lambda ctx: None)
+    order: list[bool] = []
+
+    def static_fallback():
+        order.append(getattr(fake_registry.cls.create_adapter, "__mordred_wrapped__", False))
+        return []
+
+    monkeypatch.setattr(outbound, "install_outbound_patches", static_fallback)
+    hooks: list[str] = []
+    gateway_plugin.register(SimpleNamespace(register_hook=lambda name, fn: hooks.append(name)))
+
+    assert order == [True]
+    assert "pre_gateway_dispatch" in hooks
+    slack_cls = _fresh_slack_class()
+    fake_registry.registry.factories["slack"] = lambda config: slack_cls()
+    assert type(fake_registry.registry.create_adapter("slack", None)) is slack_cls
+    assert slack_cls.send.__mordred_wrapped__ is True
+
+
+def test_registry_hook_against_the_installed_hermes_registry(monkeypatch):
+    """Signature check against the real ``PlatformRegistry`` (hermes-agent).
+
+    Hermes' ``GatewayRunner._create_adapter`` calls the module singleton's
+    ``create_adapter(platform.value, config)``; the hook must sit on that path.
+    """
+    registry_module = pytest.importorskip("gateway.platform_registry")
+    registry_cls = registry_module.PlatformRegistry
+    # Restore the real method afterwards: the hook patches the class itself.
+    monkeypatch.setattr(registry_cls, "create_adapter", registry_cls.create_adapter)
+    monkeypatch.setattr(outbound, "_patched", set())
+    slack_cls = _fresh_slack_class()
+    registry = registry_cls()
+    registry.register(
+        registry_module.PlatformEntry(
+            name="slack", label="Slack", adapter_factory=lambda config: slack_cls(), check_fn=lambda: True
+        )
+    )
+
+    assert outbound.install_registry_hook() is True
+    assert registry_module.platform_registry.create_adapter.__func__ is registry_cls.create_adapter
+    adapter = registry.create_adapter("slack", SimpleNamespace())
+
+    assert type(adapter) is slack_cls
+    assert slack_cls.send.__mordred_wrapped__ is True

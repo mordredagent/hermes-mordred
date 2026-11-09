@@ -18,6 +18,23 @@ thread context to inherit — cron output, proactive notifications, agent-initia
 messages — which otherwise left in cleartext into a ciphertext-only channel.
 Mordred's own needs-key notice is the sole exception (``e2e.control_notice_send``).
 
+The wrapper reaches the live adapter class through three layers, strongest
+first:
+
+1. :func:`install_registry_hook` (at plugin registration) wraps
+   ``gateway.platform_registry.PlatformRegistry.create_adapter``. Hermes runs
+   plugin discovery before the gateway creates any adapter, so every Slack /
+   Discord adapter the registry builds has a wrapped class before it connects —
+   including the window before the first inbound message, when cron delivery
+   already sends through the live adapter. A Slack/Discord adapter whose class
+   cannot be wrapped is withheld (``None``) rather than run unprotected.
+2. :func:`wrap_live_adapters` (on every inbound ``pre_gateway_dispatch``) wraps
+   the classes of the adapters the gateway actually holds, for builds whose
+   gateway bypasses the registry.
+3. :func:`install_outbound_patches` (at plugin registration) wraps statically
+   importable adapter modules; a compatibility fallback only, since Hermes 0.19
+   loads the platform plugins under a synthetic ``hermes_plugins.*`` package.
+
 This module covers the live adapter's ``send`` only. The required common-seam
 standalone tool/cron guard is installed by :mod:`standalone_outbound`. Edits and
 other live-adapter methods remain outside these wrappers (SPEC.md).
@@ -26,6 +43,7 @@ other live-adapter methods remain outside these wrappers (SPEC.md).
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 from typing import Any
 
@@ -277,6 +295,108 @@ def live_adapter_for(gateway: Any, platform: str, profile: str | None = None) ->
     return None
 
 
+def _wrap_adapter_class(name: str, adapter: Any) -> bool:
+    """Wrap ``type(adapter).send`` when ``name`` is a mandatory-E2E platform.
+
+    Shared by the create-time registry hook and the dispatch-time live wrap so
+    both keep ``_patched`` consistent. Returns ``True`` only when this call
+    installed the wrapper; ``False`` for other platforms, a ``None`` adapter,
+    or a class that is already wrapped (or has no ``send``). Wrapping errors
+    propagate: each caller decides how to fail closed.
+    """
+    wrap = _WRAPPERS.get(name)
+    if wrap is None or adapter is None:
+        return False
+    cls = type(adapter)
+    send = getattr(cls, "send", None)
+    if send is None or getattr(send, "__mordred_wrapped__", False):
+        _patched.add(name)
+        return False
+    wrap(cls)
+    _patched.add(name)
+    logger.info("mordred_e2e: wrapped %s.%s.send for outbound E2E", cls.__module__, cls.__name__)
+    return True
+
+
+def _guard_created_adapter(name: Any, adapter: Any) -> Any:
+    """Return ``adapter`` with a wrapped ``send``, or ``None`` (fail closed).
+
+    Other platforms and a ``None`` result pass through untouched. A Slack or
+    Discord adapter whose class cannot be wrapped is withheld: the gateway then
+    treats the platform as "adapter creation failed" instead of connecting an
+    adapter that would send cleartext into key-bound channels. Logs carry only
+    the platform name — never the config, tokens or exception text.
+    """
+    if adapter is None:
+        return None
+    try:
+        platform = str(name or "").lower()
+    except Exception:
+        logger.error("mordred_e2e: refusing an adapter with an unreadable platform name")
+        return None
+    if platform not in _WRAPPERS:
+        return adapter
+    try:
+        _wrap_adapter_class(platform, adapter)
+        send = getattr(type(adapter), "send", None)
+        wrapped = bool(send is not None and getattr(send, "__mordred_wrapped__", False))
+        failure = "send still unwrapped"
+    except Exception as exc:
+        wrapped = False
+        failure = type(exc).__name__
+    if not wrapped:
+        logger.error(
+            "mordred_e2e: refusing the %s adapter: outbound E2E wrapper could not be installed (%s)",
+            platform,
+            failure,
+        )
+        return None
+    return adapter
+
+
+def install_registry_hook() -> bool:
+    """Wrap Slack/Discord adapters as the gateway's platform registry creates them.
+
+    Hermes builds plugin platforms through the module singleton
+    ``gateway.platform_registry.platform_registry.create_adapter`` and runs
+    plugin discovery (hence this plugin's ``register``) before the first
+    ``_create_adapter`` call, so patching the class method here guarantees
+    every Slack/Discord adapter instance has a wrapped class before it
+    connects. Without it the class was only wrapped on the first inbound
+    message, and cron output delivered through the live adapter before then
+    went out in cleartext.
+
+    Returns ``False`` when the registry is not importable (non-gateway
+    processes, tests without Hermes) or has no ``create_adapter``. Idempotent:
+    the marker lives on the patched function itself, so a re-imported registry
+    module is hooked afresh while a repeated call never double-wraps.
+    """
+    import importlib
+
+    try:
+        # import_module (not ``import a.b``) so the sys.modules entry wins over
+        # a stale ``gateway.platform_registry`` attribute on the package.
+        registry_module = importlib.import_module("gateway.platform_registry")
+    except ImportError:
+        return False
+    registry_cls = getattr(registry_module, "PlatformRegistry", None)
+    orig_create = getattr(registry_cls, "create_adapter", None)
+    if registry_cls is None or orig_create is None:
+        return False
+    if getattr(orig_create, "__mordred_wrapped__", False):
+        return True
+
+    @functools.wraps(orig_create)
+    def create_adapter(self: Any, name: Any, config: Any, *args: Any, **kwargs: Any) -> Any:
+        adapter = orig_create(self, name, config, *args, **kwargs)
+        return _guard_created_adapter(name, adapter)
+
+    create_adapter.__mordred_wrapped__ = True  # type: ignore[attr-defined]
+    registry_cls.create_adapter = create_adapter
+    logger.debug("mordred_e2e: platform registry hook installed for outbound E2E")
+    return True
+
+
 def wrap_live_adapters(gateway: Any, profile: str | None = None) -> list[str]:
     """Wrap the ``send`` of the adapter classes the gateway ACTUALLY built.
 
@@ -298,18 +418,8 @@ def wrap_live_adapters(gateway: Any, profile: str | None = None) -> list[str]:
     for plat, adapter in _live_adapter_items(gateway, profile):
         try:
             name = str(getattr(plat, "value", plat) or "").lower()
-            wrap = _WRAPPERS.get(name)
-            if wrap is None or adapter is None:
-                continue
-            cls = type(adapter)
-            send = getattr(cls, "send", None)
-            if send is None or getattr(send, "__mordred_wrapped__", False):
-                _patched.add(name)
-                continue
-            wrap(cls)
-            _patched.add(name)
-            installed.append(name)
-            logger.info("mordred_e2e: wrapped %s.%s.send for outbound E2E", cls.__module__, cls.__name__)
+            if _wrap_adapter_class(name, adapter):
+                installed.append(name)
         except BaseException:
             # Adapter objects and classes come from third-party plugins. Treat
             # even hostile descriptors/metaclasses as an unwrappable adapter;
@@ -336,11 +446,14 @@ def live_adapter_is_wrapped(gateway: Any, platform: str, profile: str | None = N
 
 
 def install_outbound_patches() -> list[str]:
-    """Best-effort wrap of statically importable adapters (pre-gateway fallback).
+    """Best-effort wrap of statically importable adapters (compatibility fallback).
 
-    Kept for builds that DO expose the adapters as ordinary modules. The
-    authoritative path is :func:`wrap_live_adapters`, driven from the live
-    gateway once its adapters exist.
+    Kept for builds that DO expose the adapters as ordinary modules. Hermes
+    0.19 loads Slack/Discord as ``hermes_plugins.<slug>`` directory plugins, so
+    on such builds these imports reach a different class object than the one
+    the gateway instantiates. The authoritative paths are
+    :func:`install_registry_hook` (every adapter the registry creates) and
+    :func:`wrap_live_adapters` (the adapters a live gateway holds).
     """
     import importlib
 
