@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import sqlite3 as stdlib_sqlite3
 import subprocess
@@ -885,3 +886,27 @@ def test_retained_publication_reproves_the_source_before_any_rename(
     assert not _is_plaintext(path)
     with closing(_keyed(path)) as conn:
         assert conn.execute("SELECT count(*) FROM messages").fetchone() == (len(_BASE_ROWS),)
+
+
+def test_a_failure_before_the_reservation_is_journaled_discards_the_staging(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unrecorded staging inode would make resume() refuse forever."""
+    real_fsync = _migrate._fsync_file
+    calls: list[Path] = []
+
+    def enospc_once(path: Path) -> None:
+        calls.append(path)
+        if len(calls) == 1:
+            raise OSError(errno.ENOSPC, "no space")
+        real_fsync(path)
+
+    monkeypatch.setattr(_migrate, "_fsync_file", enospc_once)
+    with pytest.raises(OSError, match="no space"):
+        _migrate.migrate(home, KEY, arm=dbcrypt.arm, holders_of=_no_holders)
+    assert calls[0].name.endswith(_migrate.PREPARED_SUFFIX)
+    assert not list(home.rglob(f"*{_migrate.PREPARED_SUFFIX}"))
+    assert all(entry["prepared_identity"] is None for entry in _journal_files(home))
+    assert _migrate.resume(home, holders_of=_no_holders) is True
+    assert not _migrate.journal_path(home).exists()
+    assert not _is_plaintext(home / "state.db")

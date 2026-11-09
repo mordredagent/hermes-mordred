@@ -695,11 +695,21 @@ def _restore_copy(
     staged = Path(str(destination) + _migrate.PREPARED_SUFFIX)
     identity = _migrate._file_identity(destination)
     _migrate._reserve(staged)
-    before = _migrate._file_identity(source)
-    _offline_copy(source, staged, key, root)
-    _migrate._fsync_file(staged)
-    if _migrate._file_identity(source) != before or _migrate._schema(staged, key, root=root) != entry["verification"]:
-        raise DatabaseRefused("backup changed during restore")
+    reserved = _migrate._file_identity(staged)
+    try:
+        before = _migrate._file_identity(source)
+        _offline_copy(source, staged, key, root)
+        _migrate._fsync_file(staged)
+        if (
+            _migrate._file_identity(source) != before
+            or _migrate._schema(staged, key, root=root) != entry["verification"]
+        ):
+            raise DatabaseRefused("backup changed during restore")
+    except BaseException:
+        # No journal owns the staging yet: an orphan would refuse every later
+        # restore and conversion at _inventory with no command to clear it.
+        _migrate._discard_unjournaled_staging(staged, reserved)
+        raise
     transaction = secrets.token_hex(16)
     data = {
         "version": 2,

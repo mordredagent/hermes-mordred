@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -47,6 +48,7 @@ from ._marker import LegacyMarker, Marker, read_marker, write_marker
 from ._policy import DENY_DIRS, in_scope, looks_like_database_name
 from ._shim import PLAINTEXT_HEADER_BYTES, apply_key, wrong_key_errors
 
+_LOG = logging.getLogger("mordred.dbcrypt")
 PENDING_SUBPATH: Final = ("mordred", "db-encryption.pending")
 DECRYPT_PENDING_SUBPATH: Final = ("mordred", "db-decryption.pending")
 JOURNAL_SUBPATH: Final = ("mordred", "db-encryption.journal.json")
@@ -658,6 +660,36 @@ def _fsync_file(path: Path) -> None:
     _sync_directory(path.parent)
 
 
+def _discard_unjournaled_staging(staged: Path, owned: list[int]) -> None:
+    """Delete only the staging inode we just reserved (and its sidecars) after a failure.
+
+    Before a journal records the reservation nothing else owns the file, and an
+    orphan refuses every later conversion and restore at ``_inventory`` with no
+    command to clear it. A replaced or unverifiable file is not ours and stays;
+    any doubt stops here and the caller's original failure always propagates.
+    The POSIX branch mirrors ``_reserve_journal_staging``: a database directory
+    may be a historical 0755 one that the private-directory API refuses.
+    """
+    try:
+        if _file_identity(staged) != owned:
+            raise MigrationError("reserved staging identity changed")
+        _cleanup_sidecars(staged)  # own transaction on Windows; must precede ours
+        if os.name == "nt":
+            with open_private_directory(staged.parent) as directory, directory.transaction() as tx:
+                observed = tx.stat(staged.name)
+                if _file_identity(staged) != owned:
+                    raise MigrationError("reserved staging identity changed")
+                tx.delete_file(staged.name, expected_identity=observed.identity)
+        else:
+            if _file_identity(staged) != owned:
+                raise MigrationError("reserved staging identity changed")
+            staged.unlink()
+            _sync_directory(staged.parent)
+    except Exception:
+        # Content-free: no path or exception text reaches the log.
+        _LOG.warning("staging cleanup stopped; a prepared database file may remain beside its database")
+
+
 def _put_json(root: Path, name: str, value: Any) -> None:
     data = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode() + b"\n"
     with open_private_directory(root / "mordred") as directory, directory.transaction() as tx:
@@ -874,10 +906,17 @@ def _reserve_journal_staging(root: Path, data: dict[str, Any], entry: dict[str, 
             staged.unlink()
             _sync_directory(staged.parent)
     _reserve(staged)
-    if os.name != "nt":
-        os.chmod(staged, stat.S_IMODE(path.stat().st_mode))
-    entry["prepared_identity"] = _file_identity(staged)
-    _fsync_file(staged)
+    owned = _file_identity(staged)
+    try:
+        if os.name != "nt":
+            os.chmod(staged, stat.S_IMODE(path.stat().st_mode))
+            owned = _file_identity(staged)
+        entry["prepared_identity"] = owned
+        _fsync_file(staged)
+    except BaseException:
+        # The journal does not record this inode yet; resume would refuse it.
+        _discard_unjournaled_staging(staged, owned)
+        raise
     # Reserve ownership must reach the journal BEFORE any export writes.
     # A crash before this save leaves an unrecorded inode and refuses.
     _save_journal(root, data, "reserved")
