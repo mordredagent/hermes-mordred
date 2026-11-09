@@ -687,7 +687,10 @@ def _discard_unjournaled_staging(staged: Path, owned: list[int]) -> None:
             _sync_directory(staged.parent)
     except Exception:
         # Content-free: no path or exception text reaches the log.
-        _LOG.warning("staging cleanup stopped; a prepared database file may remain beside its database")
+        _LOG.warning(
+            "staging cleanup stopped; a prepared database file may remain beside its database. "
+            "Remove the stale .mordred-enc file beside the database by hand before retrying"
+        )
 
 
 def _put_json(root: Path, name: str, value: Any) -> None:

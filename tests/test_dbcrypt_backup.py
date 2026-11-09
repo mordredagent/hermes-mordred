@@ -1471,3 +1471,26 @@ def test_restore_failure_never_deletes_a_replaced_staging_file(native_root, monk
         assert "staging cleanup stopped" in caplog.text
         with pytest.raises(_migrate.MigrationError, match="orphan prepared database"):
             _migrate._inventory(root)
+
+
+def test_restore_journal_binding_failure_discards_staging(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, source, backup = _registered_backup(native_root, monkeypatch)
+    staged = _restore_staging(source)
+
+    def unbindable(_root):
+        # e.g. a group-writable or hard-linked database elsewhere under the root
+        raise DatabaseRefused("database must be a checked regular owned file")
+
+    with acquire_exclusive(root) as lease:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_migrate, "_inventory_binding", unbindable)
+            with pytest.raises(DatabaseRefused, match="checked regular owned file"):
+                _backup.restore_database(backup, source, lease=lease)
+        assert not staged.exists()
+        assert not list(source.parent.glob(staged.name + "-*"))
+        assert not _migrate.journal_path(root).exists()
+        _migrate._inventory(root)
+        _backup.restore_database(backup, source, lease=lease)
+    assert not staged.exists()

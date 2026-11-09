@@ -705,33 +705,34 @@ def _restore_copy(
             or _migrate._schema(staged, key, root=root) != entry["verification"]
         ):
             raise DatabaseRefused("backup changed during restore")
+        transaction = secrets.token_hex(16)
+        data = {
+            "version": 2,
+            "root": asdict(lease.root),
+            "snapshot": asdict(snapshot),
+            "transaction": transaction,
+            "publication": "retained" if _migrate._two_step_publication() else "replace",
+            "inventory": _migrate._inventory_binding(root),
+            "direction": "encrypt",
+            "files": [
+                {
+                    "relative": str(destination.relative_to(root)),
+                    "prepared": str(staged.relative_to(root)),
+                    "retained": str(destination.relative_to(root)) + _migrate.RETAINED_SUFFIX + transaction,
+                    "source_identity": identity,
+                    "source_revision": _migrate._revision(destination),
+                    "prepared_identity": _migrate._file_identity(staged),
+                    "verification": entry["verification"],
+                    "phase": "verified",
+                }
+            ],
+        }
     except BaseException:
-        # No journal owns the staging yet: an orphan would refuse every later
-        # restore and conversion at _inventory with no command to clear it.
+        # No journal owns the staging until _save_journal: an orphan would refuse
+        # every later restore and conversion at _inventory with no command to
+        # clear it. An uncertain journal commit, by contrast, must keep the file.
         _migrate._discard_unjournaled_staging(staged, reserved)
         raise
-    transaction = secrets.token_hex(16)
-    data = {
-        "version": 2,
-        "root": asdict(lease.root),
-        "snapshot": asdict(snapshot),
-        "transaction": transaction,
-        "publication": "retained" if _migrate._two_step_publication() else "replace",
-        "inventory": _migrate._inventory_binding(root),
-        "direction": "encrypt",
-        "files": [
-            {
-                "relative": str(destination.relative_to(root)),
-                "prepared": str(staged.relative_to(root)),
-                "retained": str(destination.relative_to(root)) + _migrate.RETAINED_SUFFIX + transaction,
-                "source_identity": identity,
-                "source_revision": _migrate._revision(destination),
-                "prepared_identity": _migrate._file_identity(staged),
-                "verification": entry["verification"],
-                "phase": "verified",
-            }
-        ],
-    }
     _migrate._save_journal(root, data, "verified")
     _migrate._finish(root, data, key, snapshot, lease, None, None)
 
