@@ -1468,8 +1468,11 @@ def test_default_telegram_forget_proves_local_completion_before_uninstall(
     vault.store(value())
     ctx.telegram_forget = None
     ctx.prompt_io = _TypedPrompt(uninstall_cli.PURGE_PHRASE)
-    monkeypatch.setattr(telegram_cli, "_secret_store", lambda: vault)
-    monkeypatch.setattr(telegram_cli.telegram_migrate_cli, "forget_import_rows", lambda current: None)
+    monkeypatch.setattr(telegram_cli, "_secret_store", lambda: pytest.fail("the root-only default store was used"))
+    monkeypatch.setattr(
+        uninstall_cli, "_telegram_store", lambda home: vault if home == ctx.home else pytest.fail(str(home))
+    )
+    monkeypatch.setattr(telegram_cli.telegram_migrate_cli, "forget_import_rows", lambda current, **_: None)
     events = []
     ctx.keyvault_reset = lambda _home: events.append("reset") or 0
     native.fail_delete = native_failure
@@ -1498,6 +1501,109 @@ def test_pending_telegram_forget_journal_is_retained_configuration(plain_install
     (ctx.home / "mordred/telegram-forget.json").write_text("retained interrupted cleanup")
     plan = uninstall_cli.build_plan(ctx, UninstallOptions(yes=True, purge_data=True))
     assert plan.telegram_configured
+
+
+def test_purge_revokes_each_profile_telegram_session_with_its_own_home(plain_install, monkeypatch):
+    """The default collaborator is bound to every purge target, not to the root home."""
+    ctx, runner = plain_install
+    ctx.platform = "darwin"
+    profile = ctx.home / "profiles/work"
+    for home in (ctx.home, profile):
+        sealed = home / "mordred/telegram/credentials.sealed"
+        sealed.parent.mkdir(parents=True)
+        sealed.write_bytes(b"sealed Telegram session")
+    ctx.telegram_forget = None
+    ctx.keyvault_reset = lambda _home: 0
+    ctx.prompt_io = _TypedPrompt(uninstall_cli.PURGE_PHRASE)
+    calls = []
+    monkeypatch.setattr(uninstall_cli, "_default_telegram_forget", lambda home: calls.append(home) or 0)
+    assert run_uninstall(ctx, UninstallOptions(yes=True, purge_data=True)) == 0
+    assert calls == [ctx.home, profile]
+    assert runner.uninstalls
+
+
+def test_default_telegram_forget_binds_the_store_to_the_given_home(tmp_path, monkeypatch):
+    from mordred_hermes.extension.telegram.tee import TeeSecretStore
+    from mordred_hermes.wizard import _windows_telegram, telegram_cli
+
+    profile = tmp_path / "hermes/profiles/work"
+    seen = {}
+
+    def logout(**kwargs):
+        seen.update(kwargs)
+        return telegram_cli._TelegramLogoutOutcome(local_complete=True)
+
+    monkeypatch.setattr(_windows_telegram, "routed", lambda: False)
+    monkeypatch.setattr(telegram_cli, "_telegram_logout_result", logout)
+    outcome = uninstall_cli._default_telegram_forget(profile)
+    assert outcome == telegram_cli._TelegramLogoutOutcome(local_complete=True)
+    assert seen["forget"] is True and seen["force"] is True
+    store = seen["store"]
+    assert type(store) is TeeSecretStore
+    assert store._root == profile / "mordred/telegram"
+
+
+def test_profile_telegram_forget_revokes_the_profile_session_and_its_rows(tmp_path, monkeypatch, capsys):
+    """A profile-bound store forgets that profile's credentials, rows and remote session."""
+    from mordred_hermes.wizard import telegram_cli
+    from tests.test_posix_telegram_custody import native_store, value
+
+    root = tmp_path.resolve() / "hermes"
+    profile = root / "profiles/work"
+    profile.mkdir(parents=True, mode=0o700)
+    vault, _native = native_store(profile)
+    vault.ensure_key()
+    vault.store(value())
+    rows, revoked = [], []
+    monkeypatch.setattr(
+        telegram_cli.telegram_migrate_cli,
+        "forget_import_rows",
+        lambda current, *, home=None: rows.append(home),
+    )
+    monkeypatch.setattr(
+        telegram_cli, "_revoke_stored", lambda current, factory: revoked.append(current.session) or False
+    )
+    outcome = telegram_cli._telegram_logout_result(forget=True, force=True, store=vault)
+    assert outcome.local_complete and outcome.exit_code == 0
+    assert rows == [profile]
+    assert revoked == ["PRIVATE-SESSION"]
+    assert not vault.sealed_path.exists()
+    assert "not configured" not in capsys.readouterr().out
+
+
+def test_forget_import_rows_reads_the_given_home_archive_and_database(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from mordred_hermes.extension.telegram import history
+    from mordred_hermes.wizard import telegram_migrate_cli
+
+    profile = tmp_path / "hermes/profiles/work"
+    seen = []
+    monkeypatch.setattr(
+        history, "forget_imported_history", lambda archive, *, home: seen.append((archive._root, home)) or None
+    )
+    assert telegram_migrate_cli.forget_import_rows(SimpleNamespace(store_key=b"k" * 32), home=profile) is None
+    assert seen == [(profile / "mordred/telegram", profile)]
+
+
+def test_failed_restoration_does_not_name_memory_for_other_targets(plain_install, monkeypatch, capsys):
+    """`_restore_all` also fails on config/env; the stop line must not blame memory."""
+    from mordred_hermes.wizard import _uninstall_coordinator as coordinator
+
+    ctx, runner = plain_install
+    ctx.platform = "darwin"
+
+    def fail_config(*args, **kwargs):
+        uninstall_cli._term.emit_error("uninstall stopped: config could not be restored to plaintext (see above).")
+        return 1
+
+    monkeypatch.setattr(coordinator.cli, "_restore_all", fail_config)
+    assert run_uninstall(ctx, UninstallOptions(yes=True)) == 1
+    err = capsys.readouterr().err
+    assert "config could not be restored" in err
+    assert "an encrypted target could not be restored to plaintext; later cleanup stopped" in err
+    assert "memory could not be restored" not in err
+    assert runner.uninstalls == []
 
 
 def test_dependency_appearing_before_package_removal_retains_key_helper_and_package(installed, monkeypatch):

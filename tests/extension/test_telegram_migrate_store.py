@@ -705,11 +705,13 @@ def test_uninstall_forget_never_stops_on_rows_it_cannot_delete(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from mordred_hermes._core._home import hermes_home
     from mordred_hermes.wizard import uninstall_cli
 
     migrate.run_migration(archive, imports, commit=True)
     _refuse_the_store(monkeypatch)
-    outcome = uninstall_cli._default_telegram_forget()
+    monkeypatch.setattr(uninstall_cli, "_telegram_store", lambda home: sealed if home == hermes_home() else None)
+    outcome = uninstall_cli._default_telegram_forget(hermes_home())
     assert outcome.local_complete and outcome.rows_kept and outcome.exit_code == 1
     out, err = capsys.readouterr()
     assert f"{_FORGOTTEN} (--force)." in out
