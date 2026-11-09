@@ -301,8 +301,10 @@ def _wrap_adapter_class(name: str, adapter: Any) -> bool:
     Shared by the create-time registry hook and the dispatch-time live wrap so
     both keep ``_patched`` consistent. Returns ``True`` only when this call
     installed the wrapper; ``False`` for other platforms, a ``None`` adapter,
-    or a class that is already wrapped (or has no ``send``). Wrapping errors
-    propagate: each caller decides how to fail closed.
+    a class that is already wrapped (or has no ``send``), or a class that
+    silently kept its original ``send``. Only a verified wrap is recorded in
+    ``_patched`` or logged as installed. Wrapping errors propagate: each caller
+    decides how to fail closed.
     """
     wrap = _WRAPPERS.get(name)
     if wrap is None or adapter is None:
@@ -313,6 +315,8 @@ def _wrap_adapter_class(name: str, adapter: Any) -> bool:
         _patched.add(name)
         return False
     wrap(cls)
+    if not getattr(getattr(cls, "send", None), "__mordred_wrapped__", False):
+        return False
     _patched.add(name)
     logger.info("mordred_e2e: wrapped %s.%s.send for outbound E2E", cls.__module__, cls.__name__)
     return True
@@ -330,7 +334,9 @@ def _guard_created_adapter(name: Any, adapter: Any) -> Any:
     if adapter is None:
         return None
     try:
-        platform = str(name or "").lower()
+        # Same normalisation as wrap_live_adapters: a Platform enum member
+        # must not become "platform.slack" and slip past the guard.
+        platform = str(getattr(name, "value", name) or "").lower()
     except Exception:
         logger.error("mordred_e2e: refusing an adapter with an unreadable platform name")
         return None

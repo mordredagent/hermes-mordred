@@ -1923,7 +1923,7 @@ def test_registry_hook_withholds_slack_or_discord_adapter_it_cannot_wrap(fake_re
         fake_registry.registry.factories[platform] = lambda config, cls=unwrappable: cls()
     outbound.install_registry_hook()
 
-    with caplog.at_level("ERROR", logger=outbound.__name__):
+    with caplog.at_level("INFO", logger=outbound.__name__):
         slack = fake_registry.registry.create_adapter("slack", SimpleNamespace(token=_REGISTRY_SECRET))
         discord = fake_registry.registry.create_adapter("discord", SimpleNamespace(token=_REGISTRY_SECRET))
 
@@ -1937,6 +1937,22 @@ def test_registry_hook_withholds_slack_or_discord_adapter_it_cannot_wrap(fake_re
     ]
     assert _REGISTRY_SECRET not in caplog.text
     assert "immutable" not in caplog.text  # exception text is never logged
+    # A wrap that did not take effect is never recorded or announced.
+    assert not outbound._patched
+    assert not [r for r in caplog.records if "for outbound E2E" in r.getMessage()]
+
+
+def test_registry_hook_recognises_enum_platform_names(fake_registry):
+    """A ``Platform`` enum member normalises like ``wrap_live_adapters``."""
+    slack_cls = _fresh_slack_class()
+    fake_registry.registry.factories[FakePlatform.SLACK] = lambda config: slack_cls()
+    outbound.install_registry_hook()
+
+    adapter = fake_registry.registry.create_adapter(FakePlatform.SLACK, None)
+
+    assert type(adapter) is slack_cls
+    assert slack_cls.send.__mordred_wrapped__ is True
+    assert "slack" in outbound._patched
 
 
 def test_registry_hook_reports_unavailable_registry(monkeypatch):
