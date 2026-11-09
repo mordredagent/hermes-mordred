@@ -516,7 +516,10 @@ def _telegram_logout_result(
     from ..keyvault._telegram_custody import pending_telegram_forget
 
     secrets_store = store if store is not None else _secret_store()
-    if forget and type(secrets_store) is TeeSecretStore and pending_telegram_forget(secrets_store._home()):
+    # A forget acts on the home its store is bound to (the root or a profile),
+    # so the import rows are looked up in that same home's archive and database.
+    home = secrets_store._home() if forget and type(secrets_store) is TeeSecretStore else None
+    if home is not None and pending_telegram_forget(home):
         # Only a checked durable `deleted` record can resume. An intent refuses
         # here without another unwrap, missing-key inference or remote call.
         secrets_store.forget_from_snapshot((None, None))
@@ -530,7 +533,7 @@ def _telegram_logout_result(
         print("Telegram is not configured; nothing to do.")
         return _TelegramLogoutOutcome(local_complete=True)
     # SQL runs before archive/credential custody is acquired.
-    rows_kept = telegram_migrate_cli.forget_import_rows(current) if forget else None
+    rows_kept = telegram_migrate_cli.forget_import_rows(current, home=home) if forget else None
     if rows_kept is not None and not force:
         return _TelegramLogoutOutcome(
             local_complete=False, rows_kept=True, exit_code=telegram_migrate_cli.rows_not_deleted(rows_kept)

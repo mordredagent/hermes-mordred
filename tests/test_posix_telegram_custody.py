@@ -665,7 +665,7 @@ def test_public_cli_native_refusal_returns_integer_but_internal_result_propagate
     from mordred_hermes.wizard import telegram_cli
 
     vault, native = owned
-    monkeypatch.setattr(telegram_cli.telegram_migrate_cli, "forget_import_rows", lambda current: None)
+    monkeypatch.setattr(telegram_cli.telegram_migrate_cli, "forget_import_rows", lambda current, **_: None)
     native.fail_delete = True
     assert telegram_cli.telegram_logout(forget=True, store=vault) == 1
     assert vault.sealed_path.exists() and "PRIVATE-SESSION" not in capsys.readouterr().err
@@ -687,7 +687,7 @@ def test_custom_store_without_checked_forget_never_falls_back_to_deletes(monkeyp
         def delete_key(self):
             pytest.fail("unchecked key delete fallback")
 
-    monkeypatch.setattr(telegram_cli.telegram_migrate_cli, "forget_import_rows", lambda current: None)
+    monkeypatch.setattr(telegram_cli.telegram_migrate_cli, "forget_import_rows", lambda current, **_: None)
     assert telegram_cli.telegram_logout(forget=True, store=Unchecked()) == 1
     with pytest.raises(DatabaseRefused):
         telegram_cli._telegram_logout_result(forget=True, store=Unchecked())
