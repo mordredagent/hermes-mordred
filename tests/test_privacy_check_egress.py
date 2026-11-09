@@ -362,6 +362,31 @@ def test_authority_has_backslash_follows_the_browser_scheme_separator(url, ambig
         assert egress._host_blocked(url, ()) == "unparseable URL"
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://evil.example\t@localhost/x",
+        "ht\ttp://localhost/",
+        "http://localhost/%0a",
+        "http://localhost/%7F",
+        "http://localhost/\r\n",
+        "\x00http://localhost/",
+        " http://localhost/",
+        "http://localhost/ ",
+    ],
+)
+def test_control_characters_and_surrounding_whitespace_make_a_url_unparseable(url):
+    assert egress._ambiguous_url(url)
+    assert egress._prompt_host(url) == egress._UNPARSEABLE
+    assert egress._host_blocked(url, ()) == "unparseable URL"
+
+
+def test_percent_encoded_printable_characters_keep_the_host():
+    assert not egress._ambiguous_url("http://ok.example/x%20y")
+    assert egress._prompt_host("http://ok.example/x%20y") == "ok.example"
+    assert egress._host_blocked("http://ok.example/x%20y", ()) is None
+
+
 def test_backslash_in_authority_is_refused_at_every_restricted_level():
     args = {"action": "open", "url": _BACKSLASH_URL}
     for level in ("blocklist", "ask"):

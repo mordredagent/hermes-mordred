@@ -483,19 +483,36 @@ def _authority_has_backslash(url: str) -> bool:
     return "\\" in match["sep"] or "\\" in _AUTHORITY_END.split(match["rest"], maxsplit=1)[0]
 
 
+# An ASCII control character, raw or percent-encoded.
+_CONTROL_CHAR = re.compile(r"[\x00-\x1f\x7f]|%(?:[01][0-9a-f]|7f)", re.IGNORECASE)
+
+
+def _ambiguous_url(url: str) -> bool:
+    """Whether parsers may disagree on ``url``'s host, so none may be named or keyed.
+
+    True for a backslash in the scheme separator or authority
+    (:func:`_authority_has_backslash`), for any ASCII control character, raw
+    or percent-encoded (WHATWG parsers strip tab, LF and CR anywhere and
+    leading/trailing C0 controls; other clients differ), and for leading or
+    trailing whitespace (browsers strip it, :func:`urlsplit` and HTTP clients
+    may not).
+    """
+    return _authority_has_backslash(url) or _CONTROL_CHAR.search(url) is not None or url != url.strip()
+
+
 def _host_blocked(url: str, blocklist: tuple[str, ...]) -> str | None:
     """The blocklist entry (or reason) that refuses ``url``, or ``None``.
 
     Path entries (``discord.com/api/webhooks``) match with ``\\`` read as
     ``/`` too, which only widens what is refused. A URL whose host cannot be
-    determined the same way by every parser (:func:`_authority_has_backslash`)
-    is refused as unparseable.
+    determined the same way by every parser (:func:`_ambiguous_url`) is then
+    refused as unparseable.
     """
     lowered = url.replace("\\", "/").casefold()
     for entry in blocklist:
         if "/" in entry and entry in lowered:
             return entry
-    if _authority_has_backslash(url):
+    if _ambiguous_url(url):
         return "unparseable URL"
     try:
         host = (urlsplit(url if "://" in url else f"https://{url}").hostname or "").casefold()
@@ -519,10 +536,6 @@ def is_first_party_command(command: Any) -> bool:
 
 # A schemeless loopback target as Hermes's ``open_preview_tool`` recognises it.
 _LOCAL_HOST_TARGET = re.compile(r"(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?(?:/|\Z)", re.IGNORECASE)
-
-
-# An ASCII control character, raw or percent-encoded.
-_CONTROL_CHAR = re.compile(r"[\x00-\x1f\x7f]|%(?:[01][0-9a-f]|7f)", re.IGNORECASE)
 
 
 def _is_local_target(url: str) -> bool:
@@ -705,10 +718,11 @@ _UNPARSEABLE: Final = "an unparseable address"
 def _prompt_host(url: str) -> str:
     """The host an approval prompt names for ``url``; never the raw URL, which may carry credentials.
 
-    A backslash in the authority makes the host ambiguous between parsers
-    (:func:`_authority_has_backslash`), so such a URL is unparseable here.
+    A URL whose host parsers may read differently (:func:`_ambiguous_url`: a
+    backslash in the authority, a control character, surrounding whitespace)
+    is unparseable here.
     """
-    if _authority_has_backslash(url):
+    if _ambiguous_url(url):
         return _UNPARSEABLE
     try:
         host = urlsplit(url if "://" in url else f"https://{url}").hostname
