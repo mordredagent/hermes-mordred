@@ -15,6 +15,7 @@ import pytest
 from mordred_hermes.extension.telegram import client, history, secrets, service, store
 from mordred_hermes.imports.records import OwnerClass, Participant, ProvenanceQuality, SenderKind
 from mordred_hermes.imports.store import TELEGRAM_RETIRED_ACCOUNT, ImportRefused, ImportStore
+from mordred_hermes.keyvault import _storage as keyvault_storage
 
 OWNER = 7
 KEY = b"\x01" * 32
@@ -417,6 +418,19 @@ def test_failed_sync_publishes_nothing_and_does_not_advance_cursors(tmp_path, da
     assert imports.contains(["tg:11:6", "tg:11:7"]) == {"tg:11:6", "tg:11:7"}
     assert _conversations(imports)["tg:11"][:2] == ("7", 6)
     assert imports.conversations("telegram", str(OWNER))["tg:11"].sync_cursor == "7"
+
+
+def test_a_pending_keyvault_reset_surfaces_as_an_unavailable_import_store(tmp_path, darwin):
+    archive, imports = _archive(tmp_path), _import_store(tmp_path)
+    journal = keyvault_storage.reset_journal_path(tmp_path / "mordred" / "keyvault")
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_bytes(b"pending")  # any entry here fences the profile's writes
+    sink = history.select_sink(archive, archive.load_index(), home=tmp_path, opener=lambda _h: imports)
+    assert isinstance(sink, history.ImportSink)
+    with pytest.raises(store.StoreError) as caught:
+        sink.begin(store.ArchiveIndex(account_id=OWNER))
+    assert str(caught.value) == "import_store_unavailable"
+    assert sink.run_id is None and imports.get_meta(TELEGRAM_RETIRED_ACCOUNT) is None
 
 
 def test_history_compatibility_reads_delegate_to_public_store_api():

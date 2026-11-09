@@ -133,6 +133,7 @@ from ..activity._gate import (
     runtime_authority,
 )
 from ..activity.store import BUSY_TIMEOUT_S, _db_errors
+from ..keyvault._storage import KeyvaultResetInProgressError
 from . import _mail_reconcile, _schema
 from .records import (
     ConversationKind,
@@ -377,6 +378,8 @@ def _refusing() -> Iterator[None]:
     except ActivityRefused as exc:  # the gate's opener refused an unkeyed connection
         raise ImportRefused(exc.code) from None
     except DatabaseRefused:
+        raise ImportRefused("store_unavailable") from None
+    except KeyvaultResetInProgressError:  # a pending keyvault reset fences every write (an OSError, not SQLite's)
         raise ImportRefused("store_unavailable") from None
     except _db_errors() as exc:
         raise ImportRefused(_classify(exc)) from None
@@ -713,7 +716,8 @@ class ImportStore:
         bound = os.path.realpath(profile_home)
         from ..keyvault._reset_authority import check_reset_access
 
-        check_reset_access(Path(bound))
+        with _refusing():
+            check_reset_access(Path(bound))
         with self._transaction() as conn:
             meta = self._read_meta(conn)
             if meta is None:

@@ -25,12 +25,14 @@ from mordred_hermes.imports.records import (
     content_digest,
 )
 from mordred_hermes.imports.store import (
+    TELEGRAM_RETIRED_ACCOUNT,
     ImportRefused,
     ImportStore,
     WriteResult,
     open_import_store,
     open_import_store_readonly,
 )
+from mordred_hermes.keyvault import _storage as keyvault_storage
 from tests._activity_protection import native_root as native_root
 from tests._activity_protection import protected_runtime as protected_runtime
 
@@ -903,6 +905,35 @@ def test_opener_failures_become_content_free_refusals(tmp_path: Path, error: Bas
     assert caught.value.code == expected
     assert str(caught.value) == expected
     assert "import store" in caught.value.refusal.detail
+
+
+def _pend_reset(home: Path) -> None:
+    """Any entry at the reset journal path fences the profile (``assert_keyvault_active``)."""
+    journal = keyvault_storage.reset_journal_path(home / "mordred" / "keyvault")
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_bytes(b"pending")
+
+
+def test_a_pending_keyvault_reset_is_a_store_refusal(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    _pend_reset(tmp_path)
+
+    for call in (lambda: store.initialize(tmp_path), lambda: store.set_meta(TELEGRAM_RETIRED_ACCOUNT, "99")):
+        with pytest.raises(ImportRefused) as caught:
+            call()
+        assert caught.value.code == "store_unavailable"
+        assert caught.value.__cause__ is None and caught.value.__suppress_context__
+        assert str(tmp_path) not in str(caught.value) + caught.value.refusal.detail
+    assert store.get_meta(TELEGRAM_RETIRED_ACCOUNT) is None
+
+
+def test_a_pending_keyvault_reset_refuses_before_creating_a_store(tmp_path: Path) -> None:
+    _pend_reset(tmp_path)
+
+    with pytest.raises(ImportRefused) as caught:
+        ImportStore(tmp_path / "mordred.db", plain_opener).initialize(tmp_path)
+    assert caught.value.code == "store_unavailable"
+    assert not (tmp_path / "mordred.db").exists()
 
 
 # --- shared runtime protection (fake custody, real SQLCipher) -------------------------------------
