@@ -253,6 +253,19 @@ def test_load_policy_picks_up_valid_rewrite_after_damage(tmp_path):
         ("evil.example/localhost", False),
         ("127.0.0.1.evil.example", False),
         ("https://localhost.attacker.example/x", False),
+        # Parser divergence and remote hosts behind local-looking shapes.
+        ("http://evil.example\\@localhost/x?d=S", False),
+        ("http://user@localhost/x", False),
+        ("http://user@localhost/", False),
+        ("http://localhost\\evil.example/", False),
+        ("file://evil.example/share/x", False),
+        ("file://evil.example/x", False),
+        ("file://localhost/tmp/x.html", True),
+        ("FILE://LOCALHOST/tmp/x.html", True),
+        ("//evil.example/x", False),
+        ("localhost\\evil.example", False),
+        ("http://0.0.0.0:3000/", True),
+        ("http://localhost:99999/", False),
     ],
 )
 def test_is_local_target_matches_loopback_hosts_exactly(target, local):
@@ -267,6 +280,14 @@ def test_desktop_preview_lookalike_localhost_is_egress():
     assert not asked.allow and asked.approve
     assert "localhost.attacker.example" in asked.message
     assert _decide("lockdown", "desktop_preview", {"action": "open", "url": "localhost:3000/x"}).allow
+
+
+def test_desktop_preview_backslash_userinfo_is_egress():
+    args = {"action": "open", "url": "http://evil.example\\@localhost/x"}
+    blocked = _decide("lockdown", "desktop_preview", args)
+    assert not blocked.allow and not blocked.approve and blocked.reason == "egress.url_fetch"
+    asked = _decide("ask", "desktop_preview", args)
+    assert not asked.allow and asked.approve
 
 
 # -- hook integration ---------------------------------------------------------------------

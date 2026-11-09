@@ -487,20 +487,36 @@ _LOCAL_HOST_TARGET = re.compile(r"(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(
 
 
 def _is_local_target(url: str) -> bool:
-    """A file path or a loopback address (e.g. a local dev server)."""
+    """A file path or a loopback address (e.g. a local dev server).
+
+    Only shapes that ``urlsplit`` and a browser's URL parser read the same way
+    count as local. A backslash is rejected anywhere: browsers treat it as
+    ``/`` in http(s) URLs, so ``http://evil.example\\@localhost/`` loads
+    ``evil.example`` although ``urlsplit`` reports host ``localhost``. Userinfo
+    (``user@host``) is rejected for the same reason, a ``//host`` network-path
+    reference is a remote host, and a ``file`` URL is local only without a host
+    or with ``localhost`` (Windows opens ``file://host/share`` as a UNC path).
+    """
+    if "\\" in url:
+        return False
     if "://" not in url:
+        if url.startswith("//"):
+            return False
         # Hermes's preview tool passes paths through and turns any other bare
         # value into ``https://<value>``; only a loopback host (its own regex)
         # stays on this machine, so ``localhost.attacker.example`` is egress.
         return url.startswith(("/", "~", "./", "../")) or _LOCAL_HOST_TARGET.match(url) is not None
     try:
         parts = urlsplit(url)
+        parts.port  # noqa: B018 - raises ValueError on an invalid port
     except ValueError:
         return False
+    if "@" in parts.netloc:
+        return False
     if parts.scheme == "file":
-        return True
+        return parts.netloc.casefold() in {"", "localhost"}
     host = (parts.hostname or "").casefold()
-    return host in {"localhost", "127.0.0.1", "::1"}
+    return host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}  # noqa: S104 - a target, not a bind
 
 
 def _is_local(tool: str) -> bool:
