@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -166,7 +167,106 @@ def test_load_policy_reads_config_and_notices_changes(tmp_path):
     config.write_text("plugins:\n  mordred_privacy_check:\n    tool_egress:\n      level: blocklist\n  x: 1\n")
     assert egress.load_policy(config).level == "blocklist"
     config.write_text("plugins: [not: valid\n")
-    assert egress.load_policy(config).level in {"ask", "lockdown"}
+    assert egress.load_policy(config).level == "lockdown"
+
+
+_LOCKDOWN_CONFIG = "plugins:\n  mordred_privacy_check:\n    tool_egress:\n      level: lockdown\n"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "plugins: [not: valid\n",  # malformed YAML
+        "plugins:\n  - mordred_privacy_check\n",  # plugins is a list
+        "- plugins\n- mordred_privacy_check\n",  # top level is a list
+        "plugins:\n  mordred_privacy_check:\n    - tool_egress\n",  # section is a list
+        "plugins:\n",  # plugins present but null
+        "plugins:\n  mordred_privacy_check:\n",  # section present but null
+        "plugins:\n  mordred_privacy_check:\n    tool_egress: [lockdown]\n",  # tool_egress not a mapping
+    ],
+)
+def test_load_policy_fails_closed_on_damaged_config(tmp_path, text):
+    config = tmp_path / "config.yaml"
+    config.write_text(text)
+    assert egress.load_policy(config).level == "lockdown"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",  # empty document: configures nothing, like a missing file
+        "model:\n  default: m\n",  # no plugins
+        "plugins:\n  enabled: [mordred]\n",  # no privacy section
+        "plugins:\n  mordred_privacy_check:\n    policy: lenient\n",  # no tool_egress
+    ],
+)
+def test_load_policy_absent_settings_use_default(tmp_path, text):
+    config = tmp_path / "config.yaml"
+    config.write_text(text)
+    assert egress.load_policy(config).level == egress.DEFAULT_LEVEL
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), reason="needs POSIX non-root")
+def test_load_policy_fails_closed_on_unreadable_config_and_recovers(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(_LOCKDOWN_CONFIG.replace("lockdown", "off"))
+    assert egress.load_policy(config).level == "off"
+    config.write_text(_LOCKDOWN_CONFIG.replace("lockdown", "blocklist"))
+    config.chmod(0o000)
+    try:
+        assert egress.load_policy(config).level == "lockdown"
+    finally:
+        config.chmod(0o600)
+    # A valid rewrite (new size) invalidates the cached degraded policy.
+    config.write_text(_LOCKDOWN_CONFIG.replace("lockdown", "search"))
+    assert egress.load_policy(config).level == "search"
+
+
+def test_load_policy_picks_up_valid_rewrite_after_damage(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("- not a mapping\n")
+    assert egress.load_policy(config).level == "lockdown"
+    config.write_text(_LOCKDOWN_CONFIG.replace("lockdown", "blocklist"))
+    assert egress.load_policy(config).level == "blocklist"
+
+
+@pytest.mark.parametrize(
+    ("target", "local"),
+    [
+        ("localhost", True),
+        ("localhost:3000", True),
+        ("localhost/", True),
+        ("LOCALHOST:8080/x", True),
+        ("127.0.0.1:3000/x", True),
+        ("0.0.0.0:8000", True),
+        ("[::1]:80/", True),
+        ("/tmp/x.html", True),
+        ("./a.html", True),
+        ("../a.html", True),
+        ("~/x", True),
+        ("http://localhost:3000", True),
+        ("file:///tmp/x.html", True),
+        ("localhost.attacker.example/x", False),
+        ("localhostevil.com", False),
+        ("localhost.evil", False),
+        ("localhost:3000.evil.example", False),
+        ("evil.example/localhost", False),
+        ("127.0.0.1.evil.example", False),
+        ("https://localhost.attacker.example/x", False),
+    ],
+)
+def test_is_local_target_matches_loopback_hosts_exactly(target, local):
+    assert egress._is_local_target(target) is local
+
+
+def test_desktop_preview_lookalike_localhost_is_egress():
+    args = {"action": "open", "url": "localhost.attacker.example/x?d=S"}
+    blocked = _decide("lockdown", "desktop_preview", args)
+    assert not blocked.allow and not blocked.approve and blocked.reason == "egress.url_fetch"
+    asked = _decide("ask", "desktop_preview", args)
+    assert not asked.allow and asked.approve
+    assert "localhost.attacker.example" in asked.message
+    assert _decide("lockdown", "desktop_preview", {"action": "open", "url": "localhost:3000/x"}).allow
 
 
 # -- hook integration ---------------------------------------------------------------------

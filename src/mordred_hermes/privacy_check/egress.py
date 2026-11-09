@@ -70,7 +70,7 @@ Configuration (``config.yaml``)::
           blocked_tools: []        # extra tool names blocked below "off"
           taint: true              # lockdown after private data is read
 
-A missing section means ``search``; an unreadable or invalid one fails closed
+A missing section means ``ask``; an unreadable or invalid one fails closed
 to ``lockdown``.
 
 Prompt text. Hermes writes an approval prompt, and the denial that quotes it
@@ -363,10 +363,16 @@ _cache: dict[str, Any] = {}
 def load_policy(config_path: Path | None = None) -> EgressPolicy:
     """Read tool-egress settings; Windows refreshes the pair and propagates refusal.
 
-    POSIX retains the historical mtime cache and lockdown fallback.
+    POSIX keeps an mtime/size cache and fails closed: a file that exists but
+    cannot be read or parsed, a top-level document that is not a mapping, or a
+    ``plugins`` / ``mordred_privacy_check`` value that is present but not a
+    mapping all yield ``lockdown`` (the shape rules of
+    :func:`._checked_policy.read_checked_policy`). A missing file, an empty
+    document, or an absent ``plugins`` / section yields the default level. The
+    result is cached against the file's stamp, so a degraded (``lockdown``)
+    policy persists until the file's mtime or size changes.
     """
     from .._core._home import hermes_home
-    from .._core._yaml_io import load_plugin_section
 
     path = config_path or (hermes_home() / "config.yaml")
     if _platform == "nt":
@@ -384,13 +390,42 @@ def load_policy(config_path: Path | None = None) -> EgressPolicy:
         cached: EgressPolicy = _cache["policy"]
         return cached
     try:
-        section = load_plugin_section(path, "mordred_privacy_check")
+        policy = parse_policy(_read_egress_section(path))
     except Exception:
         policy = EgressPolicy(level="lockdown")
-    else:
-        policy = parse_policy(section.get("tool_egress") if isinstance(section, dict) else None)
     _cache.update(stamp=stamp, policy=policy)
     return policy
+
+
+def _read_egress_section(path: Path) -> Any:
+    """The raw ``plugins.mordred_privacy_check.tool_egress`` value (``None`` when absent).
+
+    Raises on a read or parse error and on a ``plugins`` / section value that
+    is present but not a mapping, so :func:`load_policy` fails closed. Unlike
+    :func:`mordred_hermes._core._yaml_io.load_yaml_mapping`, nothing here
+    collapses a damaged file to "no configuration".
+    """
+    from ruamel.yaml import YAML
+
+    from .._core._yaml_io import _parse_yaml
+
+    with path.open(encoding="utf-8") as f:
+        data = _parse_yaml(YAML(typ="safe", pure=True), f)
+    if data is None:
+        return None  # an empty document configures nothing, like a missing file
+    if not isinstance(data, dict):
+        raise ValueError("config YAML must contain a mapping")
+    if "plugins" not in data:
+        return None
+    plugins = data["plugins"]
+    if not isinstance(plugins, dict):
+        raise ValueError("plugins must be a mapping")
+    if "mordred_privacy_check" not in plugins:
+        return None
+    section = plugins["mordred_privacy_check"]
+    if not isinstance(section, dict):
+        raise ValueError("privacy section must be a mapping")
+    return section.get("tool_egress")
 
 
 # -- classification -------------------------------------------------------------------
@@ -447,10 +482,17 @@ def is_first_party_command(command: Any) -> bool:
     )
 
 
+# A schemeless loopback target as Hermes's ``open_preview_tool`` recognises it.
+_LOCAL_HOST_TARGET = re.compile(r"(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?(?:/|\Z)", re.IGNORECASE)
+
+
 def _is_local_target(url: str) -> bool:
     """A file path or a loopback address (e.g. a local dev server)."""
     if "://" not in url:
-        return url.startswith(("/", "~", "./", "../")) or url.casefold().startswith("localhost")
+        # Hermes's preview tool passes paths through and turns any other bare
+        # value into ``https://<value>``; only a loopback host (its own regex)
+        # stays on this machine, so ``localhost.attacker.example`` is egress.
+        return url.startswith(("/", "~", "./", "../")) or _LOCAL_HOST_TARGET.match(url) is not None
     try:
         parts = urlsplit(url)
     except ValueError:
