@@ -149,7 +149,7 @@ def test_reset_erases_all_accounts_in_profile_cipher_database(native_root):
 def test_pending_reset_blocks_import_writes(native_root):
     from mordred_hermes.dbcrypt._authority import Authority
     from mordred_hermes.dbcrypt._connection import open_protected
-    from mordred_hermes.imports.store import ImportStore
+    from mordred_hermes.imports.store import ImportRefused, ImportStore
 
     home = native_root[0]
     root = _build_keyvault(home, ["default"])
@@ -161,8 +161,12 @@ def test_pending_reset_blocks_import_writes(native_root):
         store.initialize(home)
         with _storage.keyvault_lifecycle_lock(root):
             _storage.write_reset_journal(root, b"pending")
-        with pytest.raises(Exception, match="reset"):
+        with pytest.raises(ImportRefused) as refused:
             store.set_meta("telegram.retired_account", "99")
+        assert refused.value.code == "store_unavailable"
+        with pytest.raises(ImportRefused) as refused:
+            store.initialize(home)
+        assert refused.value.code == "store_unavailable"
         assert store.get_meta("telegram.retired_account") is None
     finally:
         authority.close()
