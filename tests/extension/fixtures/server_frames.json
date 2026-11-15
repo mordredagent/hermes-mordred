@@ -189,5 +189,6 @@
       {"id": "telegram", "state": "off", "code": "not_logged_in"},
       {"id": "signing", "state": "ok", "code": null}
     ]
-  }
+  },
+  {"id": "rc1", "type": "recall_conversation_result", "ok": true, "content": "🔒ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"}
 ]

@@ -127,6 +127,8 @@ _EXTENSION_CAPABILITIES = [
     "recall_restore_v1",
     # ``recall_recommend``: memories for a search, picked and explained by a local model, streamed.
     "recall_recommend_v1",
+    # ``recall_conversation``: the whole conversation around a part, to read through.
+    "recall_conversation_v1",
     IMPORTS_CAPABILITY,
     # ``health``: each feature's state (ok / off / down) and reason code (:mod:`.health`).
     HEALTH_CAPABILITY,
@@ -628,6 +630,7 @@ class _Connection:
             "recall_query": self._on_recall_query,
             "recall_events": self._on_recall_events,
             "recall_open": self._on_recall_open,
+            "recall_conversation": self._on_recall_conversation,
             "recall_dismiss": self._on_recall_dismiss,
             "recall_restore": self._on_recall_restore,
             "recall_hidden": self._on_recall_hidden,
@@ -1260,6 +1263,25 @@ class _Connection:
         else:
             content = self._telegram_seal(ek, json.dumps({"parts": parts}, ensure_ascii=False))
             await self._send({"id": mid, "type": "recall_opened", "ok": True, "content": content})
+
+    async def _on_recall_conversation(self, msg: dict[str, Any]) -> None:
+        mid = msg.get("id")
+        ek = self._telegram_key()
+        if ek is None:
+            await self._send(
+                {"id": mid, "type": "recall_conversation_result", "ok": False, "error": "encryption_key_unavailable"}
+            )
+            return
+        part_uid = msg.get("part_uid")
+        if not isinstance(part_uid, str) or not _RECALL_UID_RE.fullmatch(part_uid):
+            await self._send({"id": mid, "type": "recall_conversation_result", "ok": False, "error": "invalid_request"})
+            return
+        found, error = await self._recall_call(lambda svc: svc.conversation(part_uid))
+        if error is not None:
+            await self._send({"id": mid, "type": "recall_conversation_result", "ok": False, "error": error})
+        else:
+            content = self._telegram_seal(ek, json.dumps(found, ensure_ascii=False))
+            await self._send({"id": mid, "type": "recall_conversation_result", "ok": True, "content": content})
 
     async def _on_recall_dismiss(self, msg: dict[str, Any]) -> None:
         mid = msg.get("id")

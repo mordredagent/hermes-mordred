@@ -142,3 +142,31 @@ def test_word_search_ands_every_word_as_typed(store: ImportStore) -> None:
 def test_word_search_of_nothing_is_empty(store: ImportStore) -> None:
     result = RecallIndex(store).search_words(" 　 ", now=NOW)
     assert (result.cards, result.confidence, result.derived.queries) == ([], "none", ())
+
+
+def test_a_conversation_is_read_whole_around_its_part(store: ImportStore) -> None:
+    _commit(
+        store,
+        mail_conv(),
+        [
+            _mail("m2@example.com", "二通目、領収書は来週まとめます。", sent_at=SENT_AT + 60),
+            _mail("m3@example.com", "三通目、了解しました。", sent_at=SENT_AT + 120),
+        ],
+    )
+    index = RecallIndex(store)
+    anchor = next(c for c in index.search("領収書", now=NOW).cards if c.conv_uid == MAIL_CONV_UID)
+    whole = index.conversation(anchor.part_uid, max_chars=10_000)
+    assert [p["text"][:3] for p in whole["parts"]] == ["経費精", "二通目", "三通目"]
+    assert [p["anchor"] for p in whole["parts"]] == [False, True, False]
+    assert (whole["omitted_before"], whole["omitted_after"]) == (0, 0)
+
+    # Too long for the budget: the parts nearest the match are kept, and the rest counted.
+    cut = index.conversation(anchor.part_uid, max_chars=len("二通目、領収書は来週まとめます。") + 12)
+    assert [p["anchor"] for p in cut["parts"]] == [True, False]
+    assert (cut["omitted_before"], cut["omitted_after"]) == (1, 0)
+
+
+def test_a_telegram_conversation_is_never_read(store: ImportStore) -> None:
+    tg = next(c for c in RecallIndex(store).search("前倒し", now=NOW).cards if c.conv_uid == TG_CONV_UID)
+    assert RecallIndex(store).conversation(tg.part_uid, max_chars=10_000)["parts"] == []
+    assert RecallIndex(store).conversation("tg:-1:999#a", max_chars=10_000)["parts"] == []

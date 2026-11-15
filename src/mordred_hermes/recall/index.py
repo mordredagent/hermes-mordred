@@ -46,6 +46,16 @@ JOIN import_runs r ON r.run_id = m.run_id
 WHERE r.state = 'committed' AND p.part_uid = ?
 """
 
+#: A part's conversation and its source (a conversation view leaves Telegram out, as search does).
+_CONVERSATION_ANCHOR_SQL = """
+SELECT m.conv_uid, c.source
+FROM import_parts p
+JOIN import_messages m ON m.source_uid = p.source_uid
+JOIN import_conversations c ON c.conv_uid = m.conv_uid
+JOIN import_runs r ON r.run_id = m.run_id
+WHERE r.state = 'committed' AND p.part_uid = ?
+"""
+
 _OPEN_SQL = """
 SELECT p.part_uid, p.text, p.author_name, p.author_owner_class, m.sent_at, m.message_id
 FROM import_parts p
@@ -246,6 +256,61 @@ class RecallIndex:
             }
             for row in window
         ]
+
+    def conversation(self, part_uid: str, *, max_chars: int) -> dict[str, Any]:
+        """The whole conversation ``part_uid`` belongs to, in order, with ``part_uid`` marked.
+
+        A conversation longer than ``max_chars`` of text is cut to the parts
+        around ``part_uid`` that fit; ``omitted_before`` / ``omitted_after``
+        count the parts left out. ``parts`` is empty when the part is unknown
+        or sits in a source search leaves out (Telegram).
+        """
+        from .events import EXCLUDED_SOURCES
+
+        with self.store.connection() as conn:
+            anchor = conn.execute(_CONVERSATION_ANCHOR_SQL, (part_uid,)).fetchone()
+            if anchor is None or anchor[1] in EXCLUDED_SOURCES:
+                return {"parts": [], "omitted_before": 0, "omitted_after": 0}
+            rows = conn.execute(_OPEN_SQL, (anchor[0],)).fetchall()
+        index = next((i for i, row in enumerate(rows) if row[0] == part_uid), None)
+        if index is None:
+            return {"parts": [], "omitted_before": 0, "omitted_after": 0}
+        start, end = index, index + 1
+        used = len(rows[index][1] or "")
+        # Grow outward from the anchor, one part on each side in turn, while it fits.
+        while start > 0 or end < len(rows):
+            grew = False
+            for side in ("before", "after"):
+                at = start - 1 if side == "before" else end
+                if not 0 <= at < len(rows):
+                    continue
+                size = len(rows[at][1] or "")
+                if used + size > max_chars:
+                    continue
+                used += size
+                grew = True
+                if side == "before":
+                    start = at
+                else:
+                    end = at + 1
+            if not grew:
+                break
+        return {
+            "parts": [
+                {
+                    "part_uid": row[0],
+                    "text": row[1],
+                    "author": row[2],
+                    "owner_class": row[3],
+                    "sent_at": row[4],
+                    "message_id": row[5],
+                    "anchor": row[0] == part_uid,
+                }
+                for row in rows[start:end]
+            ],
+            "omitted_before": start,
+            "omitted_after": len(rows) - end,
+        }
 
     # -- suppression ------------------------------------------------------
 

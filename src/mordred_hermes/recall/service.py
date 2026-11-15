@@ -24,6 +24,8 @@ _log = logging.getLogger(__name__)
 MAX_TEXT_CHARS = 4000
 MAX_LIMIT = 20
 MAX_CONTEXT = 5
+#: Text one conversation view carries; a longer conversation is cut around the matched part.
+MAX_CONVERSATION_CHARS = 400_000
 MAX_EVENTS = 10
 #: A selection this short (whitespace-collapsed) is first searched as typed, like the search box.
 SHORT_SELECTION_CHARS = 24
@@ -167,6 +169,10 @@ class RecallService:
 
     def open(self, part_uid: str, *, before: int = 2, after: int = 2) -> list[dict[str, Any]]:
         return self._guarded(lambda index: index.open(part_uid, before=before, after=after))
+
+    def conversation(self, part_uid: str) -> dict[str, Any]:
+        """The whole conversation around ``part_uid`` (cut to :data:`MAX_CONVERSATION_CHARS` around it)."""
+        return self._guarded(lambda index: index.conversation(part_uid, max_chars=MAX_CONVERSATION_CHARS))
 
     def dismiss(self, conv_uid: str) -> None:
         self._guarded(lambda index: index.dismiss(conv_uid))

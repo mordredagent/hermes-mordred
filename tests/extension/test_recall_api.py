@@ -55,6 +55,12 @@ class _FakeRecall:
         self._check()
         return [{"part_uid": part_uid, "text": "前後の発言", "anchor": True}]
 
+    def conversation(self, part_uid: str) -> dict[str, Any]:
+        self.calls.append(("conversation", part_uid))
+        self._check()
+        parts = [{"part_uid": part_uid, "text": "会話の全部", "anchor": True}]
+        return {"parts": parts, "omitted_before": 0, "omitted_after": 0}
+
     def dismiss(self, conv_uid: str) -> None:
         self.calls.append(("dismiss", conv_uid))
         self._check()
@@ -137,6 +143,18 @@ def test_open_seals_the_context_and_bounds_the_window() -> None:
         [frame] = _dispatch(_conn(svc), {"id": "o", "type": "recall_open", **bad})
         assert frame["error"] == "invalid_request"
     assert len(svc.calls) == 1
+
+
+def test_a_conversation_is_sealed_whole() -> None:
+    svc = _FakeRecall()
+    uid = "mail:work:<a@example.com>#a"
+    [frame] = _dispatch(_conn(svc), {"id": "c", "type": "recall_conversation", "part_uid": uid})
+    assert frame["type"] == "recall_conversation_result" and frame["ok"] is True
+    assert json.loads(decrypt_message(_EK, frame["content"]))["parts"][0]["text"] == "会話の全部"
+    for bad in ({"part_uid": ""}, {"part_uid": "a\nb"}, {"part_uid": 3}):
+        [frame] = _dispatch(_conn(svc), {"id": "c", "type": "recall_conversation", **bad})
+        assert frame["error"] == "invalid_request"
+    assert svc.calls == [("conversation", uid)]
 
 
 def test_dismiss_acknowledges() -> None:
