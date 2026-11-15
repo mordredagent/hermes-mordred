@@ -272,6 +272,26 @@ def test_a_failed_line_is_not_stored_and_is_asked_again(store: ImportStore) -> N
     assert topics.fill_lines(store, _Writer()) > 0
 
 
+def test_material_a_reachable_model_cannot_answer_is_set_aside(store: ImportStore) -> None:
+    """So a few lines the model never manages do not keep its server busy every pass."""
+    _chat(store, Source.CLAUDE_CODE, "fpga", "FPGA 推論エンジン", FPGA, start=SENT_AT)
+    topics.build(store)
+    stubborn = _Writer({"event": None})
+    failed: set[str] = set()
+    written = topics.fill_lines(store, stubborn, failed=failed)
+    assert written > 0 and len(failed) == stubborn.asked.count("event") == topics.line_counts(store)["events"]
+    asked = len(stubborn.asked)
+    assert topics.fill_lines(store, stubborn, skip=failed) == 0
+    assert len(stubborn.asked) == asked  # nothing asked again
+
+    # A model that could not be reached sets nothing aside: everything is asked again next pass.
+    unreachable = _Writer({"event": None})
+    unreachable.reachable = False  # type: ignore[attr-defined]
+    missed: set[str] = set()
+    topics.fill_lines(store, unreachable, failed=missed)
+    assert missed == set()
+
+
 def test_the_updater_rebuilds_only_when_the_committed_runs_change(store: ImportStore) -> None:
     _chat(store, Source.CLAUDE_CODE, "fpga", "FPGA 推論エンジン", FPGA, start=SENT_AT)
     updater = topics.TopicsUpdater(lambda: store, _Writer())

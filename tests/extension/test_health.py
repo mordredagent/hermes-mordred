@@ -33,6 +33,7 @@ def settings(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "MORDRED_RECALL_LLM_MODEL",
         "MORDRED_RECALL_AGENT_ENDPOINT",
         "MORDRED_RECALL_AGENT_MODEL",
+        "MORDRED_RECALL_LLM_COMMAND",
     ):
         monkeypatch.delenv(name, raising=False)
     return state
@@ -83,6 +84,18 @@ def test_failures_read_as_down_with_their_reason(settings: dict[str, Any], monke
     assert got["chat"] == ("down", "model_unreachable")
     assert got["telegram"] == ("down", "telegram_session_expired")
     assert got["signing"] == ("off", "software_keys")
+
+
+def test_a_headline_model_started_on_demand_is_fine_while_stopped(
+    settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MORDRED_RECALL_LLM_ENDPOINT", "http://127.0.0.1:8081/v1")
+    monkeypatch.setenv("MORDRED_RECALL_LLM_MODEL", "m")
+    monkeypatch.setenv("MORDRED_RECALL_LLM_COMMAND", "/bin/sh -c 'serve'")
+    assert _collect(lambda _url: False)["headlines"] == ("ok", "on_demand")
+    assert _collect(lambda _url: True)["headlines"] == ("ok", None)
+    monkeypatch.setenv("MORDRED_RECALL_LLM_COMMAND", "/nonexistent/serve --model m")
+    assert _collect(lambda _url: False)["headlines"] == ("down", "model_command_missing")
 
 
 def test_a_remote_chat_model_is_not_contacted(settings: dict[str, Any]) -> None:

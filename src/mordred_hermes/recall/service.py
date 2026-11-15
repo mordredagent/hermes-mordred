@@ -172,8 +172,23 @@ class RecallService:
         except LlmConfigError as exc:
             _log.info("recall lines off (%s)", exc.code)
             target = None
-        writer = HeadlineWriter(target) if target is not None else None
+        writer = HeadlineWriter(target, server=self._model_server(target)) if target is not None else None
         return topics.TopicsUpdater(self._store, writer, interval_s=interval_s)
+
+    def _model_server(self, target: Any) -> Any:
+        """The headline model's server when Hermes is to run it only while there is work (else ``None``)."""
+        from .model_server import OnDemandServer, command_from_env, idle_from_env
+
+        argv = command_from_env()
+        if argv is None:
+            return None
+        home = self._home
+        if home is None:
+            from .._home import hermes_home
+
+            home = hermes_home()
+        _log.info("recall model: started on demand, stopped after %ds idle", int(idle_from_env()))
+        return OnDemandServer(argv, target.base_url, home=home, idle_s=idle_from_env())
 
     def open(self, part_uid: str, *, before: int = 2, after: int = 2) -> list[dict[str, Any]]:
         return self._guarded(lambda index: index.open(part_uid, before=before, after=after))

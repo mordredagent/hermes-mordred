@@ -44,7 +44,7 @@ import sqlite3
 import threading
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -733,26 +733,55 @@ def store_lines(store: Any, answers: Iterable[tuple[LineJob, str | None]], model
     return len(kept)
 
 
+def _unanswered(writer: Any, digests: Iterable[str], failed: set[str] | None) -> None:
+    """Note the material a reachable model gave no usable answer for (a model that was not reachable notes nothing)."""
+    if failed is not None and getattr(writer, "reachable", True):
+        failed.update(digests)
+
+
 def fill_lines(
-    store: Any, writer: Any, *, batch: int = 16, budget_s: float | None = None, kinds: Sequence[str] = _LINE_KINDS
+    store: Any,
+    writer: Any,
+    *,
+    batch: int = 16,
+    budget_s: float | None = None,
+    kinds: Sequence[str] = _LINE_KINDS,
+    skip: Collection[str] = (),
+    failed: set[str] | None = None,
 ) -> int:
-    """Ask the model for every missing line, a batch at a time; the number written."""
+    """Ask the model for every missing line, a batch at a time; the number written.
+
+    Material in ``skip`` is not asked; material the model answered without a
+    usable line is added to ``failed`` (the caller decides when to ask again).
+    """
     written = 0
     started = time.monotonic()
+    passed: set[str] = set(skip)
     while budget_s is None or time.monotonic() - started < budget_s:
-        jobs = missing_lines(store, limit=batch, kinds=kinds)
+        jobs = [job for job in missing_lines(store, limit=batch + len(passed), kinds=kinds) if job.digest not in passed]
+        jobs = jobs[:batch]
         if not jobs:
             break
         answers = writer.lines([(job.kind, job.material) for job in jobs])
         stored = store_lines(store, zip(jobs, answers, strict=True), writer.target.model)
         written += stored
+        missed = [job.digest for job, text in zip(jobs, answers, strict=True) if not text]
+        _unanswered(writer, missed, failed)
+        passed.update(missed)
         if stored == 0:
             break  # the model answers nothing: try again on the next pass
     return written
 
 
 def fill_picks(
-    store: Any, writer: Any, jobs: Sequence[PickJob], *, batch: int = 16, budget_s: float | None = None
+    store: Any,
+    writer: Any,
+    jobs: Sequence[PickJob],
+    *,
+    batch: int = 16,
+    budget_s: float | None = None,
+    skip: Collection[str] = (),
+    failed: set[str] | None = None,
 ) -> int:
     """Ask the membership questions, a batch at a time; the number of answers stored.
 
@@ -761,6 +790,7 @@ def fill_picks(
     """
     written = 0
     started = time.monotonic()
+    jobs = [job for job in jobs if job.digest not in skip]
     for offset in range(0, len(jobs), batch):
         if budget_s is not None and time.monotonic() - started >= budget_s:
             break
@@ -771,6 +801,7 @@ def fill_picks(
             for job, named in zip(chunk, answers, strict=True)
             if named is not None
         ]
+        _unanswered(writer, [job.digest for job, named in zip(chunk, answers, strict=True) if named is None], failed)
         if not kept:
             break  # the model answers nothing: try again on the next pass
         with store.connection() as conn:
@@ -1151,6 +1182,10 @@ def places(conn: sqlite3.Connection, chats: Sequence[tuple[str, str]]) -> dict[s
 # -- keeping it current --------------------------------------------------------------
 
 
+#: A line or membership question the model answered unusably is asked again after this.
+RETRY_UNANSWERED_S: Final = 6 * 3600.0
+
+
 class TopicsUpdater:
     """Rebuilds when the committed import runs change, then fills missing lines; one background thread."""
 
@@ -1169,6 +1204,9 @@ class TopicsUpdater:
         self._thread: threading.Thread | None = None
         self._on_error = on_error or (lambda code: _log.info("recall topics: %s", code))
         self.last_build: BuildResult | None = None
+        # Material the model answered without a usable line, by when: not asked again for RETRY_UNANSWERED_S,
+        # so a few lines it never manages do not keep a model server busy (and running) all day.
+        self._unanswered: dict[str, float] = {}
 
     def start(self) -> None:
         if self._thread is None:
@@ -1194,17 +1232,31 @@ class TopicsUpdater:
         if self._writer is None:
             return
         budget = self._interval * 5
-        written = fill_lines(store, self._writer, budget_s=budget, kinds=("event", "episode"))
+        now = time.monotonic()
+        self._unanswered = {d: at for d, at in self._unanswered.items() if now - at < RETRY_UNANSWERED_S}
+        skip = set(self._unanswered)
+        failed: set[str] = set()
+        try:
+            self._model_work(store, budget, skip, failed)
+        finally:
+            self._unanswered.update(dict.fromkeys(failed, time.monotonic()))
+
+    def _model_work(self, store: Any, budget: float, skip: set[str], failed: set[str]) -> None:
+        written = fill_lines(
+            store, self._writer, budget_s=budget, kinds=("event", "episode"), skip=skip | failed, failed=failed
+        )
         if written:
             _log.info("recall topics: %d lines written", written)
             if self.last_build is not None and self.last_build.waiting:
                 self._rebuild(store)
         if self.last_build is not None and self.last_build.pick_jobs:
-            answered = fill_picks(store, self._writer, self.last_build.pick_jobs, budget_s=budget)
+            answered = fill_picks(
+                store, self._writer, self.last_build.pick_jobs, budget_s=budget, skip=skip | failed, failed=failed
+            )
             if answered:
                 _log.info("recall topics: %d membership answers", answered)
                 self._rebuild(store)
-        named = fill_lines(store, self._writer, budget_s=budget)
+        named = fill_lines(store, self._writer, budget_s=budget, skip=skip | failed, failed=failed)
         if named:
             _log.info("recall topics: %d lines written", named)
 
@@ -1218,4 +1270,15 @@ class TopicsUpdater:
                 self.run_once()
             except Exception as exc:  # keep the thread alive; the store may be locked or unkeyed for now
                 self._on_error(type(exc).__name__)
+            self._idle()
             self._stop.wait(self._interval)
+        if self._writer is not None and hasattr(self._writer, "close"):
+            self._writer.close()
+
+    def _idle(self) -> None:
+        """A model server Hermes started for this work is stopped once it has been unused for a while."""
+        if self._writer is not None and hasattr(self._writer, "idle"):
+            try:
+                self._writer.idle()
+            except Exception as exc:
+                self._on_error(type(exc).__name__)

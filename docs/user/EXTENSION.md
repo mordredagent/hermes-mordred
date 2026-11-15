@@ -232,6 +232,40 @@ vault once, which asks for Touch ID (or the login password).
   integrity check, an unreadable `.env`): the server stops with exit code 1 and
   a content-free message, as it did when this check ran before binding.
 
+### Local models for recall
+
+Recall works without a model: search, events and topics are built by
+counting. Two local, OpenAI-compatible servers (loopback only) add to it:
+
+| Settings | Used for | When it runs |
+|---|---|---|
+| `MORDRED_RECALL_AGENT_ENDPOINT`, `MORDRED_RECALL_AGENT_MODEL` | recommendations under a search (a small model) | always: a search waits for it |
+| `MORDRED_RECALL_LLM_ENDPOINT`, `MORDRED_RECALL_LLM_MODEL` | stored headlines and the topic splits, in the background (a large model) | see below |
+
+The large model never answers a search directly; it only writes lines that are
+stored. With `MORDRED_RECALL_LLM_COMMAND` set to the command that starts its
+server (split like a shell line, run without a shell), Hermes starts the
+server when the updater finds lines or questions to ask, and stops it once it
+has been unused for `MORDRED_RECALL_LLM_IDLE_SECONDS` (default 300); stopping
+Hermes stops it too. Its output goes to `<HERMES_HOME>/logs/recall-model.log`.
+A server already answering at the endpoint that Hermes did not start is used
+but never stopped. Material the model answered without a usable line is not
+asked again for six hours, so it cannot keep the server running. Use absolute
+paths in the command (the LaunchAgent starts in the Hermes home), for example:
+
+```bash
+export MORDRED_RECALL_LLM_ENDPOINT=http://127.0.0.1:8081/v1
+export MORDRED_RECALL_LLM_MODEL=$HOME/models/bonsai/models/Ternary-Bonsai-2-27B-mlx-2bit
+export MORDRED_RECALL_LLM_COMMAND="$HOME/models/bonsai/.venv-vlm/bin/python -m mlx_vlm.server \
+  --model $MORDRED_RECALL_LLM_MODEL --host 127.0.0.1 --port 8081 --enable-thinking"
+```
+
+Without `MORDRED_RECALL_AGENT_*` the recommender falls back to the large
+model, which then has to be running whenever recommendations are wanted; give
+the recommender its own small model before letting Hermes stop the large one.
+The extension's feature list shows the large model as available ("started
+only while there is work") while it is stopped.
+
 ## Gmail: sign in with Google
 
 The extension imports Gmail after the owner signs in with Google; there is no

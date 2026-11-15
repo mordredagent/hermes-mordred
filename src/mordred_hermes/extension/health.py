@@ -6,7 +6,8 @@ with a reason instead of an error after a click. Each item is::
 
     {"id": <feature>, "state": "ok" | "off" | "down", "code": <reason or None>}
 
-- ``ok``: works.
+- ``ok``: works (``on_demand``: the headline model's server is started by
+  Hermes when there is work, :mod:`..recall.model_server`).
 - ``off``: not set up (no model configured, mail not signed in): nothing is
   broken, the feature is simply not there yet.
 - ``down``: set up but failing now (the store cannot open, the model server
@@ -84,11 +85,21 @@ def _local_model(feature: str, target: Any, probe: Probe) -> dict[str, Any]:
 def _headlines(probe: Probe) -> dict[str, Any]:
     from ..extension.telegram.llm import LlmConfigError
     from ..recall.headlines import target_from_env
+    from ..recall.model_server import command_from_env, launchable
 
     try:
-        return _local_model("headlines", target_from_env(), probe)
+        target = target_from_env()
     except LlmConfigError:
         return _item("headlines", "down", "model_not_local")
+    argv = command_from_env()
+    if target is None or argv is None:
+        return _local_model("headlines", target, probe)
+    # Hermes starts this server only while there is work: not running is fine, an unknown command is not.
+    if probe(target.base_url):
+        return _item("headlines", "ok")
+    if launchable(argv):
+        return _item("headlines", "ok", "on_demand")
+    return _item("headlines", "down", "model_command_missing")
 
 
 def _recommend(probe: Probe) -> dict[str, Any]:

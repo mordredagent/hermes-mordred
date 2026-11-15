@@ -15,7 +15,9 @@ the rule Telegram's local model follows) and is reached without any proxy and
 without following redirects, so the material never leaves the machine.
 Configured through ``MORDRED_RECALL_LLM_ENDPOINT`` (an OpenAI-compatible base,
 e.g. ``http://127.0.0.1:8081/v1``) and ``MORDRED_RECALL_LLM_MODEL``; unset
-means no lines, and events still come back with their keywords.
+means no lines, and events still come back with their keywords. With
+``MORDRED_RECALL_LLM_COMMAND`` Hermes starts the server only while there is
+work and stops it when idle (:mod:`.model_server`).
 
 The request turns thinking off (``enable_thinking`` for mlx-vlm,
 ``chat_template_kwargs`` for llama.cpp / mlx-lm): with thinking on, Bonsai 2
@@ -31,6 +33,7 @@ as a code, never with the material.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -169,15 +172,33 @@ def _line(text: str) -> str | None:
 
 
 class HeadlineWriter:
-    def __init__(self, target: HeadlineTarget, *, post: Post | None = None, timeout: float = _TIMEOUT) -> None:
+    """Asks the headline model; with ``server`` (:class:`.model_server.OnDemandServer`) it is started for the
+    first request and stopped by :meth:`idle` once unused."""
+
+    def __init__(
+        self, target: HeadlineTarget, *, post: Post | None = None, timeout: float = _TIMEOUT, server: Any = None
+    ) -> None:
         if not target.model:
             raise LlmConfigError("local_llm_not_configured")
         self.target = HeadlineTarget(normalize_local_endpoint(target.base_url), target.model)
         self._post = post or _post
         self._timeout = timeout
+        self._server = server
+        #: False once a request of the current batch could not reach the model (as opposed to an unusable answer).
+        self.reachable = True
+
+    def idle(self) -> None:
+        """Between updater passes: stop the model server Hermes runs once it has been unused for a while."""
+        if self._server is not None:
+            self._server.release_if_idle()
+
+    def close(self) -> None:
+        if self._server is not None:
+            self._server.stop()
 
     def lines(self, jobs: Sequence[tuple[str, dict[str, Any]]]) -> list[str | None]:
         """One line per ``(kind, material)``, in order (``None`` where the model failed)."""
+        self.reachable = True
         with ThreadPoolExecutor(max_workers=_WORKERS) as pool:
             return list(pool.map(lambda job: self.line(*job), jobs))
 
@@ -193,6 +214,7 @@ class HeadlineWriter:
 
     def picks(self, jobs: Sequence[tuple[Sequence[dict[str, Any]], int]]) -> list[list[int] | None]:
         """For each ``(items, focus)``: the other items in the focus item's pursuit (``None`` on failure)."""
+        self.reachable = True
         with ThreadPoolExecutor(max_workers=_WORKERS) as pool:
             return list(pool.map(lambda job: self.pick(*job), jobs))
 
@@ -222,12 +244,24 @@ class HeadlineWriter:
             "chat_template_kwargs": {"enable_thinking": False},
             **sampling,
         }
-        try:
-            answer = self._post(f"{self.target.base_url}/chat/completions", body, self._timeout)
-            return _line(str(answer["choices"][0]["message"]["content"] or ""))
-        except (OSError, urllib.error.URLError, ValueError, KeyError, IndexError, TypeError) as exc:
-            _log.info("recall headline: local model failed (%s)", type(exc).__name__)
-            return None
+        with self._server.using() if self._server is not None else contextlib.nullcontext(True) as up:
+            if not up:
+                self.reachable = False  # the server did not start; asked again on a later pass
+                return None
+            try:
+                answer = self._post(f"{self.target.base_url}/chat/completions", body, self._timeout)
+            except (OSError, urllib.error.URLError) as exc:
+                self.reachable = False
+                _log.info("recall headline: local model not reached (%s)", type(exc).__name__)
+                return None
+            except ValueError as exc:
+                _log.info("recall headline: local model failed (%s)", type(exc).__name__)
+                return None
+            try:
+                return _line(str(answer["choices"][0]["message"]["content"] or ""))
+            except (KeyError, IndexError, TypeError) as exc:
+                _log.info("recall headline: local model failed (%s)", type(exc).__name__)
+                return None
 
 
 def _picked(answer: str, count: int, focus: int) -> list[int] | None:
