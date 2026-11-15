@@ -35,6 +35,14 @@ _PUT_TIMEOUT = 60.0
 # hung turn must not hold the shared lock forever and block every client.
 _DEFAULT_TURN_TIMEOUT = 900.0
 
+# The extension chat's toolsets when ``platform_toolsets`` has no ``extension`` entry:
+# the user's memory and lookups, nothing that acts on the machine. Every registered
+# tool (terminal, files, browser, messaging, ...) used to be offered, which buried a
+# small local model's prompt (16k tokens) and the memory Mordred adds to each turn
+# (mordred_hermes.recall.turn_context), after which the session is a reader session
+# where those tools are refused anyway.
+DEFAULT_TOOLSETS: tuple[str, ...] = ("skills", "mordred_recall", "mordred_telegram", "mordred_activity", "web")
+
 # Keep strong references to detached-turn drainer tasks (RUF006): a task held
 # only by the event loop can be garbage-collected mid-flight.
 _background_tasks: set[asyncio.Task[None]] = set()
@@ -240,6 +248,21 @@ def _augment_with_context(content: str, context: dict[str, Any]) -> str:
     return "\n\n".join(parts)
 
 
+def extension_toolsets() -> list[str]:
+    """The toolsets offered to the extension chat: ``platform_toolsets.extension``, else :data:`DEFAULT_TOOLSETS`."""
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import _get_platform_tools
+
+        config = load_config()
+        named = config.get("platform_toolsets")
+        if isinstance(named, dict) and "extension" in named:
+            return sorted(_get_platform_tools(config, "extension"))
+    except Exception:
+        logger.warning("extension chat: platform_toolsets unreadable; using the default toolsets")
+    return list(DEFAULT_TOOLSETS)
+
+
 def _ensure_agent(runner: Any, state: dict[str, Any]) -> Any:
     """Build (or reuse) the extension's AIAgent via the gateway's own routing."""
     from gateway.run import _resolve_gateway_model, _resolve_runtime_agent_kwargs
@@ -255,13 +278,15 @@ def _ensure_agent(runner: Any, state: dict[str, Any]) -> Any:
         except Exception:
             pass
 
-    sig = (model, tuple(sorted((k, str(v)) for k, v in runtime.items() if k != "api_key")))
+    toolsets = extension_toolsets()
+    sig = (model, tuple(sorted((k, str(v)) for k, v in runtime.items() if k != "api_key")), tuple(toolsets))
     if state["agent"] is not None and state["sig"] == sig:
         return state["agent"]
 
     agent = AIAgent(
         model=model,
         **runtime,
+        enabled_toolsets=toolsets,
         max_iterations=int(getattr(runner, "_max_iterations", 0) or 90),
         quiet_mode=True,
         verbose_logging=False,
@@ -274,5 +299,7 @@ def _ensure_agent(runner: Any, state: dict[str, Any]) -> Any:
     state["agent"] = agent
     state["sig"] = sig
     state["history"] = []
-    logger.info("extension chat: built agent (model=%s)", model or "<provider-default>")
+    logger.info(
+        "extension chat: built agent (model=%s, toolsets=%s)", model or "<provider-default>", ",".join(toolsets)
+    )
     return agent

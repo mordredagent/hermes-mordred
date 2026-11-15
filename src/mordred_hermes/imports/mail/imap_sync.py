@@ -659,6 +659,17 @@ class FetchEnv:
     now: Callable[[], float] = time.time
     lock: WriterLock = fetch_lock
     harden: Callable[[], None] = field(default=lambda: None)
+    #: A Gmail signed in with Google: the access token for its sealed refresh token (:mod:`.oauth`).
+    access_token: Callable[[MailCredentials], str] = field(default=lambda creds: _oauth_access_token(creds))
+
+
+def _oauth_access_token(creds: MailCredentials) -> str:
+    from .oauth import OAuthError, access_token_for
+
+    try:
+        return access_token_for(creds.oauth_refresh_token)
+    except OAuthError as exc:
+        raise FetchStop(exc.code) from None
 
 
 def _default_connect(creds: MailCredentials, limits: IoLimits) -> ImapSession:
@@ -1080,7 +1091,10 @@ def _sync(store: Any, creds: MailCredentials, options: FetchOptions, env: FetchE
     try:
         run = _Run(store, session, creds, own, options, env, result, limits.deadline, options.max_messages)
         try:
-            session.login(creds.address, creds.app_password)
+            if creds.oauth_refresh_token:
+                session.authenticate_xoauth2(creds.address, env.access_token(creds))
+            else:
+                session.login(creds.address, creds.app_password)
             for role in roles:
                 run.check_time()
                 run.mailbox(role)

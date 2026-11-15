@@ -26,7 +26,7 @@ from typing import Any, Final
 
 from ..records import RecordError, Source
 from . import claude_code, codex, grok_bot
-from ._model import LOCAL_SOURCES, Transcript, to_records
+from ._model import LOCAL_SOURCES, Transcript, place_key, place_recorded_key, stored_place, to_records
 
 Progress = Callable[[dict[str, int]], None]
 Opener = Callable[[Path], Any]
@@ -159,12 +159,15 @@ def run_local_import(
     with _writer_lock(home, kind):
         store = (opener or _default_opener)(home)
         cursors = store.meta_items(f"local.{kind.value}.")
+        # A store imported before working folders were kept reads every file once more to record them.
+        recorded = place_recorded_key(kind.value)
+        places_known = store.meta_items(f"place.{kind.value}.").get(recorded) == "1"
         changed: list[tuple[Path, str, str]] = []
         for path in _files(kind, base):
             result.files_seen += 1
             signature = _signature(path)
             key = _cursor_key(kind, path)
-            if signature is not None and cursors.get(key) != signature:
+            if signature is not None and (cursors.get(key) != signature or not places_known):
                 changed.append((path, key, signature))
         if not changed:
             return result
@@ -172,6 +175,7 @@ def run_local_import(
         run_id = store.run_begin(kind)
         try:
             meta = _write_changed(store, run_id, kind, changed, names, result, int(now()), progress)
+            meta[recorded] = "1"
             store.commit_batch(run_id, _counts(result), meta)
         except BaseException:
             with contextlib.suppress(Exception):
@@ -205,6 +209,9 @@ def _write_changed(
                 result.files_unreadable += 1
                 continue
             written = store.write_thread(run_id, messages, conversation=conversation, merge_conversation=True)
+            place = stored_place(transcript.place)
+            if place is not None:
+                meta[place_key(kind.value, conversation.conv_uid)] = place
             result.conversations += 1
             result.inserted += written.inserted
             result.duplicates += written.duplicates

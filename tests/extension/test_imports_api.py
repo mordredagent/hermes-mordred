@@ -267,3 +267,15 @@ def test_status_merges_the_desktop_sections_with_local_counts(tmp_path: Path, mo
         "last_import_at": None,
     }
     assert status["jobs"] == []
+
+
+def test_gmail_sign_in_needs_a_google_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mordred_hermes.imports.mail import oauth
+
+    api = _api(tmp_path, monkeypatch)
+    monkeypatch.setattr(oauth, "client_from_config", lambda *_a, **_k: None)
+    with pytest.raises(ImportsRefusal, match="gmail_oauth_unconfigured"):
+        asyncio.run(api.call({"op": "mail_oauth_start"}))
+    with pytest.raises(ImportsRefusal, match="gmail_oauth_unknown"):
+        asyncio.run(api.call({"op": "mail_oauth_status", "flow_id": "abcdefgh"}))
+    assert asyncio.run(api.call({"op": "mail_oauth_cancel", "flow_id": "abcdefgh"})) == {"cancelled": True}

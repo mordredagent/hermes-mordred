@@ -8,8 +8,9 @@ the stored part (:mod:`.cards`). A weak or flat result set says ``none``
 instead of showing a doubtful card.
 
 Reads ``mordred.db``'s ``import_*`` tables through :class:`~.index.RecallIndex`.
-The only write is :meth:`~.index.RecallIndex.dismiss`, which hides a
-conversation for a week in the ``recall_suppression`` table.
+The only writes are :meth:`~.index.RecallIndex.dismiss`, which hides a
+conversation for a week in the ``recall_suppression`` table, and
+:meth:`~.index.RecallIndex.restore`, which shows it again.
 
 The browser extension reaches this over the ``/ext`` gateway
 (``recall_query`` / ``recall_open`` / ``recall_dismiss``), so the pairing is

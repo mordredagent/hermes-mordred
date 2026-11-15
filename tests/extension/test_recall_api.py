@@ -59,6 +59,15 @@ class _FakeRecall:
         self.calls.append(("dismiss", conv_uid))
         self._check()
 
+    def restore(self, conv_uid: str) -> None:
+        self.calls.append(("restore", conv_uid))
+        self._check()
+
+    def hidden(self) -> list[dict[str, Any]]:
+        self.calls.append(("hidden", None))
+        self._check()
+        return [{"conv_uid": "tg:-1", "until": 2, "hidden_at": 1, "source": "telegram", "title": "総務チャット"}]
+
 
 def _conn(svc: Any, *, page: bool = False) -> Any:
     conn = extension_api._Connection(_FakeWS(), _no_chat, recall_service=svc, page_token="p" if page else None)
@@ -143,6 +152,8 @@ def test_page_sessions_cannot_recall() -> None:
         {"id": "q", "type": "recall_query", "text": _sealed("x")},
         {"id": "o", "type": "recall_open", "part_uid": "tg:-1:1#a"},
         {"id": "d", "type": "recall_dismiss", "conv_uid": "tg:-1"},
+        {"id": "r", "type": "recall_restore", "conv_uid": "tg:-1"},
+        {"id": "h", "type": "recall_hidden"},
     ):
         conn = _conn(svc, page=True)
         [frame] = _dispatch(conn, payload)
@@ -204,3 +215,67 @@ def test_events_report_store_failures_as_codes() -> None:
     for fail, code in (("import_store_unavailable", "import_store_unavailable"), ("boom", "recall_unavailable")):
         [frame] = _dispatch(_conn(_FakeEvents(fail)), {"id": "e", "type": "recall_events", "text": _sealed("x")})
         assert frame == {"id": "e", "type": "recall_events_result", "ok": False, "error": code}
+
+
+def test_restore_acknowledges_and_refuses_a_bad_id() -> None:
+    svc = _FakeRecall()
+    [frame] = _dispatch(_conn(svc), {"id": "r", "type": "recall_restore", "conv_uid": "tg:-1"})
+    assert frame == {"id": "r", "type": "recall_restored", "ok": True}
+    [bad] = _dispatch(_conn(svc), {"id": "r", "type": "recall_restore", "conv_uid": "a\nb"})
+    assert bad == {"id": "r", "type": "recall_restored", "ok": False, "error": "invalid_request"}
+    assert svc.calls == [("restore", "tg:-1")]
+
+
+def test_hidden_conversations_leave_sealed() -> None:
+    svc = _FakeRecall()
+    [frame] = _dispatch(_conn(svc), {"id": "h", "type": "recall_hidden"})
+    assert frame["type"] == "recall_hidden_result" and frame["ok"] is True
+    assert "総務チャット" not in json.dumps(frame, ensure_ascii=False)
+    [hidden] = json.loads(decrypt_message(_EK, frame["content"]))["hidden"]
+    assert hidden["conv_uid"] == "tg:-1" and hidden["title"] == "総務チャット"
+
+
+class _FakeRecommend(_FakeRecall):
+    def recommend(self, text: str, *, selection: bool = False, on_item: Any, cancelled: Any) -> int:
+        self.calls.append(("recommend", (text, selection)))
+        self._check()
+        for n in range(2):
+            on_item({"part_uid": f"claude:a:{n}#a", "quote": "量子化なしの生徒", "what": "蒸留の検討"})
+        return 2
+
+
+def _stream(conn: Any, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Dispatch, then wait for the recommendation the frame started."""
+
+    async def run() -> None:
+        await conn.dispatch(json.dumps(payload))
+        await asyncio.gather(*(task for task, _stop in list(conn._recall_recommends.values())))
+
+    asyncio.run(run())
+    return list(conn.ws.sent)
+
+
+def test_recommendations_stream_sealed_and_end() -> None:
+    svc = _FakeRecommend()
+    payload = {"id": "m", "type": "recall_recommend", "text": _sealed("量子化"), "mode": "selection"}
+    *items, end = _stream(_conn(svc), payload)
+    assert svc.calls == [("recommend", ("量子化", True))]
+    assert [frame["type"] for frame in items] == ["recall_recommend_item"] * 2
+    assert "量子化" not in json.dumps(items, ensure_ascii=False)
+    assert json.loads(decrypt_message(_EK, items[0]["content"]))["what"] == "蒸留の検討"
+    assert end == {"id": "m", "type": "recall_recommend_end", "ok": True}
+
+
+def test_recommendations_report_a_missing_model_and_refuse_plaintext() -> None:
+    svc = _FakeRecommend(fail="recall_agent_unavailable")
+    [end] = _stream(_conn(svc), {"id": "m", "type": "recall_recommend", "text": _sealed("量子化")})
+    assert end == {"id": "m", "type": "recall_recommend_end", "ok": False, "error": "recall_agent_unavailable"}
+    [bad] = _stream(_conn(_FakeRecommend()), {"id": "m", "type": "recall_recommend", "text": "量子化"})
+    assert bad == {"id": "m", "type": "recall_recommend_end", "ok": False, "error": "invalid_request"}
+
+
+def test_page_sessions_cannot_ask_for_recommendations() -> None:
+    svc = _FakeRecommend()
+    [frame] = _dispatch(_conn(svc, page=True), {"id": "m", "type": "recall_recommend", "text": _sealed("x")})
+    assert frame == {"id": "m", "type": "error", "reason": "page_session_forbidden"}
+    assert svc.calls == []

@@ -129,6 +129,8 @@ class MailCredentials:
     account: str
     gmail: bool
     mailboxes: dict[str, str] = field(repr=False)
+    #: Gmail signed in with Google (:mod:`.oauth`): the refresh token, and ``app_password`` is empty.
+    oauth_refresh_token: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
         from ._imap_codec import safe_mailbox_name
@@ -144,6 +146,8 @@ class MailCredentials:
             raise MailSecretsError("secrets_corrupt")
         if not valid_host(self.imap_host) or not self.own_addresses:
             raise MailSecretsError("secrets_corrupt")
+        if bool(self.app_password) == bool(self.oauth_refresh_token):
+            raise MailSecretsError("secrets_corrupt")  # exactly one way to log in
 
     def __repr__(self) -> str:  # never let a traceback or log line print secrets
         return f"MailCredentials(account={self.account!r}, gmail={self.gmail}, roles={sorted(self.mailboxes)})"
@@ -166,6 +170,8 @@ def encode(value: MailCredentials) -> bytes:
         "gmail": value.gmail,
         "mailboxes": dict(value.mailboxes),
     }
+    if value.oauth_refresh_token:
+        payload["oauth_refresh_token"] = value.oauth_refresh_token
     return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
@@ -196,9 +202,14 @@ def decode(blob: bytes) -> MailCredentials:
         raise MailSecretsError("secrets_corrupt")
     if not isinstance(port, int) or not isinstance(gmail, bool):
         raise MailSecretsError("secrets_corrupt")
+    refresh = payload.get("oauth_refresh_token", "")
+    password = payload.get("app_password", "")
+    if not isinstance(refresh, str) or not isinstance(password, str):
+        raise MailSecretsError("secrets_corrupt")
     return MailCredentials(
         address=_string(payload, "address"),
-        app_password=_string(payload, "app_password"),
+        app_password=password,
+        oauth_refresh_token=refresh,
         imap_host=_string(payload, "imap_host"),
         imap_port=port,
         own_addresses=_strings(payload.get("own_addresses")),

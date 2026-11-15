@@ -121,6 +121,37 @@ class RecallService:
 
         return self._guarded(run)
 
+    def recommend(
+        self,
+        text: str,
+        *,
+        selection: bool = False,
+        on_item: Callable[[dict[str, Any]], None],
+        cancelled: Callable[[], bool] = lambda: False,
+    ) -> int:
+        """Memories for what :meth:`events` searched, handed to ``on_item`` as the local model finds them.
+
+        The words are the first answer's own (``query``), so the memories follow
+        the same search; nothing comes back when no local model is configured.
+        """
+        from . import recommend
+
+        target = recommend.target_from_environ()
+        if target is None:
+            raise RecallError("recall_agent_unavailable")
+        first = self.events(text, limit=3, headlines=False, selection=selection)
+        words = str(first.get("query") or "").split() or text.split()
+
+        def run(index: RecallIndex) -> int:
+            hidden = index.suppressed(time.time())
+            given = 0
+            for memory in recommend.Recommender(index.store, target).run(words, suppressed=hidden, cancelled=cancelled):
+                on_item(memory)
+                given += 1
+            return given
+
+        return self._guarded(run)
+
     def topics_updater(self, *, interval_s: float = 60.0) -> topics.TopicsUpdater:
         """A background updater over this service's store, with the configured local model (if any)."""
         from ..extension.telegram.llm import LlmConfigError
@@ -139,3 +170,9 @@ class RecallService:
 
     def dismiss(self, conv_uid: str) -> None:
         self._guarded(lambda index: index.dismiss(conv_uid))
+
+    def restore(self, conv_uid: str) -> None:
+        self._guarded(lambda index: index.restore(conv_uid))
+
+    def hidden(self) -> list[dict[str, Any]]:
+        return self._guarded(lambda index: index.hidden(time.time()))

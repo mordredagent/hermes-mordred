@@ -20,9 +20,13 @@ module's :func:`register` wires every component in a fixed order:
                         ``pre_llm_call``), the two lookup tools and the
                         ``browser-history`` skill, all gated per call by
                         ``plugins.mordred_activity``.
-8. ``wizard``        — the ``hermes mordred`` CLI subcommand.
+8. ``recall``        — memory from ``mordred.db``: a ``pre_llm_call`` hook that
+                        searches every chat turn (the extension's by default),
+                        the ``mordred_memory_search`` tool and the ``recall``
+                        skill (:mod:`mordred_hermes.recall.plugin`).
+9. ``wizard``        — the ``hermes mordred`` CLI subcommand.
 
-Components 1-4 and 8 keep the relative order they had as separate plugins
+Components 1-4 and 9 keep the relative order they had as separate plugins
 (Hermes loaded those alphabetically: keyvault, llm_guard, network,
 privacy_check, wizard). ``e2e`` used to load first only because its old name
 sorted first; it now loads after the runtime guards it relies on.
@@ -72,6 +76,7 @@ COMPONENTS: Final[tuple[tuple[str, str], ...]] = (
     ("dbcrypt", "mordred_hermes.dbcrypt"),
     ("e2e", "mordred_hermes.extension.gateway_plugin"),
     ("activity", "mordred_hermes.activity"),
+    ("recall", "mordred_hermes.recall.plugin"),
     ("wizard", "mordred_hermes.wizard"),
 )
 
@@ -88,6 +93,7 @@ COMPONENT_REQUIRED_HOOKS: Final[dict[str, frozenset[str]]] = {
     "dbcrypt": frozenset({"on_session_start", "pre_llm_call"}),
     "e2e": frozenset({"on_session_start", "pre_gateway_dispatch"}),
     "activity": frozenset(),
+    "recall": frozenset(),
     "wizard": frozenset(),
 }
 

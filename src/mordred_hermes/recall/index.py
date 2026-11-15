@@ -262,6 +262,34 @@ class RecallIndex:
                 (conv_uid, until, int(now)),
             )
 
+    def restore(self, conv_uid: str) -> None:
+        """Show a conversation the user hid again (nothing happens if it was not hidden)."""
+        with self.store.connection() as conn:
+            conn.execute(_SUPPRESSION_TABLE)
+            conn.execute("DELETE FROM recall_suppression WHERE subject_kind = 'conv' AND subject_id = ?", (conv_uid,))
+
+    def hidden(self, now: float) -> list[dict[str, Any]]:
+        """The conversations still hidden at ``now``, the latest hidden first, with their source and title."""
+        if not self._suppressed(now):
+            return []
+        with self.store.connection() as conn:
+            rows = conn.execute(
+                "SELECT s.subject_id, s.until, s.created_at, c.source, c.title FROM recall_suppression s "
+                "LEFT JOIN import_conversations c ON c.conv_uid = s.subject_id "
+                "WHERE s.subject_kind = 'conv' AND (s.until IS NULL OR s.until > ?) ORDER BY s.created_at DESC",
+                (int(now),),
+            ).fetchall()
+        return [
+            {
+                "conv_uid": str(conv),
+                "until": None if until is None else int(until),
+                "hidden_at": int(created),
+                "source": source,
+                "title": title,
+            }
+            for conv, until, created, source, title in rows
+        ]
+
     def suppressed(self, now: float) -> set[str]:
         """Conversation ids the user hid that are still hidden at ``now``."""
         return self._suppressed(now)

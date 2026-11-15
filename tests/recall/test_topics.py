@@ -196,6 +196,19 @@ def test_a_dismissed_conversation_is_left_out(store: ImportStore) -> None:
     assert _search(store, "量子化", now=NOW, suppressed=hidden).events == []
 
 
+def test_an_event_whose_hits_are_all_in_a_hidden_chat_is_left_out(store: ImportStore) -> None:
+    # The FPGA chat and the Grok chat make one event; only the FPGA chat mentions 蒸留.
+    _chat(store, Source.CLAUDE_CODE, "fpga", "FPGA 推論エンジン", FPGA, start=SENT_AT)
+    _chat(store, Source.GROK_BOT, "bot", "New Bot", GROK, start=SENT_AT + DAY)
+    assert [sorted(event.sources) for event in _search(store, "蒸留", now=NOW).events] == [["claude_code", "grok_bot"]]
+
+    hidden = {local_conv_uid(Source.CLAUDE_CODE, "fpga")}
+    assert _search(store, "蒸留", now=NOW, suppressed=hidden).events == []
+    # A word the other chat holds still finds the event, without the hidden chat.
+    [event] = _search(store, "量子化", now=NOW, suppressed=hidden).events
+    assert [branch.source for branch in event.branches] == ["grok_bot"]
+
+
 class _Writer:
     def __init__(self, answers: dict[str, str | None] | None = None) -> None:
         self.asked: list[str] = []
@@ -442,3 +455,17 @@ def test_a_topic_is_described_by_one_message_from_each_episode() -> None:
     small = ep(["量子化の件について質問しました"])
     expected = ["ペストの件について質問その0です", "量子化の件について質問しました"]
     assert topics._spread_messages([big, small]) == expected
+
+
+def test_a_branch_names_the_folder_its_session_worked_in(store: ImportStore) -> None:
+    from mordred_hermes.imports.local._model import place_key
+
+    _chat(store, Source.CLAUDE_CODE, "fpga", "FPGA 推論エンジン", FPGA, start=SENT_AT)
+    topics.build(store)
+    found = topics.TopicIndex(store).events("FPGA", limit=3, suppressed=set())
+    branch = found.events[0].branches[0]
+    assert branch.folder is None
+    store.set_meta(place_key(branch.source, branch.conv_uid), "/repos/fpga")
+    found = topics.TopicIndex(store).events("FPGA", limit=3, suppressed=set())
+    assert found.events[0].branches[0].folder == "/repos/fpga"
+    assert found.events[0].as_dict()["branches"][0]["folder"] == "/repos/fpga"

@@ -94,6 +94,22 @@ def test_dismissed_conversation_disappears_for_a_week(store: ImportStore) -> Non
     assert "mail" in {c.source for c in index.search("経費精算", now=NOW + 8 * 86400).cards}
 
 
+def test_a_hidden_conversation_is_listed_and_can_be_shown_again(store: ImportStore) -> None:
+    index = RecallIndex(store)
+    assert index.hidden(NOW) == []
+    index.dismiss(MAIL_CONV_UID, now=NOW)
+
+    [hidden] = index.hidden(NOW + 3600)
+    assert hidden["conv_uid"] == MAIL_CONV_UID and hidden["source"] == "mail"
+    assert hidden["hidden_at"] == int(NOW) and hidden["until"] == int(NOW) + 7 * 86400
+    assert index.hidden(NOW + 8 * 86400) == []
+
+    index.restore(MAIL_CONV_UID)
+    assert index.hidden(NOW + 3600) == []
+    assert "mail" in {c.source for c in index.search("経費精算", now=NOW + 3600).cards}
+    index.restore(MAIL_CONV_UID)  # restoring what is not hidden does nothing
+
+
 def test_service_maps_a_refused_store_to_a_content_free_code(tmp_path: Path) -> None:
     from mordred_hermes.imports.store import ImportRefused
 

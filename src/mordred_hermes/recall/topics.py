@@ -102,6 +102,9 @@ MIN_COVERAGE: Final = 0.35
 _RARE_EVENTS: Final = 3
 #: A selection's rarest shared nouns whose parts anchor the branches.
 _SELECTION_ANCHORS: Final = 3
+#: The first answer shows only the events scoring at least this share of the best
+#: one; the rest are left to the recommender (:mod:`.recommend`), which explains them.
+CONFIDENT_SHARE: Final = 0.4
 #: Events shown under one topic.
 _EVENTS_PER_TOPIC: Final = 3
 _HIT_LIMIT: Final = 500
@@ -302,6 +305,15 @@ def _load(store: Any) -> list[Part]:
             continue
         parts.append(Part(int(pid), uid, text or "", owner_class == "account_owner", sent, conv, source, title))
     return parts
+
+
+def _confident(events: list[Event]) -> list[Event]:
+    """``events`` best first, without those far below the best (:data:`CONFIDENT_SHARE`)."""
+    events.sort(key=lambda event: -event.score)
+    if not events:
+        return events
+    floor = CONFIDENT_SHARE * events[0].score
+    return [event for event in events if event.score >= floor]
 
 
 def _idf(found: int, total: int) -> float:
@@ -825,8 +837,7 @@ class TopicIndex:
             relevance = self._relevance(conn, terms)
             part_hits = self._hit_episodes(conn, [hit.part_uid for hit in hits])
             looked = time.monotonic()
-            events = self._events(conn, relevance, part_hits, hidden, words, now)
-            events.sort(key=lambda event: -event.score)
+            events = _confident(self._events(conn, relevance, part_hits, hidden, words, now))
             cards = self._topic_cards(conn, events, limit, now)
         done = time.monotonic()
         return EventResult(
@@ -942,8 +953,7 @@ class TopicIndex:
             else:
                 part_hits = []
             looked = time.monotonic()
-            events = self._events(conn, kept, part_hits, hidden, shared, now, selection=True)
-            events.sort(key=lambda event: -event.score)
+            events = _confident(self._events(conn, kept, part_hits, hidden, shared, now, selection=True))
             cards = self._topic_cards(conn, events, limit, now)
         done = time.monotonic()
         return EventResult(
@@ -1036,10 +1046,13 @@ class TopicIndex:
                 "WHERE event_id = ? ORDER BY start",
                 (event_id,),
             ).fetchall()
-            episodes = [ep for ep in episodes if ep[1] not in hidden]
-            if not episodes:
+            shown = [ep for ep in episodes if ep[1] not in hidden]
+            found = [hit for ep in shown for hit in hits_by_episode.get(int(ep[0]), [])]
+            # The event's terms may all sit in the chats the user hid: with none of
+            # its hits left, the rest of the event is not what was searched for.
+            if not shown or (len(shown) < len(episodes) and not found):
                 continue
-            found = [hit for ep in episodes for hit in hits_by_episode.get(int(ep[0]), [])]
+            episodes = shown
             lexical = relevance.get(event_id, 0.0) + math.log1p(len(found))
             rel = lexical * (1.5 if any(owner for _uid, owner in found) else 1.0)
             recency = math.exp(-max(0.0, now - end) / _RECENCY_TAU)
@@ -1117,7 +1130,22 @@ class TopicIndex:
                     chat_topics=int(chat_topics or 1),
                 )
             )
+        folders = places(conn, [(branch.source, branch.conv_uid) for branch in branches])
+        for branch in branches:
+            branch.folder = folders.get(branch.conv_uid)
         return branches
+
+
+def places(conn: sqlite3.Connection, chats: Sequence[tuple[str, str]]) -> dict[str, str]:
+    """``{conv_uid: folder}`` for the local sessions (``(source, conv_uid)``) whose working folder was recorded."""
+    from ..imports.local._model import place_key
+
+    keys = {place_key(source, conv): conv for source, conv in chats}
+    if not keys:
+        return {}
+    marks = ",".join("?" for _ in keys)
+    rows = conn.execute(f"SELECT key, value FROM import_meta WHERE key IN ({marks})", list(keys)).fetchall()
+    return {keys[str(key)]: str(value) for key, value in rows}
 
 
 # -- keeping it current --------------------------------------------------------------

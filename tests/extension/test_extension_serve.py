@@ -160,7 +160,7 @@ def test_serve_does_not_misclassify_api_internal_import_bug() -> None:
     assert completed.returncode == 0, completed.stderr
 
 
-def test_serve_loads_vault_managed_environment_before_accepting_rpcs(tmp_path, monkeypatch) -> None:
+def test_serve_opens_the_vault_through_the_gate_it_gives_the_server(tmp_path, monkeypatch) -> None:
     from mordred_hermes.extension import api as extension_api
     from mordred_hermes.keyvault import _runtime_env
 
@@ -180,34 +180,84 @@ def test_serve_loads_vault_managed_environment_before_accepting_rpcs(tmp_path, m
     class FakeServer:
         page_url = "http://127.0.0.1/private"
 
-        def __init__(self, **_kwargs: object) -> None:
-            calls.append(f"server:{os.environ.get('DISCORD_BOT_TOKEN', '')}")
+        def __init__(self, **kwargs: object) -> None:
+            calls.append("server")
+            self.vault_gate = kwargs["vault_gate"]
+
+    def run_forever(server: FakeServer, _host: str, _port: int, _color: bool, gate: object) -> int:
+        # The port is bound before the vault opens; the gate is the server's own.
+        assert gate is server.vault_gate and not server.vault_gate.is_open()  # type: ignore[attr-defined]
+        assert server.vault_gate.open_at_start() == "open"  # type: ignore[attr-defined]
+        return 0
 
     monkeypatch.setattr(_runtime_env, "install_vault_env_decrypt", inject)
     monkeypatch.setattr(extension_api, "ExtensionAPIServer", FakeServer)
     monkeypatch.setattr(extension_main, "_resolve_chat_handler", lambda: None)
-    monkeypatch.setattr(extension_main, "_run_forever", lambda *_args: 0)
+    monkeypatch.setattr(extension_main, "_run_forever", run_forever)
 
     assert serve(port=_free_port()) == 0
-    assert calls == ["inject", "server:from-vault"]
+    assert calls == ["server", "inject"]
+    assert os.environ["DISCORD_BOT_TOKEN"] == "from-vault"
 
 
-def test_serve_fails_closed_when_vault_environment_cannot_be_loaded(tmp_path, monkeypatch, capsys) -> None:
+def test_serve_stops_when_the_vault_cannot_be_trusted(tmp_path, monkeypatch, capsys) -> None:
     from mordred_hermes.keyvault import _runtime_env
 
     vault_root = tmp_path / "mordred" / "vault"
     vault_root.mkdir(parents=True)
     (vault_root / "manifest.1.mvmf").write_bytes(b"vault-present")
 
-    def fail() -> int:
+    def fail(**_kwargs: object) -> int:
         raise RuntimeError("sensitive backend detail")
 
     monkeypatch.setattr(_runtime_env, "install_vault_env_decrypt", fail)
+    monkeypatch.setattr(extension_main, "_resolve_chat_handler", lambda: None)
     assert serve(port=_free_port()) == 1
     err = capsys.readouterr().err
-    assert "refusing to start" in err
+    assert "could not load the vault-managed environment" in err
     assert "encryption status" in err
     assert "sensitive backend detail" not in err
+
+
+def test_serve_keeps_serving_when_the_prompt_is_not_answered(tmp_path) -> None:
+    """An unanswered Touch ID prompt (the helper's timeout) leaves a running, locked server."""
+    port = _free_port()
+    probe = (
+        "import sys\n"
+        "from mordred_hermes.extension import __main__ as m\n"
+        "from mordred_hermes.keyvault._exceptions import WrapAuthCancelled\n"
+        "def refused():\n"
+        "    raise WrapAuthCancelled('prompt timed out')\n"
+        "m._load_vault_managed_environment = refused\n"
+        f"sys.exit(m.main(['--port', '{port}']))\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", probe],
+        env={**os.environ, "HERMES_HOME": str(tmp_path)},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            pytest.fail("server did not start listening within 10s")
+        time.sleep(0.5)
+        assert proc.poll() is None
+        proc.send_signal(signal.SIGTERM)
+        out, _ = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    assert proc.returncode == 0, out
+    assert "vault locked" in out
 
 
 def test_serve_rejects_non_loopback_host(capsys: pytest.CaptureFixture[str]) -> None:

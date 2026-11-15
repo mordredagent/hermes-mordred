@@ -349,6 +349,19 @@ def _add_extension(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     )
     p_serve.add_argument("--port", type=int, default=7788, help="Bind port (default: 7788)")
     p_serve.set_defaults(func=_handle_extension_serve)
+    p_agent = esub.add_parser(
+        "agent",
+        help="Start `extension serve` at login (macOS LaunchAgent): install, uninstall, status",
+    )
+    p_agent.add_argument("action", choices=("install", "uninstall", "status"))
+    p_agent.add_argument("--host", default="127.0.0.1", help="Loopback bind host (default: 127.0.0.1)")
+    p_agent.add_argument("--port", type=int, default=7788, help="Bind port (default: 7788)")
+    p_agent.add_argument(
+        "--env-script",
+        metavar="FILE",
+        help="A shell file sourced at each start (a development home's settings); its values stay out of the plist",
+    )
+    p_agent.set_defaults(func=_handle_extension_agent)
 
 
 def _add_status(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1188,6 +1201,12 @@ def _handle_telegram(args: argparse.Namespace) -> int:
     from . import telegram_cli
 
     return telegram_cli.cli_telegram(args)
+
+
+def _handle_extension_agent(args: argparse.Namespace) -> int:
+    from mordred_hermes.extension.launch_agent import cli
+
+    return cli(args.action, host=args.host, port=args.port, env_script=args.env_script)
 
 
 def _handle_extension_serve(args: argparse.Namespace) -> int:

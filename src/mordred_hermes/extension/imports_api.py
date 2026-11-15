@@ -142,6 +142,7 @@ class ImportsApi:
         self._jobs = JobRegistry(emit=lambda _event, _payload: None)
         self._telegram_flows: Any = None
         self._mail_flows: Any = None
+        self._gmail_sign_ins: Any = None
 
     # -- gates (the Desktop routes' own) -----------------------------------------------
 
@@ -202,6 +203,9 @@ class ImportsApi:
             "mail_setup_finish": self._mail_setup_finish,
             "mail_setup_cancel": self._mail_setup_cancel,
             "mail_fetch": self._mail_fetch,
+            "mail_oauth_start": self._mail_oauth_start,
+            "mail_oauth_status": self._mail_oauth_status,
+            "mail_oauth_cancel": self._mail_oauth_cancel,
             "local_import": self._local_import,
             "job": self._job,
         }.get(op if isinstance(op, str) else "")
@@ -391,6 +395,56 @@ class ImportsApi:
                 raise ImportsRefusal(_projections.closed(data["error"], _projections.MAIL_FETCH_CODES, "fetch_failed"))
 
         return self._start("mail_fetch", work)
+
+    # -- Gmail signed in with Google ----------------------------------------------------------
+
+    def _sign_ins(self) -> Any:
+        if self._gmail_sign_ins is None:
+            from ..imports.mail.oauth import SignIns
+
+            self._gmail_sign_ins = SignIns()
+        return self._gmail_sign_ins
+
+    async def _mail_oauth_start(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Google's consent URL for the extension to open; once approved, seal the account and fetch."""
+        from ..imports.mail import oauth
+
+        self._require_darwin()
+        await self._require_memory()
+        client = oauth.client_from_config()
+        if client is None:
+            raise ImportsRefusal("gmail_oauth_unconfigured")
+        loop = asyncio.get_running_loop()
+        flows = self._mail()
+
+        def complete(tokens: Any) -> dict[str, Any] | None:
+            flow = flows.start_oauth(
+                address=tokens.email, access_token=tokens.access_token, refresh_token=tokens.refresh_token
+            )
+            if flow.step != "done":  # a Gmail whose All Mail cannot be identified: not expected
+                flows.cancel(flow.flow_id)
+                raise oauth.OAuthError("gmail_oauth_failed")
+            started: dict[str, Any] = asyncio.run_coroutine_threadsafe(self._mail_fetch({}), loop).result(timeout=30)
+            return started
+
+        try:
+            sign_in = await _thread(self._sign_ins().start, client, complete)
+        except oauth.OAuthError as exc:
+            raise ImportsRefusal(exc.code) from None
+        return {"flow_id": sign_in.flow_id, "auth_url": sign_in.auth_url}
+
+    async def _mail_oauth_status(self, body: dict[str, Any]) -> dict[str, Any]:
+        from ..imports.mail.oauth import OAuthError
+
+        try:
+            sign_in = self._sign_ins().get(_flow_id(body))
+        except OAuthError as exc:
+            raise ImportsRefusal(exc.code) from None
+        return {"state": sign_in.status, "error": sign_in.error, "job": sign_in.outcome}
+
+    async def _mail_oauth_cancel(self, body: dict[str, Any]) -> dict[str, Any]:
+        self._sign_ins().cancel(_flow_id(body))
+        return {"cancelled": True}
 
     # -- local transcripts ----------------------------------------------------------------
 

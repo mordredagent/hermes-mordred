@@ -131,6 +131,8 @@ class Branch:
     summary: str | None = None
     #: Topics the whole chat runs through; more than one marks a chat that mixes subjects.
     chat_topics: int = 1
+    #: The folder a local session worked in (Claude Code, Codex), when the import recorded it.
+    folder: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -144,6 +146,7 @@ class Branch:
             "excerpt": self.excerpts[0] if self.excerpts else "",
             "summary": self.summary,
             "chat_topics": self.chat_topics,
+            "folder": self.folder,
         }
 
 

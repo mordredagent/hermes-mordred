@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -53,6 +54,30 @@ class Transcript:
     title: str
     entries: tuple[Entry, ...]
     agent_name: str = ""
+    #: The folder the session worked in (Claude Code ``cwd``, Codex ``session_meta.cwd``); empty when unknown.
+    place: str = ""
+
+
+#: ``import_meta`` keys ``place.<source>.p<digest>`` hold each local conversation's working folder;
+#: ``place.<source>.recorded`` marks a source whose every file has been read since places were kept.
+PLACE_PREFIX: Final = "place."
+_MAX_PLACE: Final = 256
+
+
+def place_key(source: str, conv_uid: str) -> str:
+    """The ``import_meta`` key of a conversation's working folder."""
+    digest = hashlib.sha256(conv_uid.encode("utf-8", "surrogateescape")).hexdigest()
+    return f"{PLACE_PREFIX}{source}.p{digest[:31]}"
+
+
+def place_recorded_key(source: str) -> str:
+    return f"{PLACE_PREFIX}{source}.recorded"
+
+
+def stored_place(place: str) -> str | None:
+    """A folder as kept in ``import_meta`` (printable, at most 256 characters), or ``None``."""
+    place = place.strip()
+    return place if place and len(place) <= _MAX_PLACE and place.isprintable() else None
 
 
 def safe_key(value: object, fallback: str) -> str:

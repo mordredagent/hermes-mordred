@@ -153,7 +153,9 @@ LOCAL_TOOLS = frozenset(
 # "History for Hermes").
 TELEGRAM_TOOLS = frozenset({"telegram_ask", "telegram_chats"})
 BROWSER_HISTORY_TOOLS = frozenset({"mordred_browser_history", "mordred_browser_history_episode"})
-READER_TOOLS = TELEGRAM_TOOLS | frozenset({"mordred_history_search"}) | BROWSER_HISTORY_TOOLS
+#: Events from mordred.db (``mordred_hermes.recall.tools``): imported text, like the history search.
+RECALL_TOOLS = frozenset({"mordred_memory_search"})
+READER_TOOLS = TELEGRAM_TOOLS | frozenset({"mordred_history_search"}) | BROWSER_HISTORY_TOOLS | RECALL_TOOLS
 # Fetches new mail into the encrypted store; arguments carry no session data
 # and the result carries counts only, so it is not a reader tool.
 MAIL_SYNC_TOOL = "mordred_mail_sync"

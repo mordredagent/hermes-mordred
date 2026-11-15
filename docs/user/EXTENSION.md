@@ -186,16 +186,111 @@ dependency, so chat invokes the real agent. A stub handler appears only when
 that runtime cannot be imported, and startup logs state which handler was
 selected.
 
-The server does not start automatically. Hermes currently has no plugin boot
-hook for long-running services, so use one of these deployment models:
+On macOS, `hermes-mordred extension agent install` starts the server at every
+login (a LaunchAgent in `~/Library/LaunchAgents`), and launchd starts it again
+when it exits with an error; a clean stop stays stopped. `extension agent
+status` shows whether it runs, `extension agent uninstall` removes it, and its
+output goes to `<HERMES_HOME>/logs/extension-serve.log`.
 
-- Run `extension serve` explicitly in a terminal or process supervisor.
-- Use a compatible legacy/custom gateway only when it explicitly includes the
-  Extension API.
-- Install a launchd/systemd unit whose command is the full
-  `hermes-mordred extension serve` path.
+- Each Hermes home gets its own agent (`com.mordred.hermes.extension` for
+  `~/.hermes`, the same name plus a short hash for any other home).
+- The plist holds no secret: it copies `HERMES_HOME`, `PATH`, `PYTHONPATH`,
+  `LANG` and the `MORDRED_*` settings from the installing shell, except names
+  with a `KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `PASSPHRASE`, `HASH` or
+  `CREDENTIAL(S)` part. Keep secrets in the vault's `.env`. A development home
+  that keeps them in a shell file passes `--env-script FILE`; the agent sources
+  it at each start, so the values never enter the plist.
+- macOS privacy protection keeps login services out of `~/Documents`,
+  `~/Desktop`, `~/Downloads` and iCloud Drive, so `install` refuses a home,
+  `--env-script` or interpreter inside them (the agent could only fail there).
+- At start the server asks for Touch ID to open the vault. With nobody at the
+  Mac it runs with the vault locked until the extension's **Unlock** button
+  (below).
+
+Elsewhere, run `extension serve` in a terminal or a process supervisor
+(systemd), or use a gateway that explicitly includes the Extension API.
 
 Ctrl+C and SIGTERM shut the standalone server down cleanly.
+
+### Starting with the vault locked
+
+The vault holds the server's `.env` secrets and the browser trust state (the
+approval keys and the list of approved browsers), so no browser is admitted
+while it is closed. `extension serve` binds the port first, then opens the
+vault once, which asks for Touch ID (or the login password).
+
+- **Prompt approved:** the server runs as before.
+- **Prompt refused or not answered** (the helper gives up after 120 s): the
+  server keeps running with the vault locked. It answers every browser hello
+  with `auth_fail: vault_locked` at once, without a prompt, so an extension
+  retrying on its own never raises Touch ID. The extension shows "Hermes is
+  locked" with an **Unlock** button; that button sends a hello with
+  `"unlock": true`, and only such a hello (from an extension origin) asks for
+  Touch ID again, one prompt at a time. Once the vault is open, browsers are
+  admitted and the recall topics updater starts.
+- **Vault not trustworthy** (a missing anchor next to vault files, a failed
+  integrity check, an unreadable `.env`): the server stops with exit code 1 and
+  a content-free message, as it did when this check ran before binding.
+
+## Gmail: sign in with Google
+
+The extension imports Gmail after the owner signs in with Google; there is no
+app password to create. Hermes runs the sign-in itself (OAuth 2.0 for installed
+apps): it listens on `127.0.0.1` on a free port, the extension opens Google's
+consent page, and Google sends the browser back to that loopback address with a
+one-time code. Hermes exchanges it (with a PKCE verifier only it holds) for a
+refresh token, seals the token with the Enclave key like an app password (Touch
+ID), and starts the first import. Every fetch turns the refresh token into a
+short-lived access token and logs in with `AUTHENTICATE XOAUTH2`; the session
+stays read-only (`EXAMINE`, `BODY.PEEK[]`).
+
+Hermes needs a Google Cloud OAuth client of type **Desktop app**, created once:
+
+1. In Google Cloud Console, create a project and enable the **Gmail API**.
+2. Configure the OAuth consent screen (External; add your own Google account as
+   a test user) with the scopes `https://mail.google.com/`, `openid` and `email`.
+3. Create an OAuth client ID of type *Desktop app* and copy its ID and secret.
+4. Give them to Hermes, in the environment
+   (`MORDRED_GMAIL_CLIENT_ID`, `MORDRED_GMAIL_CLIENT_SECRET`) or in `config.yaml`:
+
+```yaml
+plugins:
+  mordred_mail:
+    gmail_client_id: 1234-abc.apps.googleusercontent.com
+    gmail_client_secret: GOCSPX-...
+```
+
+Without a client the extension shows that Gmail sign-in is not set up
+(`gmail_oauth_unconfigured`). IMAP accepts no narrower scope than
+`https://mail.google.com/`. While the consent screen is in *Testing*, Google
+expires the refresh token after 7 days; a fetch then fails with
+`gmail_oauth_expired` and the owner removes the mail setup and signs in again.
+Requests to Google follow Hermes's egress route; a SOCKS-only route (Tor) is
+refused (`egress_unsupported`).
+
+## Memory in chat
+
+Every chat turn from the extension (its chat screen and the chat under a
+search) is searched in `mordred.db`: the few matching events (when, which
+tool, which chat, the stored headline and a short quote) are added to the
+user's message for the model. The model can ask for more with the
+`mordred_memory_search` tool; the `mordred:recall` skill tells it how to use
+both. Telegram and hidden chats never appear.
+
+Imported text reaches the model only when it may read it: a loopback model, or
+a Venice model Venice labels private. Before the first block is added, the
+session enters reader mode (as when a reader tool runs), so it can no longer
+write files, run commands or send messages; start a new session for such work.
+
+The Mordred plugin must be enabled (`plugins.enabled: [mordred]`). The search
+runs on the `extension` platform by default; configure it in `config.yaml`:
+
+```yaml
+plugins:
+  mordred_recall:
+    turn_context: true                 # false: never add the block
+    turn_context_platforms: [extension] # cli, tui, desktop also possible
+```
 
 ## Troubleshooting
 

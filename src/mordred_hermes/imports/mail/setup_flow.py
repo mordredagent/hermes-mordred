@@ -232,6 +232,9 @@ class _Request:
     own: tuple[str, ...]
     password: str
     presence: bool
+    #: Gmail signed in with Google: the probe's access token and the refresh token sealed instead of a password.
+    access_token: str = ""
+    refresh_token: str = ""
 
     def __repr__(self) -> str:
         return f"_Request(account={self.account!r}, presence={self.presence})"
@@ -395,6 +398,7 @@ def _credentials(request: _Request, mailboxes: Mapping[str, str], *, gmail: bool
         return MailCredentials(
             address=request.address,
             app_password=request.password,
+            oauth_refresh_token=request.refresh_token,
             imap_host=request.host,
             imap_port=IMAPS_PORT,
             own_addresses=request.own,
@@ -514,6 +518,42 @@ class MailSetupFlows:
             del address, imap_host, extra_addresses, app_password
         raise sever_chain(failure)
 
+    def start_oauth(
+        self,
+        *,
+        address: str,
+        access_token: str,
+        refresh_token: str,
+        account: str = DEFAULT_ACCOUNT,
+        presence: bool = True,
+    ) -> MailSetupFlow:
+        """:meth:`start` for a Gmail signed in with Google (:mod:`.oauth`): the same admission, key, probe and seal.
+
+        The probe logs in with ``AUTHENTICATE XOAUTH2`` and the refresh token is
+        sealed instead of an app password.
+        """
+        failure: MailSetupError
+        try:
+            owner = check_address(address)
+            if not access_token or not refresh_token:
+                raise MailSetupError("imap_auth_failed")
+            request = _Request(
+                owner,
+                GMAIL_HOST,
+                check_account(account),
+                own_address_list(owner, []),
+                "",
+                presence is not False,
+                access_token,
+                refresh_token,
+            )
+            return self._start(request)
+        except MailSetupError as exc:
+            failure = exc
+        finally:
+            del address, access_token, refresh_token
+        raise sever_chain(failure)
+
     def finish(self, flow_id: str, *, selection: str | None) -> MailSetupFlow:
         """Seal the owner's choice under the writer lock (``None``: no sent folder; never for All Mail)."""
         failure: MailSetupError
@@ -625,7 +665,10 @@ class MailSetupFlows:
             failure = _imap_refusal(exc)
         else:
             try:
-                session.login(request.address, request.password)
+                if request.access_token:
+                    session.authenticate_xoauth2(request.address, request.access_token)
+                else:
+                    session.login(request.address, request.password)
                 return session.gmail, session.list_mailboxes()
             except ImapError as exc:
                 failure = _imap_refusal(exc)

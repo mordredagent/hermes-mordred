@@ -23,6 +23,7 @@ import importlib
 import logging
 import signal
 import sys
+import threading
 from collections.abc import Callable
 from types import FrameType
 from typing import TYPE_CHECKING, Any
@@ -31,6 +32,7 @@ from .. import _term
 
 if TYPE_CHECKING:
     from .api import ExtensionAPIServer
+    from .vault_gate import VaultGate
 
 # Mirrors mordred_hermes.extension.api.DEFAULT_HOST / DEFAULT_PORT (protocol
 # constants, SPEC.ja.md §6). Hardcoded rather than imported at module scope so
@@ -135,7 +137,10 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
 
     Returns a process exit code (never raises for the documented failure
     modes): ``2`` if the ``extension`` extra (aiohttp) isn't installed or
-    ``port`` is out of range, ``1`` if binding ``host``:``port`` failed —
+    ``port`` is out of range, ``1`` if the vault turned out not to be
+    trustworthy (an unanswered Touch ID prompt is not that: the server keeps
+    serving with the vault locked, see :mod:`.vault_gate`) or if binding
+    ``host``:``port`` failed —
     already bound (either a stale ``extension serve`` from an earlier
     session or a running Hermes gateway already hosting the extension API),
     unresolvable host, or insufficient privileges — else ``0`` after a clean
@@ -176,19 +181,11 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
         )
         return 2
 
-    try:
-        _load_vault_managed_environment()
-    except Exception:
-        # Secret-provisioning errors can contain vault paths or native backend
-        # details.  Stop before accepting RPCs and keep the CLI diagnostic
-        # content-free; ``encryption status`` supplies the actionable state.
-        print(
-            "error: could not load the vault-managed environment; refusing to "
-            "start. Run `hermes-mordred encryption status` and repair the env "
-            "vault before retrying.",
-            file=sys.stderr,
-        )
-        return 1
+    from .vault_gate import VaultGate
+
+    # The vault opens after the port is bound (one Touch ID prompt), so an
+    # unanswered prompt leaves a server that says "locked" instead of none.
+    gate = VaultGate(_load_vault_managed_environment)
 
     # INFO so ExtensionAPIServer.start()'s "Mordred extension API on ws://..."
     # line reaches the console; this is a foreground/CLI launcher, not a
@@ -206,9 +203,10 @@ def serve(host: str = _DEFAULT_HOST, port: int = _DEFAULT_PORT) -> int:
         chat_handler=chat_handler,
         activity_receiver=_resolve_activity_receiver(),
         activity_max_batch_bytes=_resolve_activity_max_batch_bytes(),
+        vault_gate=gate,
     )
     color = _term.should_color(sys.stdout)
-    return _run_forever(server, host, port, color)
+    return _run_forever(server, host, port, color, gate)
 
 
 def _bind_failure(exc: OSError, host: str, port: int, *, platform: str = sys.platform) -> str:
@@ -323,7 +321,26 @@ def _cancel_remaining(loop: asyncio.AbstractEventLoop) -> None:
         loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
 
 
-def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool) -> int:
+_VAULT_FATAL_MESSAGE = (
+    "error: could not load the vault-managed environment; stopping. Run "
+    "`hermes-mordred encryption status` and repair the env vault before retrying."
+)
+
+
+def _open_vault_in_background(gate: VaultGate) -> None:
+    """The start-up unlock, off the event loop. A daemon thread: a stop while the
+    Touch ID prompt is still open must not wait for the helper's timeout. A fatal
+    vault has already stopped the server (``VaultGate.on_fatal``)."""
+    from .vault_gate import VaultFatal
+
+    def run() -> None:
+        with contextlib.suppress(VaultFatal):
+            gate.open_at_start()
+
+    threading.Thread(target=run, name="vault-open", daemon=True).start()
+
+
+def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool, gate: VaultGate | None = None) -> int:
     """Own the event loop for the life of the server: bind, print the startup
     banner, block until interrupted, then shut down cleanly.
 
@@ -357,6 +374,20 @@ def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool) 
             print(_bind_failure(exc, host, port), file=sys.stderr)
             return 1
 
+        # A vault that cannot be trusted stops the server: secret-provisioning
+        # errors can name vault paths or native details, so the line stays
+        # content-free; ``encryption status`` supplies the actionable state.
+        fatal = threading.Event()
+        if gate is not None:
+
+            def on_fatal() -> None:
+                fatal.set()
+                with contextlib.suppress(RuntimeError):
+                    loop.call_soon_threadsafe(stop.set)
+
+            gate.on_fatal(on_fatal)
+            _open_vault_in_background(gate)
+
         # Additive user-facing signal that the server is up. The INFO log
         # line from ExtensionAPIServer.start() ("Mordred extension API on
         # ws://...") is for log consumers; this print is for a human
@@ -381,6 +412,9 @@ def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool) 
             loop.run_until_complete(_bounded_stop(server, _STOP_GRACE_SECONDS))
             _cancel_remaining(loop)
             print("Stopped.")
+        if fatal.is_set():
+            print(_VAULT_FATAL_MESSAGE, file=sys.stderr)
+            return 1
         return 0
     finally:
         loop.close()

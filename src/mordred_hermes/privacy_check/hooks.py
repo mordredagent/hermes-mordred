@@ -301,6 +301,27 @@ def _enter_reader_mode(
     return None
 
 
+def enter_reader_mode_for_context(session_id: str | None, source: str) -> bool:
+    """Enter reader mode before Mordred adds imported history to a turn itself (no tool call).
+
+    The same durable record and audit as a reader tool (:func:`_enter_reader_mode`),
+    with ``source`` in place of the tool name. ``True`` when the session is now a
+    reader session and may receive the text; any failure is ``False`` and nothing
+    may be added.
+    """
+    from . import egress
+
+    try:
+        state = _runtime.ensure_state()
+        home = _reader_home(state)
+        checked = getattr(state, "checked", None)
+        policy = checked.egress if checked is not None else egress.load_policy()
+        return _enter_reader_mode(state, source, session_id, home, policy.level) is None
+    except Exception:
+        _LOG.exception("reader-mode entry failed; %s adds nothing", source)
+        return False
+
+
 def _reader_unrecorded(state: Any, tool_name: str, level: str, code: str) -> dict[str, Any]:
     """Refuse a reader tool whose session could not be recorded (``code`` is content-free)."""
     from . import egress

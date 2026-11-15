@@ -1,6 +1,6 @@
 """Codex rollouts: ``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``.
 
-``session_meta`` names the session; ``response_item`` rows whose payload is a
+``session_meta`` names the session and the folder it worked in (``cwd``); ``response_item`` rows whose payload is a
 ``message`` from ``user`` or ``assistant`` carry the turns. Reasoning, tool
 calls, tool output and token counts are skipped: they dominate the bytes and
 are not something the user said or was told. An entry's key is its ordinal
@@ -34,6 +34,7 @@ def files(root: Path) -> Iterator[Path]:
 
 def read(path: Path) -> list[Transcript]:
     session: str | None = None
+    place = ""
     entries: list[Entry] = []
     for row in rows(path):
         payload = row.get("payload")
@@ -41,6 +42,7 @@ def read(path: Path) -> list[Transcript]:
             continue
         if row.get("type") == "session_meta" and session is None:
             session = str(payload.get("id") or payload.get("session_id") or "") or None
+            place = payload["cwd"] if isinstance(payload.get("cwd"), str) else ""
             continue
         if row.get("type") != "response_item" or payload.get("type") != "message":
             continue
@@ -61,4 +63,4 @@ def read(path: Path) -> list[Transcript]:
     if not entries:
         return []
     kept = tuple(entries)
-    return [Transcript(key=safe_key(session or path.stem, path.stem), title=title_of(kept), entries=kept)]
+    return [Transcript(key=safe_key(session or path.stem, path.stem), title=title_of(kept), entries=kept, place=place)]

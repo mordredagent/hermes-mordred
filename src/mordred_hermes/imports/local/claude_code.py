@@ -3,7 +3,8 @@
 One row per event; ``user`` and ``assistant`` rows carry ``message.content`` as
 a string or a list of blocks. Only ``text`` blocks are kept (tool use, tool
 results and thinking are skipped), and so are meta rows (``isMeta``) and
-sub-agent rows (``isSidechain``). An entry's key is the row's ``uuid``.
+sub-agent rows (``isSidechain``). An entry's key is the row's ``uuid``. The
+first row's ``cwd`` is the folder the session worked in.
 """
 
 from __future__ import annotations
@@ -40,11 +41,14 @@ def files(root: Path) -> Iterator[Path]:
 def read(path: Path) -> list[Transcript]:
     session: str | None = None
     title = ""
+    place = ""
     entries: list[Entry] = []
     seen: set[str] = set()
     for row in rows(path):
         if session is None and isinstance(row.get("sessionId"), str):
             session = row["sessionId"]
+        if not place and isinstance(row.get("cwd"), str):
+            place = row["cwd"]
         if row.get("type") == "custom-title" and isinstance(row.get("customTitle"), str):
             title = row["customTitle"].strip()[:80]
         role = row.get("type")
@@ -68,4 +72,8 @@ def read(path: Path) -> list[Transcript]:
     if not entries:
         return []
     kept = tuple(entries)
-    return [Transcript(key=safe_key(session or path.stem, path.stem), title=title or title_of(kept), entries=kept)]
+    return [
+        Transcript(
+            key=safe_key(session or path.stem, path.stem), title=title or title_of(kept), entries=kept, place=place
+        )
+    ]

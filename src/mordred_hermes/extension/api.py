@@ -26,6 +26,13 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
 - ``recall_query`` / ``recall_open`` / ``recall_dismiss`` → :mod:`mordred_hermes.recall` over
   ``mordred.db``'s import tables; the selection arrives sealed and the cards and context
   leave sealed with the socket's session key (``recall_result`` / ``recall_opened`` / ``recall_dismissed``)
+- ``recall_recommend`` (``recall_recommend_v1``) → memories for the same search, picked and
+  explained by a loopback local model (:mod:`mordred_hermes.recall.recommend`), streamed as
+  sealed ``recall_recommend_item`` frames and one ``recall_recommend_end``;
+  ``recall_recommend_cancel`` stops it (no reply)
+- ``recall_restore`` / ``recall_hidden`` → show a hidden conversation again, or list the
+  hidden ones (sealed, with their source and title): ``recall_restored`` /
+  ``recall_hidden_result`` (``recall_restore_v1``)
 - ``recall_events`` (prototype) → :mod:`mordred_hermes.recall.events`: the typed words' hits
   grouped into events, headlined by a loopback-only local model when one is configured;
   sealed both ways (``recall_events_result``). ``mode: "selection"`` takes a page
@@ -50,6 +57,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -76,7 +84,9 @@ from .discord_context import (
     resolve_discord_channel,
 )
 from .errors import wire_error_code
+from .health import HEALTH_CAPABILITY
 from .imports_api import IMPORTS_CAPABILITY, ImportsRefusal
+from .vault_gate import LOCKED_REASON, VaultFatal, VaultGate, always_open
 from .wallet import _do_sign, _get_account_snapshot, _prepare_sign, analyze_sign
 
 # Slack tokens land verbatim in ~/.hermes/.env as ``KEY=value`` lines. A prefix
@@ -113,7 +123,13 @@ _EXTENSION_CAPABILITIES = [
     "recall_events_v1",
     # ``recall_events`` with ``mode: "selection"``: a page selection, searched by its derived keywords.
     "recall_events_selection_v1",
+    # ``recall_restore`` / ``recall_hidden``: undo a dismissal, and list the hidden conversations.
+    "recall_restore_v1",
+    # ``recall_recommend``: memories for a search, picked and explained by a local model, streamed.
+    "recall_recommend_v1",
     IMPORTS_CAPABILITY,
+    # ``health``: each feature's state (ok / off / down) and reason code (:mod:`.health`).
+    HEALTH_CAPABILITY,
 ]
 
 # A sign_request entry leaves _pending_sign only on approve/reject (or when the
@@ -151,6 +167,8 @@ _MAX_TELEGRAM_DIALOG_IDS = 50
 # Questions run as their own tasks (a Venice answer can take minutes and must
 # not stall the socket's other frames); cap how many one socket may run.
 _MAX_TELEGRAM_ASKS_PER_SOCKET = 2
+# One panel and one popup may each be recommending at once.
+_MAX_RECALL_RECOMMENDS_PER_SOCKET = 2
 _TELEGRAM_DIALOG_ID_RE = re.compile(r"-?[0-9]{1,20}")
 
 
@@ -285,6 +303,7 @@ class ExtensionAPIServer:
         keepalive_interval: float = DEFAULT_KEEPALIVE_INTERVAL,
         activity_receiver: Any = None,
         activity_max_batch_bytes: int = activity_api.DEFAULT_MAX_BATCH_BYTES,
+        vault_gate: VaultGate | None = None,
     ) -> None:
         if not _is_loopback_host(host):
             raise ValueError(f"extension API host must be loopback-only (got {host!r})")
@@ -302,6 +321,9 @@ class ExtensionAPIServer:
         # ``None`` → every activity_batch answers ``activity_refused: store_unavailable``.
         self.activity_receiver = activity_receiver
         self.activity_max_batch_bytes = activity_max_batch_bytes
+        # ``extension serve`` passes the gate it opens in the background; a
+        # server hosted elsewhere got its secrets before it was built.
+        self.vault_gate = vault_gate if vault_gate is not None else always_open()
         self._runner: web.AppRunner | None = None
         self._topics_updater: Any = None
         # Per-process page principal. It is printed only as a URL fragment by
@@ -361,7 +383,9 @@ class ExtensionAPIServer:
             self.host,
             self.port,
         )
-        self._start_topics_updater()
+        # The updater reads the store and the model settings from the vault's
+        # environment, so it waits for the vault.
+        self.vault_gate.on_open(self._start_topics_updater)
 
     def _start_topics_updater(self) -> None:
         """Keep recall's stored events and topics current (prototype; ``MORDRED_RECALL_TOPICS=0`` turns it off)."""
@@ -370,6 +394,7 @@ class ExtensionAPIServer:
         try:
             self._topics_updater = self.recall_service.topics_updater()
             self._topics_updater.start()
+            _log.info("recall topics updater started")
         except Exception:
             _log.exception("recall topics updater not started")
 
@@ -439,6 +464,7 @@ class ExtensionAPIServer:
             client_origin=origin,
             activity_receiver=self.activity_receiver,
             activity_max_batch_bytes=self.activity_max_batch_bytes,
+            vault_gate=self.vault_gate,
         )
         await conn.send_challenge()
         keepalive = asyncio.create_task(conn.keepalive(self.keepalive_interval))
@@ -470,8 +496,10 @@ class _Connection:
         client_origin: str | None = None,
         activity_receiver: Any = None,
         activity_max_batch_bytes: int = activity_api.DEFAULT_MAX_BATCH_BYTES,
+        vault_gate: VaultGate | None = None,
     ) -> None:
         self.ws = ws
+        self.vault_gate = vault_gate if vault_gate is not None else always_open()
         self.chat_handler = chat_handler
         self.discord_resolver = discord_resolver
         self.telegram_service = telegram_service
@@ -500,12 +528,17 @@ class _Connection:
         self._nonce = b""
         self._pending_sign: dict[str, dict[str, Any]] = {}
         self._telegram_asks: dict[str, asyncio.Task[None]] = {}
+        self._recall_recommends: dict[str, tuple[asyncio.Task[None], threading.Event]] = {}
 
     def cancel_background_tasks(self) -> None:
         """Stop work that would otherwise outlive this socket (and keep billing)."""
         for task in list(self._telegram_asks.values()):
             task.cancel()
         self._telegram_asks.clear()
+        for task, stop in list(self._recall_recommends.values()):
+            stop.set()
+            task.cancel()
+        self._recall_recommends.clear()
 
     async def _send(self, payload: dict[str, Any]) -> bool:
         # A client that disconnected mid-turn (e.g. during a slow local-LLM
@@ -596,8 +629,13 @@ class _Connection:
             "recall_events": self._on_recall_events,
             "recall_open": self._on_recall_open,
             "recall_dismiss": self._on_recall_dismiss,
+            "recall_restore": self._on_recall_restore,
+            "recall_hidden": self._on_recall_hidden,
+            "recall_recommend": self._on_recall_recommend,
+            "recall_recommend_cancel": self._on_recall_recommend_cancel,
             "imports_status": self._on_imports_status,
             "imports_call": self._on_imports_call,
+            "health": self._on_health,
         }
         try:
             if mtype in pre_auth:
@@ -744,6 +782,9 @@ class _Connection:
 
     async def _on_auth2_hello(self, msg: dict[str, Any]) -> None:
         self._invalidate_authentication()
+        if not await self._vault_open(msg):
+            await self._send({"type": "auth_fail", "reason": LOCKED_REASON})
+            return
         try:
             hello = _Hello.parse(msg, self._nonce, self.client_origin)
             state = await _in_executor(trust.store().ensure_root)
@@ -775,6 +816,24 @@ class _Connection:
                 "endorsements": [state.hermes_id] if state.hermes_id else [],
             }
         )
+
+    async def _vault_open(self, msg: dict[str, Any]) -> bool:
+        """Whether the vault is open, asking for Touch ID only when the hello asks to unlock.
+
+        Only the extension's unlock button sets ``unlock``; an automatic
+        reconnect is answered at once, so it never raises a prompt.
+        """
+        gate = self.vault_gate
+        if gate.is_open():
+            return True
+        if msg.get("unlock") is not True or not self.client_origin or not _is_extension_origin(self.client_origin):
+            return False
+        try:
+            state: str = await _in_executor(gate.unlock)
+        except VaultFatal:
+            # ``extension serve`` stops on this (``VaultGate.on_fatal``).
+            return False
+        return state == "open"
 
     async def _on_device_enroll(self, msg: dict[str, Any]) -> None:
         """Ask the owner at the Mac to approve the browser of the pending hello."""
@@ -1214,6 +1273,114 @@ class _Connection:
         else:
             await self._send({"id": mid, "type": "recall_dismissed", "ok": True})
 
+    async def _on_recall_recommend(self, msg: dict[str, Any]) -> None:
+        mid = msg.get("id")
+        ek = self._telegram_key()
+        if ek is None:
+            await self._send(
+                {"id": mid, "type": "recall_recommend_end", "ok": False, "error": "encryption_key_unavailable"}
+            )
+            return
+        sealed = msg.get("text")
+        mode = msg.get("mode", "words")
+        if (
+            not isinstance(mid, str)
+            or not mid
+            or mid in self._recall_recommends
+            or not isinstance(sealed, str)
+            or not is_encrypted(sealed)
+            or mode not in ("words", "selection")
+        ):
+            await self._send({"id": mid, "type": "recall_recommend_end", "ok": False, "error": "invalid_request"})
+            return
+        if len(self._recall_recommends) >= _MAX_RECALL_RECOMMENDS_PER_SOCKET:
+            await self._send({"id": mid, "type": "recall_recommend_end", "ok": False, "error": "too_many_requests"})
+            return
+        try:
+            text = decrypt_message(ek, sealed)
+        except DecryptError:
+            await self._send({"id": mid, "type": "recall_recommend_end", "ok": False, "error": "undecryptable"})
+            return
+        stop = threading.Event()
+        task = asyncio.create_task(self._run_recall_recommend(mid, text, mode == "selection", ek, stop))
+        self._recall_recommends[mid] = (task, stop)
+        task.add_done_callback(lambda _t: self._recall_recommends.pop(mid, None))
+
+    async def _on_recall_recommend_cancel(self, msg: dict[str, Any]) -> None:
+        """Stop a running recommendation (the panel closed or searched again). No reply."""
+        mid = msg.get("id")
+        running = self._recall_recommends.get(mid) if isinstance(mid, str) else None
+        if running is not None:
+            running[1].set()
+            running[0].cancel()
+
+    async def _run_recall_recommend(
+        self, mid: str, text: str, selection: bool, ek: bytes, stop: threading.Event
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        found: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        def on_item(memory: dict[str, Any]) -> None:
+            loop.call_soon_threadsafe(found.put_nowait, memory)
+
+        work = asyncio.ensure_future(
+            self._recall_call(
+                lambda svc: svc.recommend(text, selection=selection, on_item=on_item, cancelled=stop.is_set)
+            )
+        )
+        try:
+            while True:
+                getter = asyncio.ensure_future(found.get())
+                done, _pending = await asyncio.wait({getter, work}, return_when=asyncio.FIRST_COMPLETED)
+                if getter in done:
+                    sealed = self._telegram_seal(ek, json.dumps(getter.result(), ensure_ascii=False))
+                    if not await self._send({"id": mid, "type": "recall_recommend_item", "content": sealed}):
+                        stop.set()
+                        return
+                    continue
+                getter.cancel()
+                while not found.empty():
+                    sealed = self._telegram_seal(ek, json.dumps(found.get_nowait(), ensure_ascii=False))
+                    if not await self._send({"id": mid, "type": "recall_recommend_item", "content": sealed}):
+                        return
+                _count, error = work.result()
+                if error is not None:
+                    await self._send({"id": mid, "type": "recall_recommend_end", "ok": False, "error": error})
+                else:
+                    await self._send({"id": mid, "type": "recall_recommend_end", "ok": True})
+                return
+        except asyncio.CancelledError:
+            stop.set()
+            raise
+
+    async def _on_recall_restore(self, msg: dict[str, Any]) -> None:
+        mid = msg.get("id")
+        conv_uid = msg.get("conv_uid")
+        if not isinstance(conv_uid, str) or not _RECALL_UID_RE.fullmatch(conv_uid):
+            await self._send({"id": mid, "type": "recall_restored", "ok": False, "error": "invalid_request"})
+            return
+        _, error = await self._recall_call(lambda svc: svc.restore(conv_uid))
+        if error is not None:
+            await self._send({"id": mid, "type": "recall_restored", "ok": False, "error": error})
+        else:
+            await self._send({"id": mid, "type": "recall_restored", "ok": True})
+
+    async def _on_recall_hidden(self, msg: dict[str, Any]) -> None:
+        mid = msg.get("id")
+        ek = self._telegram_key()
+        if ek is None:
+            await self._send(
+                {"id": mid, "type": "recall_hidden_result", "ok": False, "error": "encryption_key_unavailable"}
+            )
+            return
+        hidden, error = await self._recall_call(lambda svc: svc.hidden())
+        if error is not None:
+            await self._send({"id": mid, "type": "recall_hidden_result", "ok": False, "error": error})
+        else:
+            # Titles are chat names: they leave sealed like the rest of recall.
+            content = self._telegram_seal(ek, json.dumps({"hidden": hidden}, ensure_ascii=False))
+            await self._send({"id": mid, "type": "recall_hidden_result", "ok": True, "content": content})
+
     # -- Imports (the Desktop plugin's import screens) -------------------------
     #
     # Both directions are sealed with K_extchat: the requests carry phone
@@ -1240,6 +1407,18 @@ class _Connection:
             return
         content = self._telegram_seal(ek, json.dumps(status, ensure_ascii=False))
         await self._send({"id": mid, "type": "imports_status_result", "ok": True, "content": content})
+
+    async def _on_health(self, msg: dict[str, Any]) -> None:
+        """Each feature's state and reason code; codes only, so the reply is not sealed."""
+        from .._home import hermes_home
+        from . import health
+
+        items = await health.collect(
+            home=Path(hermes_home()),
+            chat_is_stub=self.chat_handler is _default_chat_handler,
+            telegram_status=lambda: self._telegram_ready().status(),
+        )
+        await self._send({"id": msg.get("id"), "type": "health_result", "items": items})
 
     async def _on_imports_call(self, msg: dict[str, Any]) -> None:
         mid = msg.get("id")

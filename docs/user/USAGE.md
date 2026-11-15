@@ -1454,10 +1454,12 @@ lid is closed), each unlock shows the macOS login-password dialog instead.
 **Recommended: create the SE key in unattended mode** — especially if anything
 starts Hermes in the **background** (a launchd-started gateway, `extension
 serve`). An attended key blocks a background process on a Touch ID prompt it can
-never answer: after the 120 s helper timeout the process starts **without** the
-vault-managed secrets (e.g. a Slack bot token sealed in `.env` silently drops
+never answer: after the 120 s helper timeout a gateway process starts **without**
+the vault-managed secrets (e.g. a Slack bot token sealed in `.env` silently drops
 that platform, with only a `Mordred component 'keyvault' failed to register:
-... auth_failed` error in the logs). To make the hot path **silent** (no Touch ID
+... auth_failed` error in the logs), and `extension serve` runs with its vault
+locked until the extension's **Unlock** button gets a Touch ID approval (see
+[EXTENSION.md](EXTENSION.md#starting-with-the-vault-locked)). To make the hot path **silent** (no Touch ID
 while the Mac is unlocked), install the helper and select **unattended** policy
 on a later fresh device-key creation command:
 

@@ -268,3 +268,19 @@ def test_messages_added_this_turn_identical_returns_empty():
 def test_messages_added_this_turn_empty_base_returns_all():
     msgs = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
     assert extension_chat._messages_added_this_turn([], msgs) == msgs
+
+
+def test_the_extension_chat_offers_its_configured_toolsets_else_memory_and_lookups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hermes_cli.config as hermes_config
+    import hermes_cli.tools_config as tools_config
+
+    monkeypatch.setattr(hermes_config, "load_config", lambda: {"model": {}})
+    assert extension_chat.extension_toolsets() == list(extension_chat.DEFAULT_TOOLSETS)
+    assert "terminal" not in extension_chat.DEFAULT_TOOLSETS and "mordred_recall" in extension_chat.DEFAULT_TOOLSETS
+
+    configured = {"platform_toolsets": {"extension": ["web"]}}
+    monkeypatch.setattr(hermes_config, "load_config", lambda: configured)
+    monkeypatch.setattr(tools_config, "_get_platform_tools", lambda config, platform: {"web", "skills"})
+    assert extension_chat.extension_toolsets() == ["skills", "web"]

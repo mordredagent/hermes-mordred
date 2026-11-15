@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from mordred_hermes.imports.local import LocalImportError, claude_code, codex, grok_bot, run_local_import
+from mordred_hermes.imports.local._model import place_key, place_recorded_key
 from mordred_hermes.imports.local.runner import local_status
 from mordred_hermes.imports.records import Source, local_conv_uid, local_source_uid, source_of
 from mordred_hermes.imports.store import ImportStore
@@ -230,3 +231,33 @@ def test_local_status_reports_folders_only(tmp_path: Path) -> None:
         "claude_code": {"available": False},
         "grok_bot": {"available": False},
     }
+
+
+def test_the_working_folder_is_kept_and_a_store_without_places_is_read_once_more(
+    tmp_path: Path, store: ImportStore
+) -> None:
+    rows = _claude_rows()
+    rows[1]["cwd"] = "/Users/me/repos/fpga-project-002"
+    root = tmp_path / "claude"
+    _jsonl(root / "proj/cc-1.jsonl", rows)
+    [transcript] = claude_code.read(root / "proj/cc-1.jsonl")
+    assert transcript.place == "/Users/me/repos/fpga-project-002"
+    codex_rows = _codex_rows()
+    codex_rows[0] = {**codex_rows[0], "payload": {"id": "sess-1", "cwd": "/Users/me/repos/app"}}
+    [codex_transcript] = codex.read(_jsonl(tmp_path / "x/rollout-b.jsonl", codex_rows))
+    assert codex_transcript.place == "/Users/me/repos/app"
+
+    first = _run(Source.CLAUDE_CODE, store, tmp_path, root)
+    assert first["files_changed"] == 1
+    conv = local_conv_uid(Source.CLAUDE_CODE, "cc-1")
+    places = store.meta_items("place.claude_code.")
+    assert places[place_key("claude_code", conv)] == "/Users/me/repos/fpga-project-002"
+    assert places[place_recorded_key("claude_code")] == "1"
+    assert _run(Source.CLAUDE_CODE, store, tmp_path, root)["files_changed"] == 0
+
+    # A store imported before places were kept reads every file once, without writing anything twice.
+    store.delete_meta(place_recorded_key("claude_code"))
+    store.delete_meta(place_key("claude_code", conv))
+    again = _run(Source.CLAUDE_CODE, store, tmp_path, root)
+    assert (again["files_changed"], again["inserted"]) == (1, 0)
+    assert store.meta_items("place.claude_code.")[place_key("claude_code", conv)] == "/Users/me/repos/fpga-project-002"
