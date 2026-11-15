@@ -121,6 +121,24 @@ def test_service_maps_a_refused_store_to_a_content_free_code(tmp_path: Path) -> 
     assert caught.value.code == "import_store_unavailable"
 
 
+def test_service_maps_a_busy_store_to_store_busy(tmp_path: Path) -> None:
+    """A store held by another connection (a topics rebuild) is a passing state the client retries."""
+    from mordred_hermes.imports.store import ImportRefused
+
+    def busy(_home: Path) -> ImportStore:
+        raise ImportRefused("busy")
+
+    class HeldStore:
+        def connection(self) -> object:
+            raise ImportRefused("busy")
+
+    with pytest.raises(RecallError) as at_open:
+        RecallService(opener=busy, home=tmp_path).query("経費精算")
+    with pytest.raises(RecallError) as mid_query:
+        RecallService(opener=lambda _home: HeldStore(), home=tmp_path).conversation("p1")  # type: ignore[arg-type,return-value]
+    assert (at_open.value.code, mid_query.value.code) == ("store_busy", "store_busy")
+
+
 def test_service_cuts_the_selection(store: ImportStore, tmp_path: Path) -> None:
     result = RecallService(opener=lambda _home: store, home=tmp_path).query("経" * 5000)
     assert len(result["query"]) == 4000

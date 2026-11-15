@@ -3,7 +3,9 @@
 The store is opened afresh for every request, like the Telegram history path:
 the protection gate (armed, keyed SQLCipher, no pending conversion) is checked
 each time, and nothing is cached across a key change. Every failure becomes a
-content-free :class:`RecallError` code.
+content-free :class:`RecallError` code; a store held by another connection past
+the busy timeout is ``store_busy`` (retry shortly), any other refusal
+``import_store_unavailable``.
 """
 
 from __future__ import annotations
@@ -40,6 +42,12 @@ class RecallError(Exception):
         self.code = code
 
 
+def _refused_code(store_code: str) -> str:
+    """``store_busy`` while another connection holds the store (e.g. a topics rebuild), a
+    passing state worth retrying; every other refusal is ``import_store_unavailable``."""
+    return "store_busy" if store_code == "busy" else "import_store_unavailable"
+
+
 def _default_opener(home: Path) -> RecallStore:
     from ..imports.store import open_import_store
 
@@ -66,7 +74,7 @@ class RecallService:
             return RecallIndex(self._store())
         except ImportRefused as exc:
             _log.info("recall: import store not opened (%s)", exc.code)
-            raise RecallError("import_store_unavailable") from None
+            raise RecallError(_refused_code(exc.code)) from None
 
     def _guarded(self, run: Callable[[RecallIndex], _T]) -> _T:
         from ..imports.store import ImportRefused
@@ -76,7 +84,7 @@ class RecallService:
             return run(index)
         except ImportRefused as exc:
             _log.info("recall: store refused (%s)", exc.code)
-            raise RecallError("import_store_unavailable") from None
+            raise RecallError(_refused_code(exc.code)) from None
 
     def query(self, text: str, *, limit: int = 8, words: bool = False) -> dict[str, Any]:
         """A selection's recall, or with ``words`` the parts containing every typed word."""
