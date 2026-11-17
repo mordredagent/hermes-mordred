@@ -87,7 +87,7 @@ def default_runner(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     if sys.platform == "win32":
         env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     try:
-        return subprocess.run(
+        return subprocess.run(  # noqa: S603 - list argv, no shell
             list(argv),
             capture_output=True,
             text=True,
@@ -138,7 +138,7 @@ def _looks_like_python(path: Path) -> bool:
 def _environment_root(python: Path) -> Path | None:
     """The venv / conda root of ``python``, or ``None`` for a system interpreter."""
     if sys.platform == "win32":
-        from .._windows_runtime import environment_root
+        from .._core._windows_runtime import environment_root
 
         return environment_root(python)
     root = python.parent.parent
@@ -199,7 +199,7 @@ def _python_from_managed_launcher(launcher: Path, runner: Runner) -> Path | None
 def find_hermes_python(home: Path, launcher: Path | None, *, runner: Runner) -> Path | None:
     """The interpreter of Hermes's environment, found the way ``install.sh`` finds it."""
     if sys.platform == "win32":
-        from .._windows_runtime import resolve_windows_python
+        from .._core._windows_runtime import resolve_windows_python
 
         return resolve_windows_python(home, launcher, override=os.environ.get("MORDRED_HERMES_PYTHON"), runner=runner)
     if launcher is not None:

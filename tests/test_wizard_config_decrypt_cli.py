@@ -37,6 +37,15 @@ def _no_running_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_runtime_gate, "_default_gateway_discovery", lambda *, home: [])
 
 
+def _setup(tmp_path: Path) -> tuple[Path, Path, FakeBackend, FakeAnchorStore]:
+    root, home = tmp_path / "v", tmp_path / "home"
+    home.mkdir()
+    backend, store = FakeBackend(), FakeAnchorStore()
+    _init_empty_vault(root, backend, store)
+    (home / "config.yaml").write_bytes(_CONFIG)
+    return root, home, backend, store
+
+
 def _read_vault_config(root: Path, backend: FakeBackend, store: FakeAnchorStore) -> bytes | None:
     key_id = anchor_label = _identity.vault_identity(root)
     with vault.open_vault(root, key_id=key_id, backend=backend, store=store, anchor_label=anchor_label) as opened:
@@ -49,11 +58,7 @@ class TestEnable:
     ) -> None:
         # enable runs via the same interpreter whose startup would seal config.yaml,
         # so it reports whether THIS runtime's decrypt hook is present (UX 2026-06-17).
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / "config.yaml").write_bytes(_CONFIG)
+        root, home, backend, store = _setup(tmp_path)
         monkeypatch.setattr(config_decrypt_cli, "config_hook_installed", lambda: True)
 
         assert config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store) == 0
@@ -69,11 +74,7 @@ class TestEnable:
     def test_enable_message_warns_when_hook_absent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / "config.yaml").write_bytes(_CONFIG)
+        root, home, backend, store = _setup(tmp_path)
         monkeypatch.setattr(config_decrypt_cli, "config_hook_installed", lambda: False)
 
         assert config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store) == 0
@@ -134,11 +135,7 @@ class TestEnable:
 
 class TestDisable:
     def test_removes_marker_keeps_plaintext(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / "config.yaml").write_bytes(_CONFIG)
+        root, home, backend, store = _setup(tmp_path)
         config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store)
 
         rc = config_decrypt_cli.disable(home=home, root=root, backend=backend, store=store)
@@ -148,11 +145,7 @@ class TestDisable:
 
     def test_recovers_plaintext_when_sealed_away(self, tmp_path: Path) -> None:
         """If the plaintext was sealed (removed) while managed, disable decrypts it back."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / "config.yaml").write_bytes(_CONFIG)
+        root, home, backend, store = _setup(tmp_path)
         config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store)
         (home / "config.yaml").unlink()  # simulate a sealed (reseal-on-exit) state
 
@@ -195,11 +188,7 @@ class TestDisable:
 
 class TestPurge:
     def test_unenrolls_and_keeps_plaintext(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / "config.yaml").write_bytes(_CONFIG)
+        root, home, backend, store = _setup(tmp_path)
         config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store)
 
         rc = config_decrypt_cli.purge(home=home, root=root, backend=backend, store=store)
@@ -210,11 +199,7 @@ class TestPurge:
 
     def test_restores_sealed_plaintext_then_unenrolls(self, tmp_path: Path) -> None:
         """Safe order: a sealed-away plaintext is recovered BEFORE the vault copy is dropped."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / "config.yaml").write_bytes(_CONFIG)
+        root, home, backend, store = _setup(tmp_path)
         config_decrypt_cli.enable(home=home, root=root, platform="linux", backend=backend, store=store)
         (home / "config.yaml").unlink()  # sealed (reseal-on-exit removed the plaintext)
 
@@ -290,18 +275,10 @@ class TestRuntimeGate:
     refuses and leaves every byte of state untouched.
     """
 
-    def _setup(self, tmp_path: Path) -> tuple[Path, Path, FakeBackend, FakeAnchorStore]:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / "config.yaml").write_bytes(_CONFIG)
-        return root, home, backend, store
-
     def test_refuses_and_keeps_state_when_runtime_cannot_decrypt(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        root, home, backend, store = self._setup(tmp_path)
+        root, home, backend, store = _setup(tmp_path)
         rc = config_decrypt_cli.enable(
             home=home,
             root=root,
@@ -321,7 +298,7 @@ class TestRuntimeGate:
         assert "refusing to vault-seal config.yaml" in (out.err + out.out)
 
     def test_force_bypasses_the_gate(self, tmp_path: Path) -> None:
-        root, home, backend, store = self._setup(tmp_path)
+        root, home, backend, store = _setup(tmp_path)
         rc = config_decrypt_cli.enable(
             home=home,
             root=root,
@@ -336,7 +313,7 @@ class TestRuntimeGate:
         assert _read_vault_config(root, backend, store) == _CONFIG  # enrolled despite unverified runtime
 
     def test_gate_not_applied_off_macos(self, tmp_path: Path) -> None:
-        root, home, backend, store = self._setup(tmp_path)
+        root, home, backend, store = _setup(tmp_path)
         rc = config_decrypt_cli.enable(
             home=home,
             root=root,
@@ -350,7 +327,7 @@ class TestRuntimeGate:
         assert _read_vault_config(root, backend, store) == _CONFIG
 
     def test_proceeds_when_runtime_can_decrypt(self, tmp_path: Path) -> None:
-        root, home, backend, store = self._setup(tmp_path)
+        root, home, backend, store = _setup(tmp_path)
         rc = config_decrypt_cli.enable(
             home=home,
             root=root,
@@ -370,14 +347,6 @@ class TestRunningGatewayGate:
     config.yaml it cannot materialize (the 2026-06-25 incident shape).
     """
 
-    def _setup(self, tmp_path: Path) -> tuple[Path, Path, FakeBackend, FakeAnchorStore]:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_empty_vault(root, backend, store)
-        (home / "config.yaml").write_bytes(_CONFIG)
-        return root, home, backend, store
-
     def _gateway_python(self, tmp_path: Path) -> Path:
         bindir = tmp_path / "repo" / ".venv" / "bin"
         bindir.mkdir(parents=True)
@@ -388,7 +357,7 @@ class TestRunningGatewayGate:
     def test_refuses_when_the_running_gateway_lacks_the_hook(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        root, home, backend, store = self._setup(tmp_path)
+        root, home, backend, store = _setup(tmp_path)
         gateway = self._gateway_python(tmp_path)
         monkeypatch.setattr(
             _runtime_gate, "_default_gateway_discovery", lambda *, home: [GatewayRuntime(pid=4242, python=gateway)]
@@ -414,7 +383,7 @@ class TestRunningGatewayGate:
     def test_proceeds_when_the_running_gateway_has_the_hook(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        root, home, backend, store = self._setup(tmp_path)
+        root, home, backend, store = _setup(tmp_path)
         gateway = self._gateway_python(tmp_path)
         monkeypatch.setattr(
             _runtime_gate, "_default_gateway_discovery", lambda *, home: [GatewayRuntime(pid=9, python=gateway)]

@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..keyvault._uninstall_authority import UninstallAuthorization
 from . import _term
 from ._windows_gates import (
     CUSTODY_FAILURES,
@@ -99,7 +100,7 @@ def observe(home: Path, *, blocking: bool = False) -> MemoryObservation:
     lock held by another process is reported as ``custody-uncertain``.
     """
     try:
-        from .._config_io import CanonicalPaths, canonical_session
+        from .._core._config_io import CanonicalPaths, canonical_session
         from ..keyvault._memory_storage import verify_memory_purge_candidates
         from ..keyvault._windows_capability import windows_capability
 
@@ -173,7 +174,7 @@ def proof_python(home: Path) -> Path | None:
     refuses rather than falling back to an unrelated home venv. Without a
     launcher the proof uses the C4 home-venv candidates.
     """
-    from .._windows_runtime import resolve_windows_python
+    from .._core._windows_runtime import resolve_windows_python
     from ..keyvault._windows_proof import PYTHON_OVERRIDE_ENV, WindowsRuntimeProofError
     from ._uninstall_hermes_env import find_hermes_launcher
 
@@ -277,6 +278,21 @@ def _warn_pending_approvals(home: Path) -> None:
 
 
 def disable(*, home: Path) -> int:
+    from .memory_cli import _disable_database_guard
+
+    try:
+        # Early refusal is advisory only. Release EX before the installed
+        # runtime proof child takes its legitimate SH startup lease.
+        with _disable_database_guard(home):
+            pass
+        return _disable(home=home)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return _lifecycle_failure("disable", exc, state=_UNCHANGED)
+
+
+def _disable(
+    *, home: Path, proof: WindowsRuntimeProof | None = None, uninstall: UninstallAuthorization | None = None
+) -> int:
     """capabilities (+ load-only scan) -> gate -> proof -> disable_memory_encryption (key kept)."""
     from ..keyvault._memory_storage import disable_memory_encryption
 
@@ -306,11 +322,16 @@ def disable(*, home: Path) -> int:
 
     if _gate(home, force_runtime_unverified=False) != 0:
         return 1
-    proof = _prove("disable", home, state=_UNCHANGED)
+    proof = proof if proof is not None else _prove("disable", home, state=_UNCHANGED)
     if proof is None:
         return 1
     try:
-        result = disable_memory_encryption(home, proof, keep_key=True)
+        from .memory_cli import _disable_database_guard
+
+        # Fresh exclusion and all-generation scan after proof, before owning
+        # lifecycle custody. The engine revalidates the issued proof inside it.
+        with _disable_database_guard(home, uninstall=uninstall):
+            result = disable_memory_encryption(home, proof, keep_key=True)
     except _errors() as exc:
         return _lifecycle_failure("disable", exc, state=_UNCHANGED)
     print(
@@ -333,8 +354,9 @@ _PURGE_HINTS: dict[str, str] = {
 }
 
 
-def purge(*, home: Path) -> int:
+def purge(*, home: Path, uninstall: UninstallAuthorization | None = None) -> int:
     """capabilities -> gate -> verify_memory_purge_candidates -> reset_role("memory")."""
+    from ..keyvault._database_mutation import database_key_mutation
     from ..keyvault._windows_custody import windows_custody_session
 
     if _capability_refusal("purge", home) is not None:
@@ -355,9 +377,17 @@ def purge(*, home: Path) -> int:
         hints = "; ".join(dict.fromkeys(_PURGE_HINTS.get(reason, reason) for reason in report.reasons))
         return _refused("purge", "verification", "not-purgeable", "; ".join(report.reasons), hints)
     try:
-        with windows_custody_session(home) as custody:
+        with (
+            database_key_mutation(root=home, generation=None, uninstall=uninstall) as database_lease,
+            windows_custody_session(home) as custody,
+        ):
             # Memory reset ignores erasure authorization: seals always refuse.
-            reset = custody.reset_role("memory", erase_authorized=False)
+            from .memory_cli import _warn_external_backups
+
+            _warn_external_backups()
+            reset = custody.reset_role(
+                "memory", erase_authorized=False, database_lease=database_lease, uninstall=uninstall
+            )
     except _errors() as exc:
         notes = " ".join(getattr(exc, "__notes__", ()))
         reason = classify_exception(exc)
@@ -376,3 +406,33 @@ def purge(*, home: Path) -> int:
         "decrypted."
     )
     return 0
+
+
+def prepare_uninstall(home: Path) -> WindowsRuntimeProof | None:
+    """Authenticate the installed runtime before any database lease is held."""
+    observation = observe(home, blocking=True)
+    if _preflight("disable", observation) is not None or _helper_refusal("disable", observation) is not None:
+        raise RuntimeError("memory could not be restored to plaintext: Windows memory preflight refused")
+    if observation.report is None or not observation.report.managed:
+        return None
+    if _gate(home, force_runtime_unverified=False) != 0:
+        raise RuntimeError("memory could not be restored to plaintext: Windows runtime gate refused")
+    proof = _prove("disable", home, state=_UNCHANGED)
+    if proof is None:
+        raise RuntimeError("memory could not be restored to plaintext: Windows installed runtime proof refused")
+    return proof
+
+
+def verify_uninstall_inputs(home: Path, proof: WindowsRuntimeProof | None) -> None:
+    """Under root EX, authenticate every memory before restoring any database."""
+    if proof is None:
+        return
+    from ..keyvault._memory_storage import _plan, windows_memory_session
+    from ..keyvault._windows_custody import windows_custody_session
+    from ..keyvault._windows_proof import validate_windows_runtime_proof
+
+    with windows_custody_session(home) as custody, windows_memory_session(home, custody=custody) as session:
+        validate_windows_runtime_proof(custody, proof)
+        if session._key is None:
+            raise RuntimeError("memory could not be restored to plaintext: native memory key unavailable")
+        _plan(session, session._key, seal_files=False)

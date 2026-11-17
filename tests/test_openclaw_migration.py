@@ -1159,7 +1159,7 @@ class TestWindowsAdmission:
 
     @pytest.mark.parametrize("fault", ["root-open", "root-list", "base-open", "base-list", "policy-read"])
     def test_uncertain_source_refuses_before_publication(self, windows_source, monkeypatch, tmp_path, fault):
-        from mordred_hermes._config_io import CONFIG_LIMIT
+        from mordred_hermes._core._config_io import CONFIG_LIMIT
         from mordred_hermes._private_fs import PrivateFSError
 
         base, events, faults = windows_source
@@ -1292,7 +1292,7 @@ class TestWindowsAdmission:
         elif member == "hardlink-policy":
             os.link(policy, policy.with_suffix(".linked"))
         else:
-            from mordred_hermes._config_io import CONFIG_LIMIT
+            from mordred_hermes._core._config_io import CONFIG_LIMIT
 
             policy.write_bytes(b" " * (CONFIG_LIMIT + 1))
         w = _writer(tmp_path)

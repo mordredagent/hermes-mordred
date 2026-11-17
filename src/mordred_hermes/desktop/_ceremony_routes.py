@@ -1,7 +1,8 @@
-"""``/vault/*`` and ``/databases/*``: the macOS ceremonies of Desktop step 1 (a sub-router of ``api.router``).
+"""Desktop vault ceremonies and shared database observation (a sub-router of ``api.router``).
 
 The vault is prepared, acknowledged, then committed (:mod:`._vault`); the
-databases are only ever scheduled or reported (:mod:`._databases`). Shared
+databases are only ever scheduled, cancelled or reported (:mod:`._databases`):
+startup converts them (:mod:`..dbcrypt._startup`), never a route. Shared
 helpers (``sys``, ``_home``, ``_error``) are read from :mod:`.api` and the
 seams, registries and ceremony lock from :mod:`._seams`, both at call time, so
 a test replaces them in one place.
@@ -93,14 +94,14 @@ async def databases_status() -> Any:
 
 @router.post("/databases/encrypt")
 async def databases_encrypt(request: Request) -> Any:
-    """Body ``{"dry_run": bool}``. Schedules the conversion for the next start, or reports why not.
+    """Body ``{"dry_run": bool}``. Schedule the conversion for the next start, or report why not.
 
     ``{"ok": true, "action": "dry_run" | "scheduled" | "attention" | "needs_restart" | "done", …}``
     (``restart_required`` with ``scheduled`` / ``needs_restart``, ``code`` with
-    ``attention``: ``journal``, ``decrypt_pending``, ``stale_pending``,
-    ``plaintext_in_armed_home``); ``databases_unsupported`` off macOS or without
-    SQLCipher; ``databases_failed`` when scheduling failed (re-read the status).
-    No key is needed and none is unwrapped: the conversion runs at startup.
+    ``attention``: ``journal``, ``decrypt_pending``, ``stale_pending``, ``databases_failed``
+    or a ``startup_*`` code); ``databases_unsupported`` when shared capability is
+    unavailable; ``databases_failed`` when the size or the schedule fails. A home over the
+    startup size limit is not scheduled. Never converts, arms or reaches native custody.
     """
     api = _api()
     body = await read_object(request)
@@ -109,18 +110,46 @@ async def databases_encrypt(request: Request) -> Any:
     dry_run = body.get("dry_run", False)
     if not isinstance(dry_run, bool):
         return api._error("invalid_body")
-    if api.sys.platform != "darwin" or not await asyncio.to_thread(_seams.sqlcipher_available):
-        return api._error("databases_unsupported")
-    if dry_run:
-        return {"ok": True, "action": "dry_run"}
     home = api._home()
 
     def decide() -> dict[str, Any]:
-        facts = _databases.status_object(home, platform="darwin", sqlcipher=True)
+        facts = _databases.status_object(home)
+        if not facts.get("supported"):
+            return {"ok": False, "error": "databases_unsupported"}
+        if dry_run:
+            return {"ok": True, "action": "dry_run"}
         return _databases.encrypt_answer(home, facts)
 
     try:
         return await asyncio.to_thread(decide)
     except Exception as exc:
         _log.warning("mordred desktop database encryption not scheduled (%s)", type(exc).__name__)
+        return api._error("databases_failed")
+
+
+@router.post("/databases/cancel")
+async def databases_cancel(request: Request) -> Any:
+    """Body ``{}``. Remove the schedule and its startup record; never converts.
+
+    ``{"ok": true, "action": "cancelled"}``, also with nothing scheduled. ``attention``
+    with ``databases_cancel_refused`` changes nothing while a journal or the marker
+    exists, and with ``databases_failed`` when the facts are unknown.
+    ``databases_unsupported`` and ``databases_failed`` as ``/databases/encrypt``.
+    """
+    api = _api()
+    body = await read_object(request)
+    if isinstance(body, JSONResponse):
+        return body
+    home = api._home()
+
+    def decide() -> dict[str, Any]:
+        facts = _databases.status_object(home)
+        if not facts.get("supported"):
+            return {"ok": False, "error": "databases_unsupported"}
+        return _databases.cancel_answer(home, facts)
+
+    try:
+        return await asyncio.to_thread(decide)
+    except Exception as exc:
+        _log.warning("mordred desktop scheduled database encryption not cancelled (%s)", type(exc).__name__)
         return api._error("databases_failed")

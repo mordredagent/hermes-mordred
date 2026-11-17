@@ -25,7 +25,7 @@ from typing import Any
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from mordred_hermes import _windows_runtime
+from mordred_hermes._core import _windows_runtime
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault._exceptions import WrapKeyAlreadyExists, WrapKeyNotFound
 
@@ -117,7 +117,7 @@ def _optional(path: str | Path) -> Iterator[Any]:
 
 def emulate(set_attr: Callable[[object, str, object], None], backend: FileBackend) -> None:
     """Host emulation of Windows checked storage, principal, runtime and CNG."""
-    from mordred_hermes import _config_io as cio
+    from mordred_hermes._core import _config_io as cio
     from mordred_hermes.keyvault import _memory_storage as storage
     from mordred_hermes.keyvault import _seckey_helper
     from mordred_hermes.keyvault import _windows_custody as custody

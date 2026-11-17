@@ -60,7 +60,7 @@ _FILES = (_PAGE_FILE, *_API_FILES)
 
 
 def _home() -> Path:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     return hermes_home()
 

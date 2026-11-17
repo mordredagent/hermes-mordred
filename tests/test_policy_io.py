@@ -1,6 +1,6 @@
 """Unit tests for the shared policy.json mapping loader.
 
-Covers every branch of :func:`mordred_hermes._policy_io.load_policy_mapping`:
+Covers every branch of :func:`mordred_hermes._core._policy_io.load_policy_mapping`:
 missing file, a valid top-level object, a non-object root, a JSON parse
 error (logged), and an ``OSError`` on open (the no-logger path).
 """
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes._policy_io import (
+from mordred_hermes._core._policy_io import (
     load_policy_mapping,
     policy_transaction_marker_for_policy,
     policy_transaction_warning,

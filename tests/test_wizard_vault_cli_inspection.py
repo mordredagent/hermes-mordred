@@ -13,7 +13,7 @@ from mordred_hermes.wizard import vault_cli
 from mordred_hermes.wizard._prompt_io import _RefusingPromptIO
 
 from ._keyvault_fakes import FakeAnchorStore, FakeBackend
-from ._wizard_vault_cli_helpers import _KEY_ID, _LABEL, _PASSPHRASE, _build_vault, _PromptIO
+from ._wizard_vault_cli_helpers import _PASSPHRASE, _build_vault, _PromptIO
 
 
 class TestStatus:
@@ -149,19 +149,22 @@ class TestStatus:
         forged manifest parses fine and its forged contents are reported as-is:
         rc 0, the forged empty file list. Detecting a substitution like this
         again requires a command that actually opens the vault."""
+        from mordred_hermes.keyvault._identity import vault_identity
+
+        ident = vault_identity(tmp_path)
         backend = FakeBackend()
-        backend.generate_enclave_key(_KEY_ID)
+        backend.generate_enclave_key(ident)
         store = FakeAnchorStore()
         opened = vault.init_vault(
-            tmp_path, key_id=_KEY_ID, passphrase=_PASSPHRASE, backend=backend, store=store, anchor_label=_LABEL
+            tmp_path, key_id=ident, passphrase=_PASSPHRASE, backend=backend, store=store, anchor_label=ident
         )
         opened.enroll_file(".env", b"value")  # generation 1
         opened.close()
 
-        wmk_evil = kek.seal_master_key(_KEY_ID, backend=backend)
-        master_evil = kek.open_master_key(wmk_evil, _KEY_ID, backend=backend)
+        wmk_evil = kek.seal_master_key(ident, backend=backend)
+        master_evil = kek.open_master_key(wmk_evil, ident, backend=backend)
         forged = manifest.encode(
-            manifest.VaultManifest(key_id=_KEY_ID, wmk=wmk_evil, files={}, generation=1), master_evil
+            manifest.VaultManifest(key_id=ident, wmk=wmk_evil, files={}, generation=1), master_evil
         )
         (tmp_path / "manifest.1.mvmf").write_bytes(forged)
 

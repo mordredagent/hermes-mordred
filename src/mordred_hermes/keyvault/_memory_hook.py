@@ -20,8 +20,9 @@ C (0.13-15)   ``_read_file(path)``                none
 ============  ==================================  ================================
 
 Arming is evaluated **per call**, never cached: the operator can pause the
-feature (opt-out marker) mid-session, and the key arrives in ``os.environ`` from
-the vault shim, which may run after this module is imported.
+feature (opt-out marker) mid-session, and the key arrives in the process-private
+holder (:mod:`._memory_key_holder`) from the vault shim, which may run after this
+module is imported.
 
 **Fail-closed on the write side, loud on the read side.** While armed we never
 write plaintext, and a sealed file that cannot be decrypted raises
@@ -78,8 +79,9 @@ from importlib.abc import Loader, MetaPathFinder
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 from .._runtime_bootstrap import _SAFE_MODE_TRUTHY
+from ._memory_key_holder import memory_key_value
 from .memory_crypto import (
     MemoryCryptoError,
     decode_key,
@@ -123,7 +125,7 @@ _MEMORY_KEY_ENV: Final = "HERMES_MEMORY_KEY"
 _WRAPPED_FLAG: Final = "_mordred_memory_hook_wrapped"
 
 _REMEDY: Final = (
-    "run `hermes-mordred encryption enable env` so HERMES_MEMORY_KEY is injected, "
+    "run `hermes-mordred encryption enable env` so the vault provides HERMES_MEMORY_KEY, "
     "or `hermes-mordred encryption disable memory`"
 )
 
@@ -207,7 +209,7 @@ class _HookConfig:
 
 def _decode_env_key(environ: Mapping[str, str]) -> bytes | None:
     """``HERMES_MEMORY_KEY`` as raw bytes, or ``None`` when unset or malformed."""
-    value = environ.get(_MEMORY_KEY_ENV)
+    value = memory_key_value(environ)
     if not value:
         return None
     try:

@@ -148,7 +148,7 @@ def generate(seed: int, *, n_threads: int = DEFAULT_THREADS) -> Dataset:
         raise TypeError("seed must be an int")
     if not 1 <= n_threads <= 999:
         raise ValueError("n_threads must be between 1 and 999")
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311 - seeded synthetic corpus, not security-relevant
     used_tokens: set[str] = set()
     specs = [build_thread(index, rng, used_tokens, cap=RENDER_CAP) for index in range(n_threads)]
     parts: list[PartTruth] = []

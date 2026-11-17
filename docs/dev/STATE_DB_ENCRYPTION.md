@@ -4,8 +4,28 @@ Status: phases 0 (feasibility spike), 1 (startup hook under Hermes Desktop)
 2 (`mordred_hermes.dbcrypt`, all of Hermes's databases), 3 (conversion of
 an existing home, `hermes-mordred databases encrypt`), 4 (monitor), 5 (status
 line), reverse conversion (`databases decrypt`) and both uninstall modes
-done; the Desktop page step and log-preview redaction remain.
+implemented. The Desktop database step is specified by
+[startup conversion](SPEC.md#startup-conversion); that work, its live acceptance,
+log-preview redaction and lifecycle review findings remain open.
 Track those remaining tasks in [`TODO.md`](./TODO.md#hermes-database-encryption).
+
+The selected cross-platform direction is a shared SQLCipher lifecycle for
+Linux and Windows as well as macOS, delivered in PR #270. Its design is
+[`Cross-platform database encryption`](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md).
+Native database storage admission is source-controlled: Linux, and Windows Server
+x64 with the qualified sqlcipher3-wheels 0.5.7 driver pair and the
+distribution-owned checked-VFS DLL, are admitted; Windows workstation editions
+are refused at runtime. Admission is not acceptance: native platform acceptance
+evidence is recorded separately in docs/dev/CI.md's manual validation log, and
+the Windows native acceptance matrix is still pending.
+
+The qualification-gated Windows backup route requires an existing private
+destination directory separate from the protected home: neither directory may
+contain the other. For example, use `C:\MordredBackups\activity.backup` for a
+home at `C:\HermesHome`, rather than writing the backup directly in `C:\`.
+Overlap with another live checked database root is also refused before any
+backup journal or staging file is created. The POSIX destination policy is
+unchanged; this restriction does not establish Windows native acceptance.
 
 ## Goal
 
@@ -19,7 +39,7 @@ Encrypt all of them with SQLCipher, keyed from the key Mordred already
 manages, without forking Hermes. Only Python opens them (no Node/Electron
 SQLite access in Hermes Desktop or the TUI).
 
-This is a separate macOS-only opt-in: `setup` and `encryption enable all` do
+This is a separate opt-in on the admitted platforms: `setup` and `encryption enable all` do
 not arm database encryption. Session JSONL, text logs and existing ZIP backups
 are not converted. Decrypt databases before removing their memory key or vault;
 retain recovery material for encrypted backups.
@@ -28,7 +48,7 @@ retain recovery material for encrypted backups.
 
 No new key is created or stored. The SQLCipher key is derived from the
 existing agent-memory key (`HERMES_MEMORY_KEY`, already sealed in the vault
-and injected into every Hermes process at startup):
+and loaded into every Hermes process's private key holder at startup):
 
     key  = HKDF-SHA256(HERMES_MEMORY_KEY, info="mordred sqlite v1")
     salt = HMAC-SHA256(key, "mordred sqlite salt v1")[:16]
@@ -37,8 +57,15 @@ One key and salt for every database, so copies and renames Hermes makes
 (backups, quarantines, staged exports) stay readable. The salt has to be
 supplied explicitly because the file header is kept in plaintext (below).
 The key is resolved on the first keyed `connect()`; if `HERMES_MEMORY_KEY` is
-not in the environment yet, the vault-sealed `.env` is injected then, and the
+not available yet, the vault-sealed `.env` is injected then, and the
 plugin's later injection is skipped (one vault unlock per process).
+
+The key-resolution explanation above describes the original macOS compatibility
+format. Native Linux/Windows authority is root-bound and separately owned; do
+not infer that a bare environment key authorizes their lifecycle. The shared
+[contract](SPEC.md#cross-platform-database-encryption-proposed-2026-10-24)
+and [implementation map](PLAN.md#cross-platform-database-encryption-rollout-proposed-2026-10-24)
+own current platform behavior.
 
 ## Mechanism
 
@@ -58,7 +85,8 @@ plugin's later injection is skipped (one vault unlock per process).
   elsewhere). Without the key an in-scope database is refused rather than
   opened, so Hermes can never create a plaintext replacement.
 - Armed by `<home>/mordred/db-encryption.marker` (phase 3 writes it after
-  converting every database). Database encryption is macOS-only. Ordinary
+  converting every database). Database encryption is admitted on macOS, Linux and Windows Server only (see the
+admission statement above). Ordinary
   unarmed Linux/Windows homes retain plain SQLite; enabling memory encryption
   there does not encrypt databases. A marker or interrupted conversion copied
   to an unsupported OS causes startup to refuse before opening the databases.
@@ -159,17 +187,23 @@ instead when SQLCipher's SQLite has the WAL-reset bug, as Hermes itself
 chooses for new databases) and verify it
 (`quick_check`, same tables and row counts). Only then: write a journal, arm,
 swap with `os.replace`, drop the old sidecars, remove the journal. A failure
-while preparing changes nothing; a crash after arming is completed from the
-journal on the next start. Classification reads each file with a plain
+while preparing changes nothing; a crash after arming refuses startup until
+`databases encrypt` completes it from the journal, or until the next start resumes
+a scheduled conversion whose pending marker remains. Classification reads each
+file with a plain
 `open()` and the stdlib `sqlite3`, so it is offline work: it runs only in the
 maintenance CLI or in the bootstrap before Hermes opens a database, and it
 refuses inside a Hermes process that has the SQLCipher module (see the POSIX
-lock gotcha below). `hermes-mordred databases encrypt` runs it now, or
-schedules it (`db-encryption.pending`) when a Hermes runtime or another
-converter holds the lock. Quit all Hermes processes before restarting to
-apply the pending conversion; a runtime that has not opened a database yet
-also prevents conversion. The runtime bootstrap converts before opening any
-database, while other starting processes wait on `db-encryption.lock`.
+lock gotcha below). `hermes-mordred databases encrypt` runs it now and refuses
+when a Hermes runtime or another converter holds the lock; it never schedules.
+Hermes Desktop's **Encrypt databases** schedules it (`db-encryption.pending`)
+instead. The runtime bootstrap converts before opening any database, while other
+starting processes wait on `db-encryption.lock`; a runtime that has not opened a
+database yet also prevents conversion, which leaves the home plain with a
+`startup-conversion.json` outcome. A home too large to convert inside Hermes
+Desktop's backend deadline stays a Terminal job. The
+[startup conversion contract](SPEC.md#startup-conversion) owns the gate, failure rule
+and limit.
 Verified end-to-end on a throwaway home with Hermes's own code.
 
 ## Phases 4 and 5 (done), and decrypting back
@@ -190,10 +224,11 @@ Verified end-to-end on a throwaway home with Hermes's own code.
 - The `mordred.databases` system-prompt section states the checked status:
   encrypted, scheduled (not active yet), or the violation.
 - `databases decrypt` (`_migrate.decrypt_all`) mirrors the conversion: prepare
-  and verify every plaintext copy, journal, swap, then disarm; scheduled for
-  the next start (`db-decryption.pending`) when a Hermes runtime is running.
-  An interrupted run is completed from the journal before anything else at
-  startup (no key needed). An unreadable database, including one encrypted
+  and verify every plaintext copy, journal, swap, then disarm. It refuses when
+  a Hermes runtime holds the lock. Nothing writes `db-decryption.pending` today;
+  startup refuses a record retained from an earlier release, and an interrupted run's
+  journal, until they are resolved in Terminal. An unreadable database, including
+  one encrypted
   with a different key, refuses decryption before preparing copies or removing
   the marker. SQLCipher imports are optional on unsupported platforms; their
   monitor reports protected homes as unsupported instead of reporting success.

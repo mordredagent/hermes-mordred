@@ -251,12 +251,18 @@ def get_ethereum_address(
         del priv_bytes
 
 
+def _check_expected_signer(address: str, expected_signer: str | None) -> None:
+    if expected_signer is not None and address.lower() != expected_signer.lower():
+        raise RuntimeError("wallet_signer_changed")
+
+
 def sign_hash(
     key_id: str,
     envelope_id: str,
     message_hash: bytes,
     *,
     backend: NativeBackend,
+    expected_signer: str | None = None,
     audit_sink: AuditSink,
     home: Path | None = None,
 ) -> EthereumSignature:
@@ -303,6 +309,7 @@ def sign_hash(
     )
     try:
         priv = eth.keys.PrivateKey(priv_bytes)
+        _check_expected_signer(priv.public_key.to_checksum_address(), expected_signer)
         return _eth_signature(priv.sign_msg_hash(message_hash))
     finally:
         del priv_bytes
@@ -466,6 +473,7 @@ def sign_hash_hd(
     message_hash: bytes,
     *,
     backend: NativeBackend,
+    expected_signer: str | None = None,
     audit_sink: AuditSink,
     home: Path | None = None,
     bip39_passphrase: str = "",
@@ -496,7 +504,9 @@ def sign_hash_hd(
             account=account,
             change=change,
         )
-        return _eth_signature(eth.keys.PrivateKey(priv_bytes).sign_msg_hash(message_hash))
+        priv = eth.keys.PrivateKey(priv_bytes)
+        _check_expected_signer(priv.public_key.to_checksum_address(), expected_signer)
+        return _eth_signature(priv.sign_msg_hash(message_hash))
     finally:
         if priv_bytes is not None:
             del priv_bytes

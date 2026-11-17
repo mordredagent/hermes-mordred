@@ -338,6 +338,7 @@ def test_store_wipe(tmp_path):
     archive.append_messages(1, [_msg(1, "a")])
     archive.save_index(store.ArchiveIndex())
     (tmp_path / "index.enc.abc.tmp").write_bytes(b"x")
+    (tmp_path / "index.enc.abc.tmp").chmod(0o600)
     store.wipe_archive(tmp_path)
     assert not list(tmp_path.rglob("*.enc")) and not list(tmp_path.rglob("*.tmp"))
 

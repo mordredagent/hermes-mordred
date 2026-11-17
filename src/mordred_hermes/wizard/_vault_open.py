@@ -147,8 +147,8 @@ def _open_hot_path_or_report(
     ``wizard`` imports down into ``keyvault``, never the reverse — and the
     ``vault.open_vault`` call stays here because tests pin it with
     ``monkeypatch.setattr(vault, "open_vault", ...)``. The reporter emits
-    through the root :mod:`mordred_hermes._term` (its own import), not this
-    module's ``_term`` alias — patch ``mordred_hermes._term.emit_error`` to
+    through the root :mod:`mordred_hermes._core._term` (its own import), not this
+    module's ``_term`` alias — patch ``mordred_hermes._core._term.emit_error`` to
     intercept those messages.
 
     With a ``flow_session`` (a guided flow's shared state), the flow's already

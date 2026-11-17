@@ -38,7 +38,7 @@ import contextlib
 from collections.abc import Iterator
 from pathlib import Path
 
-from .. import _term
+from .._core import _term
 
 
 @contextlib.contextmanager

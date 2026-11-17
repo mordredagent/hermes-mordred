@@ -145,3 +145,26 @@ def test_unhashable_journal_fields_use_custody_failure_contract(field, value):
     obj[field] = value
     with pytest.raises(p.CustodyError):
         p.parse_pending(json.dumps(obj).encode(), manifest, "memory")
+
+
+@pytest.mark.parametrize("version,roles", [(1, 4), (2, 3), (3, 4), (True, 3)])
+def test_schema_requires_exact_role_set(version, roles):
+    p = module()
+    obj = json.loads(p.encode_manifest(p.new_manifest(IDENTITY, SID)))
+    obj["version"] = version
+    if roles == 4:
+        obj["roles"]["mail"] = {"current": None, "retained": []}
+    with pytest.raises(p.CustodyError):
+        p.parse_manifest(json.dumps(obj).encode(), IDENTITY, SID)
+
+
+def test_v2_mail_selector_keeps_v1_domain_for_existing_roles():
+    p = module()
+    v1 = p.new_manifest(IDENTITY, SID, nonce=bytes(32))
+    obj = json.loads(p.encode_manifest(v1))
+    obj["version"] = 2
+    obj["roles"]["mail"] = {"current": None, "retained": []}
+    v2 = p.parse_manifest(json.dumps(obj).encode(), IDENTITY, SID)
+    for role in ("memory", "audit", "telegram"):
+        assert p.native_selector(v1, role, "11" * 32) == p.native_selector(v2, role, "11" * 32)
+    assert len({p.native_selector(v2, role, "11" * 32) for role in p.ROLES}) == 4

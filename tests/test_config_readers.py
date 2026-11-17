@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes import _config_io as cio
-from mordred_hermes import _policy_io as policy
-from mordred_hermes import _yaml_io as yaml
+from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core import _policy_io as policy
+from mordred_hermes._core import _yaml_io as yaml
 from mordred_hermes._private_fs import FileIdentity, FileMetadata, PrivateFSError
 
 

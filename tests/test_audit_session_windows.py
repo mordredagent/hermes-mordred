@@ -7,9 +7,9 @@ import subprocess
 
 import pytest
 
-from mordred_hermes import _audit_io as audit
-from mordred_hermes import _log_rotation as rotation
 from mordred_hermes import _private_fs as fs
+from mordred_hermes._core import _audit_io as audit
+from mordred_hermes._core import _log_rotation as rotation
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="actual Windows filesystem and ACLs")
 

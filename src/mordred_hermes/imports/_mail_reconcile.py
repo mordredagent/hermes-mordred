@@ -133,7 +133,7 @@ def _linked_conversations(
         involved.update(
             str(found[0])
             for found in conn.execute(
-                f"SELECT DISTINCT m.conv_uid FROM import_messages m {_RUN_AND_CONV} "
+                f"SELECT DISTINCT m.conv_uid FROM import_messages m {_RUN_AND_CONV} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 f"WHERE {_IN_SCOPE} AND m.message_id IN ({', '.join('?' for _ in parents)})",
                 (*scope, *parents),
             )
@@ -141,7 +141,7 @@ def _linked_conversations(
     involved.update(
         str(found[0])
         for found in conn.execute(
-            f"SELECT DISTINCT m.conv_uid FROM import_mail_refs f "
+            f"SELECT DISTINCT m.conv_uid FROM import_mail_refs f "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             f"JOIN import_messages m ON m.source_uid = f.source_uid {_RUN_AND_CONV} "
             f"WHERE f.ref_message_id = ? AND {_COMMITTED_SCOPE}",
             (message_id, source, account),

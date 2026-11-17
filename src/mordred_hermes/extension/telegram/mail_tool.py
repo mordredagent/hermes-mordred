@@ -1,7 +1,7 @@
 """Hermes tool ``mordred_mail_sync``: fetch the owner's new mail into ``mordred.db``; counts only.
 
 The owner says "sync my mail" in a Hermes chat; the model calls this tool; Mordred
-unseals the IMAP credentials (Secure Enclave), fetches new mail read-only and
+unseals the independent native IMAP credentials, fetches new mail read-only and
 writes it through the mail collector (:func:`mordred_hermes.imports.mail.imap_sync.run_fetch`,
 the same function as ``hermes-mordred mail fetch``). Hermes receives only the
 fixed counts-only result: no subject, name, address, label or body ever enters
@@ -10,7 +10,7 @@ the conversation, ``state.db`` or a log.
 - **Arguments**: ``max_messages`` (integer 1-2000) only; anything else —
   another key, a boolean, a float, a string — is ``invalid_request``. The model
   cannot choose the account, the server or the mailbox.
-- **Visibility** (``check_fn``, offline): macOS, the ``mordred.db`` gate passes,
+- **Visibility** (``check_fn``, offline): the shared ``mordred.db`` gate passes,
   mail credentials are sealed, and the Hermes model is Venice or loopback (the
   rule of the other Mordred tools).
 - **Every call** repeats the gates: the running model's endpoint (a Venice model
@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import sys
 import threading
@@ -77,10 +78,12 @@ REVOKE_GRACE_S: Final = 5.0
 #: The name of the daemon thread that abandons a fetch (never waited for past the call's bound).
 ABANDON_NAME: Final = "mordred-mail-sync-abandon"
 NOTE: Final = (
-    "Mordred fetched the user's new mail into its encrypted store; only counts are reported here. "
+    "This tool fetches new mail into Mordred's encrypted store and reports counts only. "
     "partial=true means more remains: call this tool again to continue. To read or quote messages use "
     "mordred_history_search. error=mail_not_configured means the user must run `hermes-mordred mail setup` "
-    "in a terminal (never ask for the address or password in the chat)."
+    "in a terminal (never ask for the address or password in the chat). error=no_key or "
+    "import_store_unavailable requires checking `hermes-mordred databases status`; after terminal authority "
+    "loss restart Hermes before retrying. No automatic authority reacquisition occurs."
 )
 
 SCHEMA: Final[dict[str, Any]] = {
@@ -89,7 +92,7 @@ SCHEMA: Final[dict[str, Any]] = {
         "Fetch the user's new e-mail into Mordred's encrypted history store (read-only on the mail server; "
         "nothing is marked read, moved or sent). Call it when the user asks to sync, refresh or import their "
         "mail. Returns counts only (inserted, duplicates, partial, error...), never message content; afterwards "
-        "use mordred_history_search to read mail. Each call may ask the user for Touch ID."
+        "use mordred_history_search to read mail. Native authentication may be required by the configured policy."
     ),
     "parameters": {
         "type": "object",
@@ -136,10 +139,10 @@ def _mail_configured() -> bool:
 
 
 def mail_sync_available() -> bool:
-    """check_fn: macOS, a Venice/loopback Hermes model, the store gate, and sealed mail credentials."""
+    """Passive native eligibility, a Venice/loopback model, and sealed mail flags; never authenticate."""
     from .hermes_tools import _classify_endpoint, _configured_model, _store_gate_open
 
-    if _platform() != "darwin":
+    if _platform() not in {"darwin", "linux", "win32"}:
         return False
     _model, base_url = _configured_model()
     if _classify_endpoint(base_url) is None:
@@ -226,12 +229,16 @@ async def _run_worker(max_messages: int) -> dict[str, Any] | None:
         except Exception:  # never stringified; the handler reports fetch_failed
             box.pop("result", None)
 
-    worker = threading.Thread(target=target, name=WORKER_NAME, daemon=True)
+    context = contextvars.copy_context()
+    worker = threading.Thread(target=lambda: context.run(target), name=WORKER_NAME, daemon=True)
     budget_end = time.monotonic() + imap_sync.TOOL_BUDGET_S
     worker.start()
     try:
         ended = await _joined(worker, budget_end + ABANDON_GRACE_S - REVOKE_GRACE_S)
     except asyncio.CancelledError:
+        from ...keyvault._presence import revoke_current
+
+        revoke_current()  # kill authentication before any bounded drain/abandon waits
         cancel.cancel()  # the fetch stops at once: its IMAP socket is shut down, a resolver wait woken
         bound = max(budget_end, time.monotonic()) + CANCEL_GRACE_S  # fixed now: later cancellations never move it
         if not await _joined_after_cancel(worker, bound - REVOKE_GRACE_S):
@@ -239,6 +246,9 @@ async def _run_worker(max_messages: int) -> dict[str, Any] | None:
                 await _abandon(lease, bound)  # its writes refused, its run failed, the writer lock released or kept
         raise  # an abandoned worker is a daemon that has been told to stop
     if not ended:
+        from ...keyvault._presence import revoke_current
+
+        revoke_current()
         cancel.cancel()
         return _abandoned(await _abandon(lease, budget_end + ABANDON_GRACE_S))
     return box.get("result")
@@ -251,8 +261,7 @@ def _error(code: str) -> str:
 async def mordred_mail_sync(
     args: dict[str, Any], parent_agent: Any = None, session_id: str | None = None, **_: Any
 ) -> str:
-    """Fetch new mail; returns the counts-only result (``session_id`` is accepted and unused)."""
-    del session_id
+    """Fetch new mail; bind optional presence to the framework dispatch session."""
     try:
         max_messages = parse_args(args)
     except _Invalid:
@@ -265,7 +274,10 @@ async def mordred_mail_sync(
         code = getattr(exc, "code", None)
         allowed = {"hermes_model_not_allowed", "hermes_model_not_private", "routing_unavailable"}
         return _error(code if code in allowed else "fetch_failed")
-    result = await _run_worker(max_messages)  # the worker has ended, or was abandoned (``abandoned: true``)
+    from ...keyvault._presence_hosts import hermes_presence
+
+    with hermes_presence(session_id, "mail"):
+        result = await _run_worker(max_messages)  # ended or abandoned; no credentials cached
     if result is None:
         return _error("fetch_failed")
     return json.dumps({**result, "note": NOTE})

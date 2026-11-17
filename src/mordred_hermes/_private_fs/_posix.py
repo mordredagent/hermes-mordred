@@ -91,8 +91,15 @@ def _ancestor(fd: int) -> None:
     _validate_acl(fd)
 
 
+# The Darwin ACL query exists only on a macOS host. A policy simulation that
+# patches ``sys.platform`` must never reach the libSystem ABI from the other
+# side: neither a Linux host simulating darwin nor a macOS host simulating
+# Linux (tests/test_dbcrypt_lifecycle.py pins the latter).
+_MACOS_HOST = sys.platform == "darwin"
+
+
 def _validate_acl(fd: int) -> None:
-    if sys.platform == "darwin":
+    if _MACOS_HOST and sys.platform == "darwin":
         from ._macos_acl import validate_acl
 
         validate_acl(fd)
@@ -369,12 +376,63 @@ class _Transaction:
     def _mark_mutated(self) -> None:
         self.published = self.directory.published = True
 
+    def flush_directory(self) -> None:
+        self._check()
+        _flush(self.directory.fd)
+
+    def flush_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
+        validate_leaf(name)
+        self._check()
+        with self.directory._open(name) as fd:
+            identity = _identity(_private(fd))
+            if expected_identity is not None and identity != expected_identity:
+                raise PrivateFSError("unsafe", "flush_identity")
+            _flush(fd)
+            if _identity(_private(fd)) != identity or self.directory.stat(name).identity != identity:
+                raise PrivateFSError("unsafe", "flush_identity")
+
     def delete_file(self, name: str, *, expected_identity: FileIdentity | None = None) -> None:
         self._move(name, None, expected_identity)
 
     def rename_file(self, name: str, destination: str, *, expected_identity: FileIdentity | None = None) -> None:
         validate_leaf(destination)
         self._move(name, destination, expected_identity)
+
+    def finish_interrupted_rename(self, name: str, destination: str) -> None:
+        """Drop the source link a crash left between rename_file's link and unlink.
+
+        Removes a name only when both names are one private regular inode with
+        exactly these two links, so no file content can be lost.
+        """
+        validate_leaf(name)
+        validate_leaf(destination)
+        self._check()
+        changed = [False]
+        fd = self.directory.fd
+        try:
+            source = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            target = os.stat(destination, dir_fd=fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(source.st_mode)
+                or (source.st_dev, source.st_ino) != (target.st_dev, target.st_ino)
+                or source.st_nlink != 2
+                or source.st_uid != os.geteuid()
+                or stat.S_IMODE(source.st_mode) != 0o600
+            ):
+                raise PrivateFSError("unsafe", "finish_interrupted_rename")
+            os.unlink(name, dir_fd=fd)
+            changed[0] = True
+            _absent(fd, name)
+            _flush(fd)
+        except PrivateFSError as exc:
+            if changed[0]:
+                exc.commit_state = "uncertain"
+            raise
+        except OSError as exc:
+            raise _error(exc, "rename", changed[0]) from exc
+        finally:
+            if changed[0]:
+                self._mark_mutated()
 
     def _move(self, name: str, destination: str | None, expected: FileIdentity | None) -> None:
         validate_leaf(name)

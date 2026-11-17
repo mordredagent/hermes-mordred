@@ -214,7 +214,18 @@ def test_exposed_launcher_executes_cli_and_propagates_exit(native_fixture, ps, t
 
 
 def test_installer_explicit_uninstall_targets_environment_and_uv_a(native_fixture, tmp_path):
+    from tests.test_private_fs_confidential_windows import powershell
+
     argv, env, home, log, python_a, _source = native_fixture
+    # Uninstall takes the database lease, which needs a user-owned home. An
+    # elevated runner's mkdir is Administrators-owned: set only the owner and
+    # retain the inherited DACL, as a non-elevated profile home has.
+    powershell(
+        home,
+        "$a=Get-Acl -LiteralPath $env:MORDRED_ACL_FIXTURE;"
+        "$a.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User);"
+        "Set-Acl -LiteralPath $env:MORDRED_ACL_FIXTURE -AclObject $a",
+    )
     root_b = home / "hermes-agent/venv"
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(root_b)], check=True, timeout=60)
     python_b = root_b / "Scripts/python.exe"
@@ -296,7 +307,7 @@ def test_winkey_bound_build_runs_from_fresh_restricted_parent(ps, native_fixture
 
 
 def test_installer_removes_scrubbed_keys_from_native_python_environment(native_fixture, tmp_path):
-    from mordred_hermes._windows_runtime import SCRUBBED_ENV
+    from mordred_hermes._core._windows_runtime import SCRUBBED_ENV
 
     argv, env, _home, _log, python, _source = native_fixture
     observed = tmp_path / "child environment keys.jsonl"

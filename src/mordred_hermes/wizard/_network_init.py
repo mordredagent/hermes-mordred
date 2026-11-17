@@ -296,7 +296,7 @@ def collect_network_answers(
     non-Mullvad provider is chosen (UX request 2026-06-16).
 
     ``existing`` is the current ``plugins.mordred_network`` body (see
-    :func:`_read_existing_network_section`). Seeding each asked prompt's
+    :func:`_read_network_seed`). Seeding each asked prompt's
     default from it makes a re-run of ``network init`` non-destructive:
     pressing Enter on every prompt keeps the on-disk value. A blank Mullvad
     answer is preserved as ``""`` so :func:`run_init` can leave any existing

@@ -150,7 +150,7 @@ def aggregate(scores: Sequence[QuestionScore]) -> Metrics:
 
 
 class Verdict(StrEnum):
-    PASS = "PASS"
+    PASS = "PASS"  # noqa: S105 - verdict label, not a secret
     FAIL = "FAIL"
     UNAVAILABLE = "UNAVAILABLE"
 

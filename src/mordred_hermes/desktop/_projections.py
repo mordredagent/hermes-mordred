@@ -70,6 +70,8 @@ MAIL_SETUP_CODES: Final = frozenset(
         "mail_setup_cancelled",
         "invalid_selection",
         "touch_id_policy_mismatch",
+        "mail_orphan_key",
+        "presence_unsupported",
         "sync_in_progress",
         "store_path_unsafe",
         "tee_unavailable",
@@ -110,6 +112,7 @@ MAIL_FETCH_CODES: Final = frozenset(
         "store_path_unsafe",
         "tee_unavailable",
         "tee_auth_cancelled",
+        "presence_unsupported",
         "secrets_corrupt",
         "routing_unavailable",
         "egress_unsupported",
@@ -129,12 +132,15 @@ MAIL_FETCH_CODES: Final = frozenset(
 MAIL_FETCH_FALLBACK: Final = "fetch_failed"
 
 #: What ``forget()`` can refuse with or warn about (the CLI's codes), plus the route's refusals.
+#: The orphan-key repair that ``mail_orphan_key`` asks for is terminal-only,
+#: ``hermes-mordred mail forget --yes --force-orphan``; the route never requests it.
 MAIL_FORGET_CODES: Final = frozenset(
     {
         "forget_confirm_mismatch",
         "credentials_changed",
         "credentials_left",
-        "key_left",
+        "key_left",  # the CLI retries, or runs `mail forget --yes --force-orphan` once no credentials remain
+        "mail_orphan_key",
         "account_unknown",
         "account_mismatch",
         "invalid_account",
@@ -164,6 +170,13 @@ DATABASE_CODES: Final = frozenset(
         "stale_pending",
         "decrypt_pending",
         "journal",
+        "startup_busy",
+        "startup_memory_required",
+        "startup_key_unavailable",
+        "startup_refused",
+        "startup_too_large",
+        "startup_auth_interrupted",
+        "databases_cancel_refused",
         "invalid_body",
         "invalid_request",
     }

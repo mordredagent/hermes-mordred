@@ -47,10 +47,10 @@ from pathlib import Path
 from typing import Any, Final
 
 AUTH_URL: Final = "https://accounts.google.com/o/oauth2/v2/auth"
-TOKEN_URL: Final = "https://oauth2.googleapis.com/token"
+TOKEN_URL: Final = "https://oauth2.googleapis.com/token"  # noqa: S105 - a URL or an environment variable name, not a secret
 SCOPES: Final = "https://mail.google.com/ openid email"
 CLIENT_ID_ENV: Final = "MORDRED_GMAIL_CLIENT_ID"
-CLIENT_SECRET_ENV: Final = "MORDRED_GMAIL_CLIENT_SECRET"
+CLIENT_SECRET_ENV: Final = "MORDRED_GMAIL_CLIENT_SECRET"  # noqa: S105 - a URL or an environment variable name, not a secret
 CONFIG_SECTION: Final = "mordred_mail"
 #: How long a sign-in waits for the owner to approve it in the browser.
 SIGN_IN_TTL_SECONDS: Final = 600
@@ -99,7 +99,7 @@ def _config_section(home: Path | None) -> dict[str, Any]:
     try:
         from ruamel.yaml import YAML
 
-        from ..._home import hermes_home
+        from ..._core._home import hermes_home
 
         path = (home or Path(hermes_home())) / "config.yaml"
         data = YAML(typ="safe").load(path.read_text("utf-8")) if path.is_file() else None
@@ -131,7 +131,7 @@ def _post_form(url: str, fields: Mapping[str, str], timeout: float) -> dict[str,
     proxies = {"https": route.http_proxy_url} if route.http_proxy_url else {}
     opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
     data = urllib.parse.urlencode(dict(fields)).encode()
-    request = urllib.request.Request(url, data, {"content-type": "application/x-www-form-urlencoded"})
+    request = urllib.request.Request(url, data, {"content-type": "application/x-www-form-urlencoded"})  # noqa: S310 - fixed https token endpoint
     try:
         with opener.open(request, timeout=timeout) as response:
             answer = json.load(response)

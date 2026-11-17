@@ -144,7 +144,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 def _post(url: str, body: dict[str, Any], timeout: float) -> dict[str, Any]:
     """POST JSON with no proxy and no redirects."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
-    request = urllib.request.Request(url, json.dumps(body).encode(), {"content-type": "application/json"})
+    request = urllib.request.Request(url, json.dumps(body).encode(), {"content-type": "application/json"})  # noqa: S310 - loopback http endpoint checked by normalize_local_endpoint
     with opener.open(request, timeout=timeout) as response:
         answer: dict[str, Any] = json.load(response)
     return answer

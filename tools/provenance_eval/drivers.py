@@ -760,7 +760,7 @@ def _spawn(home: Path, request: Mapping[str, object], *, api_key: str | None, ti
     command = [sys.executable, "-c", _CHILD_CODE, str(request_path), str(_TOOLS_DIR)]
     try:
         with os.fdopen(os.open(work / f"{rid}.log", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as log:
-            subprocess.run(
+            subprocess.run(  # noqa: S603 - list argv, no shell
                 command,
                 cwd=home,
                 env=env,

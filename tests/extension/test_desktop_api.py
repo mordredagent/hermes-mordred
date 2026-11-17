@@ -531,7 +531,7 @@ def update_core(monkeypatch):
     """A fake installed Mordred and a recording ``_self_update`` seam."""
     from pathlib import Path
 
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     state = SimpleNamespace(
         installed=core.Installed("0.2.0a1", "pypi", None, False, ("macos",), False, "/env/bin/python3", True),
@@ -602,7 +602,7 @@ def test_update_check_reports_restart_required_from_versions_on_disk(env, update
 
 
 def test_update_check_reports_nothing_known_and_refusals(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     update_core.cached = None
     update_core.refusal = core.UpdateRefused("windows", "no in-place updates on Windows")
@@ -613,7 +613,7 @@ def test_update_check_reports_nothing_known_and_refusals(env, update_core):
 
 
 def test_update_check_refresh_failure_keeps_the_cached_answer(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     update_core.fresh = core.UpdateCheckFailed("offline")
     res = env.http.get("/api/plugins/mordred/update/check?refresh=1").json()
@@ -628,7 +628,7 @@ def test_update_check_refresh_failure_keeps_the_cached_answer(env, update_core):
 
 
 def test_update_check_route_survives_a_broken_core(env, update_core, monkeypatch):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     def boom(home=None, **kw):
         raise RuntimeError("metadata exploded")
@@ -638,7 +638,7 @@ def test_update_check_route_survives_a_broken_core(env, update_core, monkeypatch
 
 
 def test_update_check_with_unreadable_metadata_is_unsupported_not_fatal(env, update_core, monkeypatch):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     def boom(home=None):
         raise RuntimeError("no dist-info")
@@ -652,7 +652,7 @@ def test_update_check_with_unreadable_metadata_is_unsupported_not_fatal(env, upd
 def test_update_apply_runs_as_a_job_and_reports(env, update_core, monkeypatch):
     import threading
 
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     gate = threading.Event()
     real_apply = core.apply
@@ -677,7 +677,7 @@ def test_update_apply_runs_as_a_job_and_reports(env, update_core, monkeypatch):
 
 
 def test_update_apply_refuses_before_starting_a_job(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     assert _post(env, "/update/apply", {"version": "latest"}) == {"ok": False, "error": "update_bad_version"}
     assert _post(env, "/update/apply", {"version": "0.2.0a1"}) == {"ok": False, "error": "update_not_newer"}
@@ -696,11 +696,11 @@ def test_update_and_uninstall_exclude_each_other(env, update_core, monkeypatch):
 
     def slow_apply(target, **kw):
         gate.wait(5)
-        from mordred_hermes import _self_update as core
+        from mordred_hermes._core import _self_update as core
 
         return core.UpdateReport("0.2.0a1", target, ())
 
-    monkeypatch.setattr("mordred_hermes._self_update.apply", slow_apply)
+    monkeypatch.setattr("mordred_hermes._core._self_update.apply", slow_apply)
     monkeypatch.setattr(uninstall_cli, "run_uninstall", lambda ctx, opts: 0)
     started = _post(env, "/update/apply", {"version": "0.2.0a3"})
     assert started["ok"]
@@ -723,7 +723,7 @@ def test_update_and_uninstall_exclude_each_other(env, update_core, monkeypatch):
 
 
 def test_update_apply_failure_carries_the_step_output(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     update_core.apply_error = core.UpdateFailed("install-package", "resolver said no")
     started = _post(env, "/update/apply", {"version": "0.2.0a3"})
@@ -739,7 +739,7 @@ def test_update_apply_failure_carries_the_step_output(env, update_core):
 
 
 def test_update_apply_failed_rollback_has_its_own_code(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     update_core.apply_error = core.UpdateFailed("install-requirements", "no", rolled_back=False, rollback_output="rb")
     started = _post(env, "/update/apply", {"version": "0.2.0a3"})
@@ -749,7 +749,7 @@ def test_update_apply_failed_rollback_has_its_own_code(env, update_core):
 
 
 def test_update_apply_refusal_inside_the_job_is_reported(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     update_core.apply_error = core.UpdateRefused("no-uv", "uv vanished")
     started = _post(env, "/update/apply", {"version": "0.2.0a3"})
@@ -759,7 +759,7 @@ def test_update_apply_refusal_inside_the_job_is_reported(env, update_core):
 
 
 def test_update_apply_hermes_floor_refusal_reports_a_failed_rollback(env, update_core):
-    from mordred_hermes import _self_update as core
+    from mordred_hermes._core import _self_update as core
 
     update_core.apply_error = core.UpdateRefused(
         "hermes-too-old", "needs Hermes 0.30 (restoring FAILED)", rolled_back=False

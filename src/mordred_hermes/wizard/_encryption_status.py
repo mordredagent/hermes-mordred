@@ -165,9 +165,11 @@ def _memory_flag_enabled(home: Path) -> bool:
     **legacy**: no runtime reads it (the marker arms the hook), and it is
     reported only so a profile carrying it is not silently ignored.
     """
-    from .._yaml_io import load_yaml_mapping
+    from .._core._yaml_io import load_yaml_mapping
 
-    data = load_yaml_mapping(home / _CONFIG_NAME)
+    # Exception, not the default catch: ruamel's constructors raise bare
+    # KeyError/ValueError, and status never raises.
+    data = load_yaml_mapping(home / _CONFIG_NAME, catch=(Exception,))
     memory = data.get("memory")
     encryption = memory.get("encryption") if isinstance(memory, dict) else None
     enabled = encryption.get("enabled") if isinstance(encryption, dict) else None

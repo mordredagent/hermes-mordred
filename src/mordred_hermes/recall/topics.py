@@ -629,7 +629,7 @@ def _write(
         conn.execute("BEGIN IMMEDIATE")
         try:
             for table in _DERIVED:
-                conn.execute(f"DELETE FROM {table}")  # fixed table names
+                conn.execute(f"DELETE FROM {table}")  # noqa: S608 - fixed table names
             for episode_id, ep in enumerate(episodes, start=1):
                 material = _episode_material(ep)
                 conn.execute(
@@ -714,7 +714,7 @@ def missing_lines(store: Any, *, limit: int = 64, kinds: Sequence[str] = _LINE_K
                 SELECT e.digest, 'episode', e.material, e.end FROM recall_episodes e
             ) WHERE digest NOT IN (SELECT digest FROM recall_lines) AND kind IN ({marks})
             GROUP BY digest ORDER BY max(end) DESC LIMIT ?
-            """,
+            """,  # noqa: S608 - only placeholders and fixed identifiers are interpolated; values are bound
             (*kinds, limit),
         ).fetchall()
     return [LineJob(str(d), str(k), json.loads(m)) for d, k, m in rows]
@@ -977,7 +977,8 @@ class TopicIndex:
                 inside = {
                     int(row[0])
                     for row in conn.execute(
-                        f"SELECT episode_id FROM recall_episodes WHERE event_id IN ({marks})", list(kept)
+                        f"SELECT episode_id FROM recall_episodes WHERE event_id IN ({marks})",  # noqa: S608 - only placeholders and fixed identifiers are interpolated; values are bound
+                        list(kept),
                     )
                 }
                 part_hits = [hit for hit in part_hits if hit[0] in inside]
@@ -1006,7 +1007,7 @@ class TopicIndex:
             SELECT t.group_id, sum(t.score), count(*) FROM recall_group_terms t
             JOIN recall_groups g ON g.group_id = t.group_id
             WHERE g.level = 'event' AND t.term IN ({marks}) GROUP BY t.group_id
-            """,
+            """,  # noqa: S608 - only placeholders and fixed identifiers are interpolated; values are bound
             list(terms),
         ).fetchall()
         return {int(gid): float(score) for gid, score, matched in rows if matched == len(terms)}
@@ -1025,7 +1026,7 @@ class TopicIndex:
                     f"""
                     SELECT pe.episode_id, p.part_uid, p.author_owner_class FROM import_parts p
                     JOIN recall_part_episode pe ON pe.part_id = p.id WHERE p.part_uid IN ({marks})
-                    """,
+                    """,  # noqa: S608 - only placeholders and fixed identifiers are interpolated; values are bound
                     chunk,
                 )
             ]
@@ -1055,7 +1056,7 @@ class TopicIndex:
             candidates |= {
                 int(row[0])
                 for row in conn.execute(
-                    f"SELECT DISTINCT event_id FROM recall_episodes WHERE episode_id IN ({marks})",
+                    f"SELECT DISTINCT event_id FROM recall_episodes WHERE episode_id IN ({marks})",  # noqa: S608 - only placeholders and fixed identifiers are interpolated; values are bound
                     list(hits_by_episode),
                 )
             }
@@ -1175,7 +1176,7 @@ def places(conn: sqlite3.Connection, chats: Sequence[tuple[str, str]]) -> dict[s
     if not keys:
         return {}
     marks = ",".join("?" for _ in keys)
-    rows = conn.execute(f"SELECT key, value FROM import_meta WHERE key IN ({marks})", list(keys)).fetchall()
+    rows = conn.execute(f"SELECT key, value FROM import_meta WHERE key IN ({marks})", list(keys)).fetchall()  # noqa: S608 - only placeholders and fixed identifiers are interpolated; values are bound
     return {keys[str(key)]: str(value) for key, value in rows}
 
 

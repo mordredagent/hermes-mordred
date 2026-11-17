@@ -64,25 +64,28 @@ def _seal(root: Path, home: Path, backend: FakeBackend, store: FakeAnchorStore, 
         env_path.unlink()
 
 
+def _sealed_env(tmp_path: Path, content: bytes) -> tuple[Path, Path, FakeBackend, FakeAnchorStore]:
+    """Build independent device state and seal the specified env bytes."""
+    root, home = tmp_path / "v", tmp_path / "home"
+    home.mkdir()
+    backend, store = FakeBackend(), FakeAnchorStore()
+    _seal(root, home, backend, store, content)
+    return root, home, backend, store
+
+
 # -----------------------------------------------------------------------------
 # 1. The moved core still merges/reseals correctly when called directly.
 # -----------------------------------------------------------------------------
 class TestResealEnvCore:
     def test_noop_when_no_plaintext(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _seal(root, home, backend, store, b"A=1\n")
+        root, home, backend, store = _sealed_env(tmp_path, b"A=1\n")
 
         rc = reseal_env(home=home, root=root, backend=backend, store=store)
         assert rc == 0
         assert not (home / ".env").exists()
 
     def test_keeps_plaintext_when_opted_out(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _seal(root, home, backend, store, b"A=1\n")
+        root, home, backend, store = _sealed_env(tmp_path, b"A=1\n")
         marker = _env_optout_marker_path(home)
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("opt-out\n", encoding="utf-8")
@@ -106,10 +109,7 @@ class TestResealEnvCore:
         """``_open_hot_or_report`` (the keyvault-local mirror of
         ``wizard._vault_open._open_hot_path_or_report``) must fail closed: a
         store that raises on open must not lose the plaintext."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _seal(root, home, backend, store, b"A=1\n")
+        root, home, backend, _store = _sealed_env(tmp_path, b"A=1\n")
         (home / ".env").write_bytes(b"B=2\n")
 
         class _ReadRaisesStore(FakeAnchorStore):
@@ -126,10 +126,7 @@ class TestResealEnvCore:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Ctrl-C anywhere after capture must not strand the sole live values."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _seal(root, home, backend, store, _ENV_MULTI)
+        root, home, backend, store = _sealed_env(tmp_path, _ENV_MULTI)
         env_path = home / ".env"
         env_path.write_bytes(b"C=3\n")
 
@@ -147,10 +144,7 @@ class TestResealEnvCore:
     def test_concurrent_replacement_after_merge_is_not_deleted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _seal(root, home, backend, store, _ENV_MULTI)
+        root, home, backend, store = _sealed_env(tmp_path, _ENV_MULTI)
         env_path = home / ".env"
         snapshot = b"C=3\n"
         replacement = b"D=4\n"
@@ -251,10 +245,7 @@ class TestNoWizardImport:
         succeeding — so a regression is observable even though the exception
         itself is caught.
         """
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _seal(root, home, backend, store, _ENV_MULTI)
+        root, home, backend, store = _sealed_env(tmp_path, _ENV_MULTI)
         (home / ".env").write_bytes(b"C=3\n")
 
         # `reseal_stray_env_if_present` has no backend/store injection seam of

@@ -68,10 +68,10 @@ assert "synthetic TPM memory canary" in s.memory_entries
     key_path = memory_key_path(tpm_home)
     wrapped = key_path.read_bytes()
     assert len(wrapped) == 127
-    # Reset owns the surrounding native store, but not this independent key.
+    # Selective reset preserves the shared native store and its independent memory key.
     from mordred_hermes.wizard.keyvault_cli import reset_keyvault
 
-    assert reset_keyvault(home=tpm_home, assume_yes=True) == 1
+    assert reset_keyvault(home=tpm_home, assume_yes=True) == 0
     assert key_path.read_bytes() == wrapped
     assert _python(read_src).returncode == 0
     # An unreadable tree is not an empty tree: preserve both ciphertext and key.

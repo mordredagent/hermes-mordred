@@ -341,7 +341,7 @@ def test_excluded_artifacts_absent_profile_reports_nothing_without_creating(fs, 
 
 
 def test_excluded_artifact_inspection_failure_is_not_empty(fs, windows, retained, monkeypatch):  # noqa: F811
-    from mordred_hermes import _config_io as cio
+    from mordred_hermes._core import _config_io as cio
 
     def unsafe(path):
         raise PrivateFSError("unsafe", "ancestor_identity")

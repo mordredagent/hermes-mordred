@@ -868,8 +868,8 @@ regression at the end of D4.
 
 ## Revision after the Codex design review (2026-10-23)
 
-The review (`docs/superpowers/reviews/2026-10-23-desktop-mail-ceremonies-codex-design-review.md`,
-verdict REVISE) is resolved as follows. Where a resolution changes an earlier
+The Codex design review of 2026-10-23 (verdict REVISE; note retired from the tree,
+see Git history) is resolved as follows. Where a resolution changes an earlier
 section, the text here wins; SPEC is updated to match (D1).
 
 ### Protect this Mac
@@ -1083,7 +1083,7 @@ advertised only after the bridge validation.
 
 ## Second revision (after the Codex second pass, 2026-10-23)
 
-Record: `docs/superpowers/reviews/2026-10-23-desktop-mail-ceremonies-codex-design-review-pass2.md`.
+Record: Codex design review pass 2 (2026-10-23; note retired from the tree).
 Decisions (these win over everything above and are mirrored in SPEC):
 
 - **NF1/NF2 — vault ceremony as prepare → acknowledge → commit.**

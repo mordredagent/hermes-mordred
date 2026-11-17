@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from mordred_hermes import llm_guard
-from mordred_hermes._config_io import CanonicalPaths, canonical_session
+from mordred_hermes._core._config_io import CanonicalPaths, canonical_session
 from mordred_hermes.llm_guard import _windows_policy, auxiliary_guard, enforce, harness_detect, local_adapter
 from mordred_hermes.llm_guard._exceptions import MordredSessionRefused
 from tests._helpers import PlatformSys
@@ -24,14 +24,14 @@ class Audit:
 
 
 def _set_platform(monkeypatch, platform):
-    monkeypatch.setattr(llm_guard, "sys", PlatformSys(platform))
+    monkeypatch.setattr(llm_guard._registration, "sys", PlatformSys(platform))
     monkeypatch.setattr(_windows_policy, "sys", PlatformSys(platform))
 
 
 @pytest.fixture
 def profile(tmp_path, monkeypatch):
     if os.name != "nt":
-        from mordred_hermes import _config_io as cio
+        from mordred_hermes._core import _config_io as cio
         from mordred_hermes._private_fs import open_private_directory
 
         monkeypatch.setattr(cio, "open_confidential_directory", open_private_directory)
@@ -124,25 +124,25 @@ def test_auxiliary_refuses_before_resolver_operation(profile):
 
 
 def test_session_wrapper_does_not_swallow_unsafe_configuration(profile, monkeypatch):
-    monkeypatch.setattr(llm_guard, "DEFAULT_POLICY_JSON_PATH", profile.home / "mordred" / "policy.json")
-    monkeypatch.setattr(llm_guard, "DEFAULT_CONFIG_PATH", profile.home / "config.yaml")
-    monkeypatch.setattr(llm_guard, "_build_audit_writer", lambda path: Audit())
+    monkeypatch.setattr(llm_guard._registration, "DEFAULT_POLICY_JSON_PATH", profile.home / "mordred" / "policy.json")
+    monkeypatch.setattr(llm_guard._registration, "DEFAULT_CONFIG_PATH", profile.home / "config.yaml")
+    monkeypatch.setattr(llm_guard._registration, "_build_audit_writer", lambda path: Audit())
     (profile.home / "config.yaml").write_bytes(b"[]")
     with pytest.raises(MordredSessionRefused):
-        llm_guard._on_session_start_enforce()
+        llm_guard._registration._on_session_start_enforce()
 
 
 def test_hook_cannot_fail_open_when_audit_construction_fails(profile, monkeypatch):
-    monkeypatch.setattr(llm_guard, "DEFAULT_POLICY_JSON_PATH", profile.home / "mordred" / "policy.json")
-    monkeypatch.setattr(llm_guard, "DEFAULT_CONFIG_PATH", profile.home / "config.yaml")
+    monkeypatch.setattr(llm_guard._registration, "DEFAULT_POLICY_JSON_PATH", profile.home / "mordred" / "policy.json")
+    monkeypatch.setattr(llm_guard._registration, "DEFAULT_CONFIG_PATH", profile.home / "config.yaml")
 
     def broken(path):
         raise OSError("audit unavailable")
 
-    monkeypatch.setattr(llm_guard, "_build_audit_writer", broken)
+    monkeypatch.setattr(llm_guard._registration, "_build_audit_writer", broken)
     with pytest.raises(MordredSessionRefused):
         try:  # noqa: SIM105 -- reproduce Hermes hook swallowing boundary.
-            llm_guard._on_pre_api_request_enforce(provider="openai")
+            llm_guard._registration._on_pre_api_request_enforce(provider="openai")
         except Exception:
             pass  # Hermes' hook dispatcher swallows ordinary errors.
 
@@ -165,7 +165,7 @@ def test_prompt_grant_expires_on_checked_generation_change(profile):
 
 
 def test_checked_snapshot_is_single_and_released_before_prompt(profile, monkeypatch):
-    from mordred_hermes import _config_io as cio
+    from mordred_hermes._core import _config_io as cio
 
     calls = []
     original = cio.read_canonical_snapshot
@@ -200,7 +200,7 @@ def test_checked_snapshot_is_single_and_released_before_prompt(profile, monkeypa
 
 @pytest.mark.parametrize("fault", ["home:open", "policy:open", "home:close", "policy:close"])
 def test_admission_and_cleanup_errors_never_authorize(monkeypatch, tmp_path, fault):
-    from mordred_hermes import _config_io as cio
+    from mordred_hermes._core import _config_io as cio
     from tests.test_config_io import Backend
 
     backend = Backend()
@@ -214,7 +214,7 @@ def test_admission_and_cleanup_errors_never_authorize(monkeypatch, tmp_path, fau
 
 
 def test_only_checked_absence_keeps_fresh_install_default(monkeypatch, tmp_path):
-    from mordred_hermes import _config_io as cio
+    from mordred_hermes._core import _config_io as cio
     from tests.test_config_io import Backend
 
     backend = Backend()
@@ -433,11 +433,11 @@ def test_audit_callback_cannot_reuse_outer_cache_admission(profile, monkeypatch)
 def test_automatic_disk_provider_is_unknown_without_unchecked_auth(profile, monkeypatch):
     (profile.home / "config.yaml").write_bytes(b"model: {provider: auto}")
     audit = Audit()
-    monkeypatch.setattr(llm_guard, "DEFAULT_POLICY_JSON_PATH", profile.home / "mordred" / "policy.json")
-    monkeypatch.setattr(llm_guard, "DEFAULT_CONFIG_PATH", profile.home / "config.yaml")
-    monkeypatch.setattr(llm_guard, "_build_audit_writer", lambda path: audit)
+    monkeypatch.setattr(llm_guard._registration, "DEFAULT_POLICY_JSON_PATH", profile.home / "mordred" / "policy.json")
+    monkeypatch.setattr(llm_guard._registration, "DEFAULT_CONFIG_PATH", profile.home / "config.yaml")
+    monkeypatch.setattr(llm_guard._registration, "_build_audit_writer", lambda path: audit)
     monkeypatch.setattr(local_adapter, "register_provider", lambda profile: None)
-    llm_guard._on_session_start_enforce()
+    llm_guard._registration._on_session_start_enforce()
     assert any(entry.get("reason") == "mordred.degraded.no_resolved_provider" for entry in audit.entries)
 
 

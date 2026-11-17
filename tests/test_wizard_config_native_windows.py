@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from mordred_hermes._config_io import CanonicalPaths, PolicyPendingError, read_canonical_snapshot
+from mordred_hermes._core._config_io import CanonicalPaths, PolicyPendingError, read_canonical_snapshot
 from mordred_hermes._private_fs import PrivateFSError
 from mordred_hermes.wizard._uninstall_config import apply_config_cleanup, apply_env_cleanup
 from mordred_hermes.wizard.credentials_writer import JSONCredentialsWriter
@@ -434,7 +434,7 @@ def test_native_upgrade_supported_source_and_marker_only(writer, layout):
 
 @pytest.mark.parametrize("bad", ["malformed", "utf8", "oversize", "hardlink", "acl", "invalid-field"])
 def test_native_unsafe_policy_refuses_without_repair(writer, monkeypatch, bad):
-    from mordred_hermes._config_io import CONFIG_LIMIT
+    from mordred_hermes._core._config_io import CONFIG_LIMIT
     from mordred_hermes.wizard import upgrade
     from tests.test_openclaw_migration import _publication_tripwires
 
@@ -562,7 +562,7 @@ def test_native_widened_file_acl_refuses_without_repair(writer, consumer):
 
 
 def test_native_existing_confidential_dotenv_noop_preserves_descriptor_and_identity(shared_home):
-    from mordred_hermes import _dotenv_io
+    from mordred_hermes._core import _dotenv_io
     from mordred_hermes._private_fs._windows_api import get_api
     from mordred_hermes._private_fs._windows_security import validate_private
 

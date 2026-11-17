@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from mordred_hermes import __version__
-from mordred_hermes._home import hermes_home
+from mordred_hermes._core._home import hermes_home
 from mordred_hermes.extension.egress import EgressError, loopback_proxy_host, tor_route_required
 
 _API_ROOT = "https://discord.com/api/v10"

@@ -200,6 +200,19 @@ def test_serve_opens_the_vault_through_the_gate_it_gives_the_server(tmp_path, mo
     assert os.environ["DISCORD_BOT_TOKEN"] == "from-vault"
 
 
+def test_no_vault_launcher_evicts_ambient_memory_key(monkeypatch) -> None:
+    from mordred_hermes.keyvault import _memory_key_holder, _runtime_env
+
+    def must_not_run() -> int:
+        raise AssertionError("no vault exists, so the runtime shim must not run")
+
+    monkeypatch.setattr(_runtime_env, "install_vault_env_decrypt", must_not_run)
+    monkeypatch.setenv(_memory_key_holder.MEMORY_KEY_ENV, "ambient-value")
+    assert extension_main._load_vault_managed_environment() == 0
+    assert _memory_key_holder.MEMORY_KEY_ENV not in os.environ
+    assert _memory_key_holder.get_value() == "ambient-value"
+
+
 def test_serve_stops_when_the_vault_cannot_be_trusted(tmp_path, monkeypatch, capsys) -> None:
     from mordred_hermes.keyvault import _runtime_env
 

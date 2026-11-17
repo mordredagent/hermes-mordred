@@ -71,7 +71,9 @@ class _World:
 
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, factory: StoreFactory) -> None:
         _stub_runtime_probes(monkeypatch)
-        self.home, self.root = tmp_path / "home", tmp_path / "vault"
+        self.home = tmp_path / "home"
+        self.home.mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.root = self.home / "mordred" / "vault"
         _plaintext_home(self.home)
         self.kc = SimKeychain()
         self.backend = FakeBackend()

@@ -28,7 +28,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 from ..keyvault import _identity as _identity  # re-exported: tests patch vault_cli._identity._hermes_home
 from . import _term
 from ._vault_entries import (

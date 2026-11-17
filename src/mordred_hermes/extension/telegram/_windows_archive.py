@@ -203,7 +203,7 @@ def _ensure_gitignore(tx: PrivateTransaction, recorder: Recorder) -> None:
 
 def _split(root: Path, rel: str) -> tuple[Path, str]:
     directory, _, name = rel.rpartition("/")
-    if directory not in ("", DIALOGS):
+    if directory not in ("", DIALOGS) or not _archive_leaf(directory, name):
         raise PrivateFSError("unsafe", "telegram_archive_path")
     return (root / directory if directory else root), name
 
@@ -314,6 +314,28 @@ def busy(root: Path) -> bool:
 
 
 # -- wipe ------------------------------------------------------------------------------
+
+
+def delete_segments(root: Path) -> int:
+    """Finalize a verified migration under its sync lock; keep index and credentials.
+
+    Only recognized segment leaves are eligible, and all identities are checked
+    before the first deletion. Unknown files, directories and locks remain.
+    """
+    with transaction(root) as root_tx:
+        if root_tx is None:
+            return 0
+        with transaction(root / DIALOGS) as tx:
+            if tx is None:
+                return 0
+            plan = [
+                (name, tx.stat(name).identity)
+                for name in tx.list_names(max_entries=MAX_ENTRIES)
+                if _SEGMENT.fullmatch(name) is not None
+            ]
+            for name, identity in plan:
+                tx.delete_file(name, expected_identity=identity)
+            return len(plan)
 
 
 def _archive_leaf(directory: str, name: str) -> bool:

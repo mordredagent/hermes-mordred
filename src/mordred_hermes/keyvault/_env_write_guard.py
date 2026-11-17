@@ -23,7 +23,7 @@ runtime dependency on the wizard layer being importable.
 
 ``hermes_cli`` is a private, unstable host module — it ships no API stability
 guarantee (the plugin deliberately *replicates* host metadata rather than
-importing it; see :mod:`mordred_hermes._provider_identity`). So this wrapper is
+importing it; see :mod:`mordred_hermes._core._provider_identity`). So this wrapper is
 defensive: a no-op when the host function is absent or not callable, **never**
 raises into the host call, idempotent, and it re-binds references that other host
 modules early-bound (e.g. ``from hermes_cli.config import save_env_value`` in
@@ -40,7 +40,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 from ._identity import default_vault_root
 from ._runtime_env import _env_optout_marker_path
 
@@ -175,7 +175,7 @@ def reseal_stray_env_if_present(
         # Surface a stranded plaintext rather than crashing the session boundary,
         # and let `encryption status` flag it as exposed.
         with contextlib.suppress(Exception):
-            from .. import _term
+            from .._core import _term
 
             _term.emit_warn(
                 f"could not reseal .env into the vault at a session boundary: {exc} — a plaintext copy "

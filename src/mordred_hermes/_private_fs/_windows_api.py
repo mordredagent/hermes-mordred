@@ -73,8 +73,10 @@ class OwnedHandle:
     def __init__(self, api: NativeAPI, value: int) -> None:
         self.api = api
         self.value: int | None = value
+        self._lifetime = object()
 
     def close(self) -> None:
+        self._lifetime = object()
         value, self.value = self.value, None
         if value is not None:
             self.api.checked(self.api.CloseHandle(value), "close")
@@ -249,9 +251,12 @@ class NativeAPI:
             self.LocalFree(descriptor)
 
     def open(self, path: str, *, access: int = 0x120089, share: int = 3, create: bool = False) -> OwnedHandle:
+        # Synchronous write-through for every mutating handle, including rename
+        # and disposition; passive read/ancestor handles retain their old flags.
+        flags = 0x82200000 if create or access & 0x50010116 else 0x02200000
         with self.attributes() if create else contextlib.nullcontext(None) as attributes:
             value = self.CreateFile(
-                path, access, share, c.byref(attributes) if attributes else None, 1 if create else 3, 0x02200000, None
+                path, access, share, c.byref(attributes) if attributes else None, 1 if create else 3, flags, None
             )
             code = self.last_error()
         if value is None or value == c.c_void_p(-1).value:

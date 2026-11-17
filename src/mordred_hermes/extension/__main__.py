@@ -28,7 +28,7 @@ from collections.abc import Callable
 from types import FrameType
 from typing import TYPE_CHECKING, Any
 
-from .. import _term
+from .._core import _term
 
 if TYPE_CHECKING:
     from .api import ExtensionAPIServer
@@ -54,11 +54,14 @@ def _load_vault_managed_environment() -> int:
     The standalone launcher does not run ``mordred_keyvault.register()``.  A
     manifest pre-check keeps an extension-only install free of macOS Keychain
     dependencies when no vault exists, while any on-disk vault state takes the
-    normal fail-closed runtime path.
+    normal fail-closed runtime path. An ambient memory key is evicted before that
+    pre-check, so a no-vault server does not keep it until plugin discovery.
     """
 
     from ..keyvault._identity import default_vault_root
+    from ..keyvault._memory_key_holder import evict_ambient_memory_key
 
+    evict_ambient_memory_key()
     if not any(default_vault_root().glob("manifest.*.mvmf")):
         return 0
     from ..keyvault._runtime_env import install_vault_env_decrypt
@@ -113,7 +116,7 @@ def _resolve_activity_receiver() -> Any:
     batch, so nothing here decides whether recording is allowed.
     """
     try:
-        from .._home import hermes_home
+        from .._core._home import hermes_home
         from ..activity.ingest import build_receiver
     except ImportError as exc:
         logging.getLogger(__name__).debug("activity receiver unavailable (%s)", type(exc).__name__)
@@ -126,7 +129,7 @@ def _resolve_activity_receiver() -> Any:
 
 
 def _resolve_activity_max_batch_bytes() -> int:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
     from .activity_api import resolve_max_batch_bytes
 
     return resolve_max_batch_bytes(hermes_home())

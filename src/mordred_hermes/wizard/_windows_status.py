@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from .._core._config_io import passive_canonical_reads
 from ._encryption_status import TargetStatus
 from ._windows_gates import HELPER_FAILURES, RUNTIME_REASONS, classify_exception, describe_capability, remedy
 
@@ -38,6 +39,7 @@ _ARTIFACT_NOTES: dict[str, tuple[str, str]] = {
 }
 
 
+@passive_canonical_reads()
 def capability_rows(home: Path) -> tuple[tuple[WindowsCapability, ...], str | None]:
     """``(capabilities, None)``, or ``((), classified reason)`` when they cannot be read."""
     from ..keyvault._windows_capability import windows_capabilities

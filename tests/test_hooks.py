@@ -595,6 +595,27 @@ plugins:
         )
         assert _runtime.get_active_policy_mode(config_path=config) == "strict"
 
+    @pytest.mark.parametrize(
+        "data",
+        [
+            b"a: !!bool TOP-SECRET-SENTINEL\n",
+            b"a: !!float TOP-SECRET-SENTINEL\n",
+            b"a: \xff\xfe\n",
+            b"[" * 3000 + b"]" * 3000,
+            b"a: TOP-SECRET-SENTINEL\na: 2\n",
+            b"a: !TOP-SECRET-SENTINEL x\n",
+        ],
+        ids=["bool-keyerror", "float-valueerror", "undecodable", "too-deep", "duplicate-key", "unknown-tag"],
+    )
+    def test_any_parser_failure_fails_closed_without_exposing_config(
+        self, tmp_path: Path, data: bytes, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        config = tmp_path / "config.yaml"
+        config.write_bytes(data)
+        assert _runtime.get_active_policy_mode(config_path=config) == "strict"
+        assert "exists but is unreadable" in caplog.text
+        assert "SENTINEL" not in caplog.text.upper()
+
     def test_empty_plugins_mapping_stays_lenient(self, tmp_path: Path) -> None:
         # Unchanged: an empty ``plugins: {}`` is the legitimate "nothing
         # configured yet" shape, not damage.

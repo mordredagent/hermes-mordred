@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from mordred_hermes import _pth_bootstrap, _runtime_bootstrap
-from mordred_hermes._proxy_bypass import ensure_loopback_proxy_bypass
+from mordred_hermes._core._proxy_bypass import ensure_loopback_proxy_bypass
 from mordred_hermes.privacy_check._exceptions import MordredIntegrityRefused
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -511,7 +511,7 @@ def test_home_fallback_honours_hermes_home_before_hermes_is_importable(
     import builtins
     import sys
 
-    from mordred_hermes import _home
+    from mordred_hermes._core import _home
 
     real_import = builtins.__import__
 

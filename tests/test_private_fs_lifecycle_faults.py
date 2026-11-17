@@ -28,6 +28,12 @@ class FakeAPI:
 
     def open(self, path, *, access=0x120089, share=3, create=False):
         name = path.rsplit("\\", 1)[-1]
+        directory = path == "C:\\private"
+        if directory:
+            assert access == 0xC0000000 and share == 3
+            self.next_handle += 1
+            self.handles[self.next_handle] = "directory"
+            return OwnedHandle(self, self.next_handle)
         if name not in self.contents:
             raise fs.PrivateFSError("missing", "open")
         if access & 0x10000 or access & 0x40000000:
@@ -38,7 +44,7 @@ class FakeAPI:
         return OwnedHandle(self, self.next_handle)
 
     def metadata(self, handle):
-        if handle.value == 1:
+        if handle.value == 1 or self.handles.get(handle.value) == "directory":
             return Metadata(fs.FileIdentity(1, b"directory"), True, False, 1, 0)
         name = self.handles[handle.value]
         return Metadata(fs.FileIdentity(1, b"file"), False, False, 1, len(self.contents[name]))
@@ -52,7 +58,12 @@ class FakeAPI:
     def user_sid(self):
         return b"user"
 
+    def validate_volume(self, handle):
+        assert self.metadata(handle).identity.volume == 1
+
     def final_path(self, handle):
+        if handle.value == 1 or self.handles.get(handle.value) == "directory":
+            return "C:\\private"
         return "C:\\private\\" + self.handles[handle.value]
 
     def CloseHandle(self, value):
@@ -106,7 +117,7 @@ class FakeAPI:
         return min(2, len(data))
 
     def flush(self, handle):
-        if self.fail == "flush":
+        if self.fail == "flush" and not self.metadata(handle).directory:
             raise self.native_failure
 
     def names(self, handle):
@@ -383,7 +394,8 @@ def test_windows_create_postpublication_error_preserves_exception(windows_fs, mo
 
     def flush(handle):
         nonlocal count
-        count += 1
+        if not api.metadata(handle).directory:
+            count += 1
         if count == 2:
             raise api.native_failure
 
@@ -500,3 +512,51 @@ def test_posix_raw_body_error_retains_cleanup_uncertainty(tmp_path: Path, monkey
     assert err.value.__cause__ is original
     assert getattr(original, "__notes__", None) or getattr(err.value, "__notes__", None)
     assert (root / "source").exists() is not mutate
+
+
+@pytest.mark.parametrize("damage", ["none", "before", "after", "flush", "sharing"])
+def test_windows_checked_flush_identity_and_faults(windows_fs, monkeypatch, damage):
+    api, _, tx = windows_fs
+    expected = tx.stat("source").identity
+    if damage == "before":
+        expected = fs.FileIdentity(1, b"wrong")
+    elif damage == "flush":
+        api.fail = "flush"
+    elif damage == "sharing":
+        original = api.open
+
+        def busy(path, **kwargs):
+            if kwargs.get("access", 0) & 0x40000000:
+                raise fs.PrivateFSError("busy", "open")
+            return original(path, **kwargs)
+
+        monkeypatch.setattr(api, "open", busy)
+    elif damage == "after":
+        original = api.metadata
+
+        def change_after_flush(handle):
+            value = original(handle)
+            if getattr(api, "flushed", False) and not value.directory:
+                from dataclasses import replace
+
+                value = replace(value, identity=fs.FileIdentity(1, b"changed"))
+            return value
+
+        monkeypatch.setattr(api, "metadata", change_after_flush)
+        monkeypatch.setattr(api, "flush", lambda handle: setattr(api, "flushed", True))
+    if damage == "none":
+        tx.flush_file("source", expected_identity=expected)
+    else:
+        with pytest.raises(fs.PrivateFSError):
+            tx.flush_file("source", expected_identity=expected)
+    assert api.contents["source"] == b"old"
+    assert not api.handles
+
+
+def test_windows_rename_flush_failure_preserves_publication(windows_fs):
+    api, _, tx = windows_fs
+    api.fail = "flush"
+    with pytest.raises(fs.PrivateFSError) as failure:
+        tx.rename_file("source", "target", expected_identity=tx.stat("source").identity)
+    assert failure.value.commit_state == "uncertain"
+    assert "source" not in api.contents and api.contents["target"] == b"old"

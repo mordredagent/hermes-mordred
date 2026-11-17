@@ -70,8 +70,6 @@ NAVIGATION_TOOLS: Final = frozenset({"browser_navigate", "browser_snapshot", "br
 MIN_BLOCK_CHARS: Final = 200
 #: Only this much of a user message is scanned for hosts and terms.
 MAX_MESSAGE_CHARS: Final = 4000
-#: Browser results larger than this are passed through untouched (never parsed).
-MAX_RESULT_CHARS: Final = 1_000_000
 _DAY: Final = 86400.0
 _MAX_SESSIONS: Final = 256
 
@@ -88,16 +86,6 @@ def _host_changed(key: str, host: str) -> bool:
         while len(_last_hosts) > _MAX_SESSIONS:
             _last_hosts.popitem(last=False)
     return previous != host
-
-
-def _json_object(result: Any) -> dict[str, Any] | None:
-    if not isinstance(result, str) or len(result) > MAX_RESULT_CHARS:
-        return None
-    try:
-        payload = json.loads(result)
-    except ValueError:
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 def _page_url(tool_name: str, args: Any, payload: dict[str, Any]) -> Any:
@@ -184,6 +172,7 @@ def _site_block(home: Path, config: ActivityConfig, host: str, key: str, own: _O
 
 def _navigation_result(tool_name: str, args: Any, result: Any, session_id: Any, task_id: Any) -> str | None:
     from . import _history_access as access
+    from ._browser_results import json_object
     from .contracts import site_excluded
     from .history import host_of
 
@@ -191,7 +180,7 @@ def _navigation_result(tool_name: str, args: Any, result: Any, session_id: Any, 
     config = access.config(home)
     if not (config.history_active and config.history_on_navigate):
         return None
-    payload = _json_object(result)
+    payload = json_object(result)
     if payload is None or payload.get("success") is not True or RESULT_KEY in payload:
         return None
     host = host_of(_page_url(tool_name, args, payload))

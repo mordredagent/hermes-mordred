@@ -62,7 +62,7 @@ class RecallService:
     def _store(self) -> RecallStore:
         home = self._home
         if home is None:
-            from .._home import hermes_home
+            from .._core._home import hermes_home
 
             home = hermes_home()
         return self._opener(home)
@@ -184,7 +184,7 @@ class RecallService:
             return None
         home = self._home
         if home is None:
-            from .._home import hermes_home
+            from .._core._home import hermes_home
 
             home = hermes_home()
         _log.info("recall model: started on demand, stopped after %ds idle", int(idle_from_env()))

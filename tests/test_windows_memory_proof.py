@@ -29,10 +29,11 @@ from types import SimpleNamespace
 import pytest
 
 import mordred_hermes
-from mordred_hermes import _config_io as cio
-from mordred_hermes import _windows_runtime
+from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core import _windows_runtime
 from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.keyvault import _windows_processes
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from mordred_hermes.keyvault._runtime_probe import GatewayDiscoveryUnavailable, GatewayRuntime
 from tests import _windows_proof_runtime as injected
 from tests.test_windows_custody import fs as fs
@@ -121,9 +122,31 @@ def known_empty(home, **kwargs):
 
 
 @pytest.fixture
+def custody_env(fs, monkeypatch, tmp_path):
+    """Per-test emulated custody and scratch space, without an installed runtime."""
+    env = _custody_environment(fs, monkeypatch, tmp_path)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("the lightweight custody environment must not prove or launch a runtime")
+
+    monkeypatch.setattr(proof_module(), "prove_windows_memory_runtime", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    return env
+
+
+@pytest.fixture
 def proof_env(fs, monkeypatch, installed_runtime, tmp_path):
+    # Build the runtime before installing the per-test subprocess/lock spy.
+    env = _custody_environment(fs, monkeypatch, tmp_path)
+    env.python = installed_runtime
+    return env
+
+
+def _custody_environment(fs, monkeypatch, tmp_path):
+    from tests._windows_custody_fakes import windows_test_backend
+
     custody, storage, home, _ = fs
-    backend = injected.backend_for(home)
+    backend = windows_test_backend(injected.backend_for(home))
     injected.emulate(monkeypatch.setattr, backend)
     # This fixture already emulates the native boundary. Model only the
     # parent's source-test admission so wheel-parent units use that same
@@ -151,15 +174,17 @@ def proof_env(fs, monkeypatch, installed_runtime, tmp_path):
         storage=storage,
         home=home,
         backend=backend,
-        python=installed_runtime,
         scratch=scratch,
         launches=Launches(monkeypatch),
     )
 
 
 def enroll(env):
-    with env.custody.windows_custody_session(env.home, create=True, backend=env.backend) as owner:
-        owner.enroll_memory()
+    with (
+        database_key_mutation(root=env.home, generation=None) as database_lease,
+        env.custody.windows_custody_session(env.home, create=True, backend=env.backend) as owner,
+    ):
+        owner.enroll_memory(database_lease=database_lease)
         return owner.lease("memory")
 
 
@@ -419,7 +444,7 @@ def test_invalid_timeout_refuses_before_io(proof_env, timeout):
 # --- child environment scrub -------------------------------------------------
 
 
-def test_child_environment_scrubs_bypasses_and_keeps_test_injection(proof_env):
+def test_child_environment_scrubs_bypasses_and_keeps_test_injection(custody_env):
     module = proof_module()
     environ = {
         "PATH": os.environ.get("PATH", ""),
@@ -437,12 +462,12 @@ def test_child_environment_scrubs_bypasses_and_keeps_test_injection(proof_env):
         "MORDRED_TEST_INJECT_BACKEND": str(INJECTION),
         "PYTEST_CURRENT_TEST": "tests/x.py::y (call)",
     }
-    env = module._child_environment(environ, proof_env.home)
+    env = module._child_environment(environ, custody_env.home)
     for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT", "HERMES_MEMORY_KEY", "UV_PYTHON"):
         assert name not in env
     assert "MORDRED_SEKEY_UNATTENDED" not in env and "MORDRED_HERMES_PYTHON" not in env
     assert env["MORDRED_CONFIG_DECRYPT"] == "0"
-    assert env["HERMES_HOME"] == os.fspath(proof_env.home)
+    assert env["HERMES_HOME"] == os.fspath(custody_env.home)
     assert env["MORDRED_WINKEY_HELPER"] == "C:/owned/winkey-helper.exe"
     assert env["MORDRED_TEST_INJECT_BACKEND"] == str(INJECTION)
     assert env["PYTHONNOUSERSITE"] == "1"
@@ -553,13 +578,13 @@ print(json.dumps({"origin": str(origin), "path": sys.path}))
     record_property("unpatched_installed_origin", report["origin"])
 
 
-def test_probe_directory_is_exact_private(proof_env, monkeypatch):
+def test_probe_directory_is_exact_private(custody_env, monkeypatch):
     module = proof_module()
     with module._probe_script() as script:
         assert script.name == "hermes"
         with open_private_directory(script.parent) as directory:
             assert directory.read_bytes("hermes", max_bytes=1 << 20) == module._CHILD_SOURCE.encode()
-        assert script.parent.parent == Path(os.path.realpath(proof_env.scratch))
+        assert script.parent.parent == Path(os.path.realpath(custody_env.scratch))
     assert not script.parent.exists()
 
 

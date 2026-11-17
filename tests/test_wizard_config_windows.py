@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from mordred_hermes import _config_io as cio
-from mordred_hermes import _config_text_io, _dotenv_io
+from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core import _config_text_io, _dotenv_io
 from mordred_hermes.wizard import _uninstall_config as cleanup
 from mordred_hermes.wizard import configure, egress_cli
 from mordred_hermes.wizard import credentials_writer as credentials
@@ -376,7 +376,7 @@ def test_child_uncertainty_survives_canonical_cleanup_failure(child, monkeypatch
 def test_interactive_configure_preserves_overrides_at_owning_transaction(writer, monkeypatch):
     from contextlib import contextmanager
 
-    from mordred_hermes import _policy_io
+    from mordred_hermes._core import _policy_io
     from tests.test_configure import _core_answers, _ScriptedPromptIO, _SetupRunnerSpy
 
     b, w = writer
@@ -480,7 +480,7 @@ def network_home(child, monkeypatch, tmp_path):
     """Keep real coordination, admitting only the explicitly selected home."""
     from contextlib import contextmanager
 
-    from mordred_hermes import _dotenv_io
+    from mordred_hermes._core import _dotenv_io
     from mordred_hermes.wizard import network_cli
 
     b, w, d = child
@@ -643,7 +643,7 @@ def test_network_path_admission_precedes_every_writer(writer, monkeypatch, capsy
 
 @pytest.mark.parametrize("choice", ["keep-existing", "overwrite", "abort", "reset"])
 def test_windows_policy_only_migration_uses_checked_writer_and_conflicts(writer, windows_source, monkeypatch, choice):
-    from mordred_hermes import _yaml_io
+    from mordred_hermes._core import _yaml_io
 
     monkeypatch.setattr(_yaml_io, "_platform", "nt")
     from mordred_hermes.wizard import openclaw_migration as migration
@@ -720,7 +720,7 @@ def test_windows_empty_recognized_policy_uses_legacy_defaults(writer, windows_so
 
 @pytest.mark.parametrize("missing", ["mirror", "stale-mirror", "llm-plugin"])
 def test_matching_privacy_section_still_reconciles_checked_pair(writer, windows_source, monkeypatch, missing):
-    from mordred_hermes import _yaml_io
+    from mordred_hermes._core import _yaml_io
     from mordred_hermes.wizard import openclaw_migration as migration
     from mordred_hermes.wizard import upgrade
 

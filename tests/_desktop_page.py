@@ -50,6 +50,9 @@ const find = (node, predicate) => {
   }
   return null
 }
+const treeText = node => typeof node === 'string' || typeof node === 'number' ? String(node)
+  : !node || typeof node !== 'object' ? '' : Array.isArray(node) ? node.map(treeText).join('')
+  : treeText(node.props && node.props.children)
 """
 
 

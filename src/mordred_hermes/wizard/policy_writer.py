@@ -42,11 +42,11 @@ from typing import Any, Final, Literal, NoReturn, Protocol, runtime_checkable
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
-from .. import _config_text_io
-from .._config_io import CONFIG_LIMIT, POLICY_LIMIT, CanonicalPaths, CanonicalSession, canonical_session
-from .._file_lock import private_flock
-from .._plugin_identity import PLUGIN_NAME, PluginListMigration, migrate_plugin_lists
-from .._policy_io import (
+from .._core import _config_text_io
+from .._core._config_io import CONFIG_LIMIT, POLICY_LIMIT, CanonicalPaths, CanonicalSession, canonical_session
+from .._core._file_lock import private_flock
+from .._core._plugin_identity import PLUGIN_NAME, PluginListMigration, migrate_plugin_lists
+from .._core._policy_io import (
     load_policy_mapping,
     policy_transaction_marker_for_policy,
 )
@@ -288,7 +288,7 @@ def _policy_write_lock(directory: Path) -> Iterator[None]:
     """Serialize policy/config read-modify-write cycles across threads/processes.
 
     The descriptor lifecycle is
-    :func:`mordred_hermes._file_lock.private_flock`. The reentrancy-depth
+    :func:`mordred_hermes._core._file_lock.private_flock`. The reentrancy-depth
     bookkeeping, the ``RLock``, the parent-directory check, and both raises
     stay here: the depth counter is specific to this module's nested
     transactions, and keeping the raises local keeps the tagged ``EPERM``
@@ -383,7 +383,7 @@ def _ensure_plugins_enabled(root: Any, *, log_notes: bool = True) -> PluginListM
     absent we add it; if ``plugins`` itself is absent we add it. Existing
     non-Mordred entries are preserved. The pre-0.2.0a0 per-component names
     (``mordred_network``, ...) are removed from ``plugins.enabled`` and
-    ``plugins.disabled``; see :func:`mordred_hermes._plugin_identity.migrate_plugin_lists`.
+    ``plugins.disabled``; see :func:`mordred_hermes._core._plugin_identity.migrate_plugin_lists`.
     The migration notes are logged as warnings unless ``log_notes`` is false
     (callers that print them to the operator themselves).
     """

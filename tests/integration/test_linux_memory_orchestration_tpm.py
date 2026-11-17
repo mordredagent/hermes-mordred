@@ -44,12 +44,14 @@ print(json.dumps({"hermes_version": importlib.metadata.version("hermes-agent"),
 """
 
 
-def _run(home: Path, script: Path, source: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _run(
+    home: Path, script: Path, source: str, env: dict[str, str], *, args: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess[str]:
     script.write_text(source)
     # A script named hermes admits the normal installed startup hook, as in
     # test_linux_telegram_tpm.py; the hook is never installed by this harness.
     return subprocess.run(
-        [sys.executable, str(script)],
+        [sys.executable, str(script), *args],
         env=dict(env, HERMES_HOME=str(home)),
         cwd=script.parent,
         text=True,
@@ -80,7 +82,10 @@ assert env_result.action == "skipped"
 result = setup_cli._resolve_step_memory_encryption(**kwargs)
 print("RESULT:" + result.action + ":" + result.detail)
 """
-    output = _success(_run(home, script, source, env))
+    # Match the real maintenance entrance before .pth startup, rather than
+    # taking the ordinary Hermes runtime lease before requesting mutation.
+    args = ("setup", "--non-interactive") if noninteractive else ("setup",)
+    output = _success(_run(home, script.with_name("hermes-mordred"), source, env, args=args))
     return next(line.removeprefix("RESULT:") for line in output.splitlines() if line.startswith("RESULT:"))
 
 

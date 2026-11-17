@@ -25,15 +25,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, cast
 
-from .._audit_support import build_audit_writer
-from .._home import HERMES_BASE, hermes_home
-from .._plugin_identity import LEGACY_PLUGIN_NAMES, PLUGIN_NAME
-from .._policy_io import (
+from .._core._audit_support import build_audit_writer
+from .._core._home import HERMES_BASE, hermes_home
+from .._core._plugin_identity import LEGACY_PLUGIN_NAMES, PLUGIN_NAME
+from .._core._policy_io import (
     policy_transaction_marker_for_config,
     policy_transaction_pending,
 )
-from .._policy_types import POLICY_MODES
-from .._yaml_io import load_plugin_section, load_yaml_mapping
+from .._core._policy_types import POLICY_MODES
+from .._core._yaml_io import _parse_yaml, load_plugin_section, load_yaml_mapping
 from ..plugin import COMPONENT_REQUIRED_HOOKS, COMPONENTS
 from ._checked_policy import CheckedPolicy, read_checked_policy
 from .audit import Writer
@@ -63,7 +63,7 @@ _PLUGIN_MODULE: Final = "mordred_hermes.plugin"
 
 # Backwards-compat aliases — pre-Phase-1.3 code (and in-module uses below)
 # read these names directly. The resolver itself was promoted to
-# ``mordred_hermes._home`` so wizard / network / keyvault can share it
+# ``mordred_hermes._core._home`` so wizard / network / keyvault can share it
 # without copy-paste.
 _hermes_home = hermes_home
 _HERMES_BASE: Final = HERMES_BASE
@@ -181,13 +181,19 @@ def _load_config_document(config_path: Path, transaction_marker: Path) -> tuple[
         return "strict", None
 
     from ruamel.yaml import YAML
-    from ruamel.yaml.error import YAMLError
 
     try:
         with f:
-            data = YAML(typ="safe", pure=True).load(f)
-    except (OSError, YAMLError) as e:
-        _LOG.error("config file %s exists but is unreadable (%s); failing closed to strict", config_path, e)
+            data = _parse_yaml(YAML(typ="safe", pure=True), f)
+    except Exception as e:
+        # Not only YAMLError: ruamel's constructors raise bare KeyError/ValueError,
+        # decoding raises ValueError and deep nesting raises RecursionError. All
+        # are "cannot be parsed", and parser text can quote config values.
+        _LOG.error(
+            "config file %s exists but is unreadable (%s); failing closed to strict",
+            config_path,
+            type(e).__name__,
+        )
         return "strict", None
     if policy_transaction_pending(transaction_marker):
         _LOG.error(
@@ -402,7 +408,7 @@ def _resolve_audit_path(raw: object) -> Path:
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     # Historically caught bare ``Exception``; ``catch=(Exception,)`` preserves
-    # that wider net (see :mod:`mordred_hermes._yaml_io`).
+    # that wider net (see :mod:`mordred_hermes._core._yaml_io`).
     return load_yaml_mapping(path, catch=(Exception,), log=_LOG)
 
 

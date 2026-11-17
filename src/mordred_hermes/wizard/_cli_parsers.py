@@ -20,7 +20,7 @@ Subcommand tree (SPEC.md §Plugin: ``mordred_wizard``):
 - ``vault {init,add,status,cat,migrate,...}``    — at-rest secrets/env vault
 - ``plugins list``                               — show the Mordred plugin and its components
 - ``plugins migrate``                            — switch config.yaml to the single ``mordred`` plugin
-- ``activity {status,use,tools,pair-operator,peers,correct,backup,restore,retention}`` — browser
+- ``activity {status,use,tools,correct,backup,restore,retention}`` — browser
   activity history administration (``use on|off``: Hermes's use of the history; ``tools on|off``:
   the lookup tools only)
 - ``mail {import,status,setup,fetch,forget}``    — mail import (mbox / .eml) and IMAP sync into ``mordred.db``
@@ -33,7 +33,7 @@ from __future__ import annotations
 import argparse
 
 from ..__about__ import __version__
-from .._policy_types import ACTIVE_PATHS, POLICY_MODES
+from .._core._policy_types import ACTIVE_PATHS, POLICY_MODES
 
 
 def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) -> None:
@@ -77,6 +77,30 @@ def _setup_subparser(parser: argparse.ArgumentParser, *, required: bool = True) 
 # -----------------------------------------------------------------------------
 # Subcommand parsers — each calls set_defaults(func=...) wiring its handler.
 # -----------------------------------------------------------------------------
+
+
+def _add_vault_root_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--root",
+        help="Vault root directory (default: <hermes home>/mordred/vault)",
+    )
+
+
+def _add_seed_storage_options(parser: argparse.ArgumentParser, *, seed_label: str) -> None:
+    parser.set_defaults(store_seed_for_hd=True)
+    seed_storage = parser.add_mutually_exclusive_group()
+    seed_storage.add_argument(
+        "--store-seed-for-hd",
+        dest="store_seed_for_hd",
+        action="store_true",
+        help=f"SE-encrypt the {seed_label} so HD Ethereum accounts can be derived later (default).",
+    )
+    seed_storage.add_argument(
+        "--paper-only",
+        dest="store_seed_for_hd",
+        action="store_false",
+        help=f"Do not store the {seed_label} at rest; require the paper seed for later recovery/import.",
+    )
 
 
 def _add_desktop(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -125,12 +149,15 @@ def _add_uninstall(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
 def _add_databases(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     p = sub.add_parser("databases", help="Encrypt Hermes's SQLite databases (state.db and its siblings) with SQLCipher")
     dsub = p.add_subparsers(dest="databases_command", required=True, metavar="COMMAND")
-    dsub.add_parser("status", help="Show whether each Hermes database is encrypted").set_defaults(
+    dsub.add_parser("status", help="Show passive database configuration and capability").set_defaults(
+        func=_handle_databases
+    )
+    dsub.add_parser("diagnose", help="Authenticate existing database authority explicitly").set_defaults(
         func=_handle_databases
     )
     p_encrypt = dsub.add_parser(
         "encrypt",
-        help="Encrypt every Hermes database now (or at the next Hermes start if Hermes has them open)",
+        help="Encrypt every Hermes database offline; stop Hermes first",
     )
     p_encrypt.add_argument("--dry-run", action="store_true", help="List what would be encrypted; change nothing")
     p_encrypt.set_defaults(func=_handle_databases)
@@ -140,12 +167,32 @@ def _add_databases(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     )
     p_decrypt.add_argument("--dry-run", action="store_true", help="List what would be decrypted; change nothing")
     p_decrypt.set_defaults(func=_handle_databases)
+    backup = dsub.add_parser("backup", help="Recover retained encrypted database backups")
+    bsub = backup.add_subparsers(dest="backup_command", required=True)
+    export = bsub.add_parser("export", help="Export a retained backup to a NEW plaintext database")
+    export.add_argument("--source", required=True, help="Registered SQLCipher backup or ZIP path")
+    export.add_argument("--output", required=True, help="New plaintext database path; never overwritten")
+    export.add_argument("--member", help="Exact database member name inside a ZIP backup")
+    export.set_defaults(func=_handle_databases)
+    recover = bsub.add_parser("recover", help="Finish or abandon an interrupted backup operation; stop Hermes first")
+    recover.add_argument(
+        "--abandon",
+        action="store_true",
+        help="Forget the interrupted publication instead of finishing it; no file is deleted (preview unless --yes)",
+    )
+    recover.add_argument("--yes", action="store_true", help="With --abandon: remove the journal")
+    recover.add_argument(
+        "--accept-unmanaged-copy",
+        action="store_true",
+        help="With --abandon --yes: proceed although a copy that key teardown will not detect may remain",
+    )
+    recover.set_defaults(func=_handle_databases)
 
 
 def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("activity", help="Browser activity history: status, pairing, peers, corrections and maintenance")
+    p = sub.add_parser("activity", help="Browser activity history: status, corrections and maintenance")
     asub = p.add_subparsers(dest="activity_command", required=True, metavar="COMMAND")
-    p_status = asub.add_parser("status", help="Show switches, protection gate, store counts and peers (no content)")
+    p_status = asub.add_parser("status", help="Show switches, protection gate and store counts (no content)")
     p_status.add_argument("--json", action="store_true", help="Print one JSON object")
     p_status.set_defaults(func=_handle_activity)
     p_use = asub.add_parser("use", help="Turn Hermes's use of the browser history on or off (history_enabled)")
@@ -159,18 +206,6 @@ def _add_activity(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
         "into reader mode",
     )
     p_tools.set_defaults(func=_handle_activity)
-    p_pair = asub.add_parser("pair-operator", help="Generate a single-use pair code for the operator collector")
-    p_pair.add_argument("--label", default="operator", help="Label recorded for the new peer (default: operator)")
-    p_pair.add_argument("--timeout", type=float, default=600.0, help="Seconds to wait (default: 600)")
-    p_pair.set_defaults(func=_handle_activity)
-    p_peers = asub.add_parser("peers", help="List or revoke activity peer credentials")
-    psub = p_peers.add_subparsers(dest="activity_peers_command", required=True, metavar="COMMAND")
-    p_list = psub.add_parser("list", help="List activity peers")
-    p_list.add_argument("--json", action="store_true", help="Print one JSON object")
-    p_list.set_defaults(func=_handle_activity)
-    p_revoke = psub.add_parser("revoke", help="Revoke an activity peer (idempotent)")
-    p_revoke.add_argument("peer_id", help="Peer id, e.g. operator:0123456789ab")
-    p_revoke.set_defaults(func=_handle_activity)
     p_correct = asub.add_parser("correct", help="Record an explicit correction of an episode as a raw event")
     p_correct.add_argument("--episode", required=True, help="Episode id the correction refers to")
     p_correct.add_argument("--text", required=True, help="What should have been done")
@@ -411,20 +446,7 @@ def _add_setup(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         default=None,
         help="New keyvault keys require a per-use Touch ID / passcode prompt (default)",
     )
-    p.set_defaults(store_seed_for_hd=True)
-    seed_storage = p.add_mutually_exclusive_group()
-    seed_storage.add_argument(
-        "--store-seed-for-hd",
-        dest="store_seed_for_hd",
-        action="store_true",
-        help="SE-encrypt the generated keyvault seed so HD Ethereum accounts can be derived later (default).",
-    )
-    seed_storage.add_argument(
-        "--paper-only",
-        dest="store_seed_for_hd",
-        action="store_false",
-        help="Do not store the generated keyvault seed at rest; require the paper seed for later recovery/import.",
-    )
+    _add_seed_storage_options(p, seed_label="generated keyvault seed")
     p.set_defaults(func=_handle_setup)
 
 
@@ -603,20 +625,7 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     ksub = p.add_subparsers(dest="keyvault_command", required=True, metavar="COMMAND")
 
     p_init = ksub.add_parser("init", help="Initialise the keyvault")
-    p_init.set_defaults(store_seed_for_hd=True)
-    seed_storage = p_init.add_mutually_exclusive_group()
-    seed_storage.add_argument(
-        "--store-seed-for-hd",
-        dest="store_seed_for_hd",
-        action="store_true",
-        help="SE-encrypt the generated seed so HD Ethereum accounts can be derived later (default).",
-    )
-    seed_storage.add_argument(
-        "--paper-only",
-        dest="store_seed_for_hd",
-        action="store_false",
-        help="Do not store the generated seed at rest; require the paper seed for later recovery/import.",
-    )
+    _add_seed_storage_options(p_init, seed_label="generated seed")
     p_init.set_defaults(func=_handle_keyvault_init)
     p_list = ksub.add_parser("list", help="List key IDs")
     p_list.add_argument("--json", action="store_true", help="Machine-readable JSON output")
@@ -632,14 +641,14 @@ def _add_keyvault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
     p_recover.set_defaults(func=_handle_keyvault_recover)
     p_reset = ksub.add_parser(
         "reset",
-        help="Destroy all key material and remove the keyvault (irreversible)",
+        help="Destroy profile keys, Mail/Telegram credentials and all their local history (irreversible)",
     )
     p_reset.add_argument(
         "-y",
         "--yes",
         dest="assume_yes",
         action="store_true",
-        help="Skip the interactive confirmation (for scripted / non-interactive use).",
+        help="Confirm deletion of profile keys, Mail/Telegram credentials and all their local history.",
     )
     p_reset.set_defaults(func=_handle_keyvault_reset)
     p_enable_se = ksub.add_parser(
@@ -685,30 +694,21 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         "init",
         help="Create a new encrypted vault sealed under a recovery passphrase",
     )
-    p_init.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_vault_root_argument(p_init)
     p_init.set_defaults(func=_handle_vault_init)
 
     p_change_pp = vsub.add_parser(
         "change-passphrase",
         help="Change the vault's recovery passphrase (master key and enrolled files unchanged)",
     )
-    p_change_pp.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_vault_root_argument(p_change_pp)
     p_change_pp.set_defaults(func=_handle_vault_change_passphrase)
 
     p_recover = vsub.add_parser(
         "recover",
         help="Re-key a vault copied to this machine onto its Secure Enclave (restores the writable hot path)",
     )
-    p_recover.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_vault_root_argument(p_recover)
     p_recover.set_defaults(func=_handle_vault_recover)
 
     p_add = vsub.add_parser(
@@ -717,20 +717,14 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
     )
     p_add.add_argument("name", help="Logical name to store the file under (e.g. .env)")
     p_add.add_argument("source", help="Path to the plaintext file to encrypt into the vault")
-    p_add.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_vault_root_argument(p_add)
     p_add.set_defaults(func=_handle_vault_add)
 
     p_status = vsub.add_parser(
         "status",
         help="Show a vault's generation and enrolled file names (never prompts; reads the manifest unverified)",
     )
-    p_status.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_vault_root_argument(p_status)
     p_status.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     p_status.set_defaults(func=_handle_vault_status)
 
@@ -739,10 +733,7 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         help="Print one enrolled file's decrypted bytes to stdout (opens read-only via passphrase recovery)",
     )
     p_cat.add_argument("name", help="Enrolled file name to decrypt and print")
-    p_cat.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_vault_root_argument(p_cat)
     p_cat.set_defaults(func=_handle_vault_cat)
 
     p_migrate = vsub.add_parser(
@@ -755,10 +746,7 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         help="Plaintext file(s) to import, each enrolled under its basename "
         "(default: .env and config.yaml under the Hermes home)",
     )
-    p_migrate.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_vault_root_argument(p_migrate)
     p_migrate.set_defaults(func=_handle_vault_migrate)
 
     p_set_memory_key = vsub.add_parser(
@@ -766,10 +754,7 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         help="Store/rotate HERMES_MEMORY_KEY in the vault .env (the agent-memory encryption key; "
         "`encryption enable memory` is what turns sealing on)",
     )
-    p_set_memory_key.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_vault_root_argument(p_set_memory_key)
     p_set_memory_key.add_argument(
         "--rotate",
         action="store_true",
@@ -781,20 +766,14 @@ def _add_vault(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         "enable-config-decrypt",
         help="Put config.yaml under the at-rest vault (transparent decrypt at Hermes startup)",
     )
-    p_enable_cfg.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_vault_root_argument(p_enable_cfg)
     p_enable_cfg.set_defaults(func=_handle_vault_enable_config_decrypt)
 
     p_disable_cfg = vsub.add_parser(
         "disable-config-decrypt",
         help="Stop managing config.yaml in the vault and restore a plaintext copy (recovery)",
     )
-    p_disable_cfg.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_vault_root_argument(p_disable_cfg)
     p_disable_cfg.set_defaults(func=_handle_vault_disable_config_decrypt)
 
 
@@ -848,10 +827,7 @@ def _add_encryption(sub: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         "change-passphrase",
         help="Change the vault's recovery passphrase (alias of `vault change-passphrase`)",
     )
-    p_change_pp.add_argument(
-        "--root",
-        help="Vault root directory (default: <hermes home>/mordred/vault)",
-    )
+    _add_vault_root_argument(p_change_pp)
     p_change_pp.set_defaults(func=_handle_vault_change_passphrase)
 
 

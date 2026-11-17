@@ -91,7 +91,7 @@ class TestOnSessionStart:
 
         policy = _write_policy(tmp_path, "lenient")
         config = _write_config(tmp_path, configured_path)
-        initial_config = network._load_runtime_config(
+        initial_config = network._registration._load_runtime_config(
             policy_json_path=policy,
             config_path=config,
         )
@@ -100,7 +100,7 @@ class TestOnSessionStart:
         rt._ready = True
         rt.process_route_frozen = True
         rt.frozen_requested_path = configured_path
-        rt.frozen_route_config = network.route_config_fingerprint(initial_config)
+        rt.frozen_route_config = network._registration.route_config_fingerprint(initial_config)
         api.set_runtime(rt)
         _write_policy(tmp_path, "strict")
 

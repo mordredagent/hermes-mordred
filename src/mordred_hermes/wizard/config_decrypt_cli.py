@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 from ..keyvault._config_bootstrap import _marker_path, config_hook_installed
 from . import _term
 from ._runtime_gate import RuntimeProbe, runtime_gate

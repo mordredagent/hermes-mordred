@@ -282,11 +282,15 @@ def _store_found(store: ImportStore, request: SearchRequest) -> _Found:
             chosen = _centered(near, request.around_evidence_id, request.limit)
             return _Found(chosen, len(near), partial=False)
         conv_uids = [telegram_conv_uid(dialog) for dialog in request.chat_ids] or None
-        hits = store.search(
-            request.query, conv_uids=conv_uids, since=request.since, until=request.until, limit=_MAX_CANDIDATES
+        hits, hydrated = store.search_with_parts(
+            request.query,
+            conv_uids=conv_uids,
+            since=request.since,
+            until=request.until,
+            limit=_MAX_CANDIDATES,
+            parts_limit=request.limit,
         )
         wanted = [hit.part_uid for hit in hits[: request.limit]]
-        hydrated = store.parts_for(wanted)
     except ImportRefused as exc:
         _log.warning("history search: import store refused (%s)", exc.code)
         raise StoreError("import_store_unavailable") from None
@@ -514,17 +518,18 @@ def _search_archive(archive: ArchiveStore, request: SearchRequest, home: Path, p
 async def search_service(service: TelegramService, request: SearchRequest) -> SearchResult:
     """Run ``request`` over ``mordred.db`` and, only when needed, the service's ``.enc`` archive.
 
-    The memory guard runs first. The import store is probed without any
+    Root database admission precedes the memory guard. The store is probed without any
     Telegram credential, and the archive directory is only checked for an
     ``index.enc`` file; the credentials are unwrapped afresh (Touch ID unless
     disabled) on the legacy path only, and only the archive handle outlives
     the unwrap.
     """
-    from .history import probe_history_store, retired_account
+    from .history import ensure_history_authority, probe_history_store, retired_account
     from .service import TelegramServiceError
 
-    await asyncio.to_thread(service._memory_guard)
     home = service._profile_home()
+    await asyncio.to_thread(ensure_history_authority, home)
+    await asyncio.to_thread(service._memory_guard)
     probe = await asyncio.to_thread(probe_history_store, home, service._import_store_opener)
     archived = await asyncio.to_thread(_archive_present, service._archive_root)
     if probe.store is not None:

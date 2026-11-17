@@ -27,8 +27,8 @@ from typing import Final
 from providers import register_provider
 from providers.base import ProviderProfile
 
-from .._home import HERMES_BASE
-from .._policy_io import load_policy_mapping
+from .._core._home import HERMES_BASE
+from .._core._policy_io import load_policy_mapping
 from ._windows_policy import Decision, read_decision
 
 _LOG = logging.getLogger("mordred.llm_guard.local_adapter")

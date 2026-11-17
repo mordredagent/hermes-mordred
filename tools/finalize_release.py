@@ -34,8 +34,8 @@ def request_json(url: str, *, token: str = "", payload: dict[str, Any] | None = 
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     if data is not None:
         headers["Content-Type"] = "application/json"
-    request = Request(url, headers=headers, data=data)
-    with urlopen(request, timeout=30) as response:
+    request = Request(url, headers=headers, data=data)  # noqa: S310 - https URL on a fixed origin
+    with urlopen(request, timeout=30) as response:  # noqa: S310 - https URL on a fixed origin
         return json.load(response)
 
 

@@ -36,8 +36,10 @@ from tests.test_windows_memory_lifecycle import (
     normalized,
     put,
 )
+from tests.test_windows_memory_proof import custody_env as custody_env
 from tests.test_windows_memory_proof import installed_runtime as installed_runtime
 from tests.test_windows_memory_proof import proof_env as proof_env
+from tests.test_windows_memory_proof import proof_module
 from tests.test_wizard_windows_memory import memory_lease, role_current
 from tests.test_wizard_windows_memory import seeded as seeded
 from tests.test_wizard_windows_memory import win as win
@@ -63,6 +65,9 @@ class Prompt:
 @pytest.fixture(autouse=True)
 def hermes_files(monkeypatch):
     """The C3 config/.env cleanup and Desktop page are recorded, not exercised (not C6)."""
+    from mordred_hermes.wizard._uninstall_hermes_env import HermesEnv
+
+    monkeypatch.setattr(uninstall_cli, "detect_hermes_env", lambda *a, **k: HermesEnv(None, None, None, ()))
     calls: list[str] = []
     monkeypatch.setattr(uninstall_cli, "plan_config_cleanup", lambda path: ConfigCleanup(path))
     monkeypatch.setattr(uninstall_cli, "plan_env_cleanup", lambda path: EnvCleanup(path))
@@ -178,12 +183,34 @@ def test_refusing_gate_or_proof_stops_before_anything_is_removed(enabled, monkey
 
 
 @pytest.mark.parametrize("dry_run", [True, False])
-def test_erase_encrypted_is_refused_on_windows(enabled, capsys, dry_run):
-    env = enabled
+def test_erase_encrypted_is_refused_on_windows(request, monkeypatch, capsys, dry_run, hermes_files):
+    # The executing variant retains genuine armed-state preservation coverage;
+    # dry-run must reject this option even without enrolled custody or a proof.
+    env = request.getfixturevalue("custody_env" if dry_run else "enabled")
+    if dry_run:
+        put(env.home, "memories", "MEMORY.md", ORIGINALS["MEMORY.md"])
+        put(env.home, "mordred", "kept", b"preflight sentinel")
+        env.runner = Runner()
     before = (files(env.home), markers(env.home), mordred_entries(env))
+    native_calls = list(env.backend.calls)
+    launches = list(env.launches.argv)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("--erase-encrypted must refuse before planning, cleanup, proof or native operations")
+
+    monkeypatch.setattr(uninstall_cli, "build_plan", forbidden)
+    monkeypatch.setattr(uninstall_cli, "apply_config_cleanup", forbidden)
+    monkeypatch.setattr(uninstall_cli, "apply_env_cleanup", forbidden)
+    monkeypatch.setattr(desktop_install, "remove_page", forbidden)
+    monkeypatch.setattr(proof_module(), "prove_windows_memory_runtime", forbidden)
+    monkeypatch.setattr(env.custody, "windows_custody_session", forbidden)
+    for name in ("generate_enclave_key", "get_enclave_public_key", "enclave_ecdh", "delete_enclave_key"):
+        monkeypatch.setattr(env.backend, name, forbidden)
     assert run_uninstall(context(env), UninstallOptions(erase_encrypted=True, dry_run=dry_run)) == 1
     assert "--erase-encrypted is not supported on Windows" in capsys.readouterr().err
     assert (files(env.home), markers(env.home), mordred_entries(env)) == before
+    assert env.backend.calls == native_calls and env.launches.argv == launches
+    assert env.runner.calls == [] and hermes_files == []
 
 
 def test_unverifiable_custody_plans_a_refusing_restore(win, capsys):
@@ -290,7 +317,7 @@ def test_inert_custody_purge_refusal_leaves_the_profile_installed(
         assert "1 broken seal(s) cannot be decrypted, so the restore refuses" in captured.out
     stopped = "Windows memory custody could not be purged" if fault == "reset" else "memory could not be restored"
     assert f"uninstall stopped: {stopped}" in captured.err
-    assert "Nothing was removed and Mordred stays installed" in captured.err
+    # Earlier restoration may have completed; integration/package removal still must not run.
     assert hermes_files == [] and launcher.exists(), "step b and step c never ran"
     assert not [call for call in env.runner.calls if call[1:3] == ["pip", "uninstall"]]
     assert memory_lease(env) == lease and files(env.home) == before
@@ -308,3 +335,123 @@ def test_purge_warning_names_no_key_without_memory_custody(win, capsys, hermes_f
     assert "permanently deletes" not in captured.err
     assert "delete the Windows CNG memory custody key" not in captured.out
     assert role_current(env, "audit") == audit and env.launches.argv == []
+
+
+@pytest.mark.parametrize("state", ["current", "retained", "pending"])
+def test_uninstall_reports_and_preserves_native_mail_custody(fs, monkeypatch, state):
+    from types import SimpleNamespace
+
+    from mordred_hermes.wizard import _uninstall_windows as windows
+
+    custody, _, home, backend = fs
+    custody.upgrade_manifest_v2(home=home)
+    if state == "pending":
+        generate = backend.generate_enclave_key
+
+        def interrupted(key_id, **kwargs):
+            generate(key_id, **kwargs)
+            raise RuntimeError("simulated lost native creation result")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(backend, "generate_enclave_key", interrupted)
+            with pytest.raises(RuntimeError), custody.windows_custody_session(home, backend=backend) as session:
+                session.enroll_role("mail")
+    else:
+        with custody.windows_custody_session(home, backend=backend) as session:
+            session.enroll_role("mail")
+            if state == "retained":
+                current = session.enroll_role("mail", retain_current=True)
+                session.delete_role(current, erase_authorized=True)
+    with custody.windows_custody_session(home) as session:
+        status = session.role_status("mail")
+        assert (status.current is not None) == (state == "current")
+        assert bool(status.retained) == (state == "retained")
+        assert status.pending == (state == "pending")
+    before = {path: path.read_bytes() for path in (home / "mordred").rglob("*") if path.is_file()}
+    native_calls = list(backend.calls)
+    assert windows.custody_roles(home) == (["mail"], None)
+    keys = windows.device_keys(home, home / "mordred/vault")
+    assert keys == ["Windows CNG mail custody key (TPM-bound, this account and profile)"]
+    assert windows.kept_after_purge(windows.purge_lines(home), keys) == keys
+    assert windows.purge(SimpleNamespace(home=home, vault_root=home / "mordred/vault")) == 0
+    assert {path: path.read_bytes() for path in (home / "mordred").rglob("*") if path.is_file()} == before
+    assert backend.calls == native_calls
+
+
+def test_qualified_unauthenticated_server_database_can_reach_preflight(monkeypatch, tmp_path):
+    from mordred_hermes import dbcrypt
+    from mordred_hermes.dbcrypt._capability import DatabaseStatus
+    from mordred_hermes.wizard import _windows_databases
+
+    monkeypatch.setattr(_windows_databases, "state_names", lambda home: ("db-encryption.marker",))
+    monkeypatch.setattr(
+        dbcrypt,
+        "database_status",
+        lambda home: DatabaseStatus(True, 1, "unknown", False, "native database authority has not been authenticated"),
+    )
+    assert _windows_databases.refusal(tmp_path) is None
+    monkeypatch.setattr(
+        dbcrypt,
+        "database_status",
+        lambda home: DatabaseStatus(True, None, "unknown", False, "database dependency inventory is incomplete"),
+    )
+    assert _windows_databases.refusal(tmp_path) is not None
+
+
+def test_remove_helper_refuses_before_restore_when_purge_keeps_audit(enabled, hermes_files, capsys):
+    before = files(enabled.home), markers(enabled.home), mordred_entries(enabled)
+    assert run_uninstall(context(enabled), UninstallOptions(purge_data=True, remove_helper=True)) == 1
+    assert (files(enabled.home), markers(enabled.home), mordred_entries(enabled)) == before
+    assert hermes_files == []
+    assert "helper" in capsys.readouterr().err
+
+
+def test_purge_all_profiles_reauthenticates_after_root_source_deleted(inert, monkeypatch):
+    from mordred_hermes._private_fs import open_private_directory
+    from mordred_hermes.wizard import _uninstall_coordinator as coordinator
+
+    env = inert
+    child = env.home / "profiles" / "work"
+    for directory in (child.parent, child):
+        with open_private_directory(directory, create=True):
+            pass
+    from mordred_hermes.wizard import _windows_memory
+
+    purged = []
+    monkeypatch.setattr(_windows_memory, "prepare_uninstall", lambda home: None)
+    monkeypatch.setattr(_windows_memory, "verify_uninstall_inputs", lambda home, proof: None)
+    monkeypatch.setattr(_windows_memory, "_disable", lambda **kwargs: 0)
+    monkeypatch.setattr(_windows_memory, "purge", lambda **kwargs: purged.append(kwargs["home"]) or 0)
+    # Isolate ordering: once the root is purged, no subsequent profile may ask
+    # the DB layer to authenticate the deleted root source again.
+    original = coordinator.preflight
+    snapshot = object()
+    calls = []
+
+    def observed(root, **kwargs):
+        calls.append(kwargs.get("source"))
+        if kwargs.get("source") is snapshot and env.home in purged:
+            raise RuntimeError("purged root source was requested again")
+        result = original(root, **{k: v for k, v in kwargs.items() if k != "source"})
+        if env.home not in purged:
+            result.snapshot = snapshot
+        return result
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def checked(report, *, lease):
+        retained = report.snapshot
+        report.snapshot = None
+        try:
+            with coordinator_verified(report, lease=lease) as permit:
+                yield permit
+        finally:
+            report.snapshot = retained
+
+    coordinator_verified = coordinator.verified
+    monkeypatch.setattr(coordinator, "preflight", observed)
+    monkeypatch.setattr(coordinator, "verified", checked)
+    assert run_uninstall(context(env), UninstallOptions(purge_data=True)) == 0
+    assert purged == [env.home, child]
+    assert calls.count(snapshot) == 1

@@ -218,9 +218,10 @@ def _handle(client: socket.socket, inspector: Socks5Inspector) -> None:
 def socks5_inspector() -> Iterator[Socks5Inspector]:
     """Run an inspector proxy for the duration of the ``with`` block.
 
-    Binds ``127.0.0.1`` on an ephemeral port; the accept loop runs on a
-    daemon thread and is torn down on exit. Yields a :class:`Socks5Inspector`
-    whose ``captures`` list grows as clients connect.
+    Binds ``127.0.0.1`` on an ephemeral port; the accept loop and connection
+    handlers run on daemon threads and are torn down and joined (bounded) on
+    exit. Yields a :class:`Socks5Inspector` whose ``captures`` list grows as
+    clients connect.
     """
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -229,6 +230,7 @@ def socks5_inspector() -> Iterator[Socks5Inspector]:
     listener.settimeout(0.5)
     inspector = Socks5Inspector(port=listener.getsockname()[1])
     stop = threading.Event()
+    handlers: list[tuple[threading.Thread, socket.socket]] = []
 
     def _accept_loop() -> None:
         while not stop.is_set():
@@ -238,7 +240,9 @@ def socks5_inspector() -> Iterator[Socks5Inspector]:
                 continue
             except OSError:
                 break
-            threading.Thread(target=_handle, args=(client, inspector), daemon=True).start()
+            handler = threading.Thread(target=_handle, args=(client, inspector), daemon=True)
+            handlers.append((handler, client))
+            handler.start()
 
     accept_thread = threading.Thread(target=_accept_loop, daemon=True)
     accept_thread.start()
@@ -248,3 +252,9 @@ def socks5_inspector() -> Iterator[Socks5Inspector]:
         stop.set()
         listener.close()
         accept_thread.join(timeout=5.0)
+        # Wake any handler still blocked on an idle client, then wait for it.
+        for _handler, client in handlers:
+            with contextlib.suppress(OSError):
+                client.shutdown(socket.SHUT_RDWR)
+        for handler, _client in handlers:
+            handler.join(timeout=5.0)

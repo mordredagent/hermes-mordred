@@ -22,11 +22,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from mordred_hermes import _config_io as cio
-from mordred_hermes._audit_session import AuditSession
+from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core._audit_session import AuditSession
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault import _seckey_helper, _storage, _windows_capability
 from mordred_hermes.keyvault import log_encryption as mral
+from mordred_hermes.keyvault._seckey_errors import OPS_AUTH_DENIED, _OpsError
 from mordred_hermes.privacy_check import audit as privacy_audit
 from mordred_hermes.wizard import _windows_gates, audit_cli, cli
 from tests._private_files import write_private
@@ -144,6 +145,27 @@ def decrypted(out: str) -> list[str]:
     return [json.loads(line)["event"] for line in out.splitlines() if line.startswith("{")]
 
 
+def opaque_history(env, *, rotations: int) -> None:
+    """Checked opaque files for preflight tests that must never inspect ciphertext."""
+    private_dir(env.mordred)
+    for n in range(1, rotations + 1):
+        private_write(env.mordred / f"audit.log.{DAY}.{n}.gz", b"x" * 128)
+    private_write(env.active, b"x" * 128)
+
+
+def forbid_decrypt(monkeypatch) -> list[tuple[str, dict[str, object]]]:
+    from mordred_hermes.keyvault import windows_audit
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def refuse(path, **kwargs):
+        calls.append((Path(path).name, dict(kwargs)))
+        raise AssertionError("Windows audit preflight reached decryption")
+
+    monkeypatch.setattr(windows_audit, "decrypt_windows_log_file", refuse)
+    return calls
+
+
 def headers(out: str) -> list[str]:
     return [line.split(" ")[1] for line in out.splitlines() if line.startswith("# ")]
 
@@ -189,7 +211,7 @@ def refused(captured, reason: str) -> None:
 
 
 def test_tail_and_grep_read_the_checked_plaintext_log_through_one_bounded_snapshot(win, monkeypatch, capsys):
-    from mordred_hermes import _audit_session
+    from mordred_hermes._core import _audit_session
 
     plaintext(win, ["alpha", "beta", "gamma"])
     reads: list[tuple[str, int]] = []
@@ -464,10 +486,11 @@ def test_decrypt_never_writes_into_the_audit_log(win, monkeypatch, capsys):
 )
 def test_decrypt_enumeration_is_bounded_before_any_native_call(win, monkeypatch, capsys, limit, operation):
     enroll(win)
-    history(win, monkeypatch, [(DAY, ["a", "b", "c"]), (today(), ["d"])])
+    opaque_history(win, rotations=3)
+    files = audit_files(win.mordred)
     monkeypatch.setattr(windows_cli(), limit, 2 if limit == "MAX_ENTRIES" else 64)
     before = list(win.backend.calls)
-    calls = spy_decrypt(monkeypatch)
+    calls = forbid_decrypt(monkeypatch)
     assert audit_cli.decrypt(date=DAY) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -475,20 +498,25 @@ def test_decrypt_enumeration_is_bounded_before_any_native_call(win, monkeypatch,
     assert operation in captured.err
     assert calls == []
     assert win.backend.calls == before
+    assert audit_files(win.mordred) == files
 
 
 def test_decrypt_refuses_an_unsafe_target_before_any_native_call(win, monkeypatch, capsys, tmp_path):
     enroll(win)
-    history(win, monkeypatch, [(DAY, ["a", "b"]), (today(), ["c"])])
+    opaque_history(win, rotations=2)
     os.link(win.mordred / f"audit.log.{DAY}.1.gz", tmp_path / "second-link")
+    files = audit_files(win.mordred)
+    linked = (tmp_path / "second-link").read_bytes()
     before = list(win.backend.calls)
-    calls = spy_decrypt(monkeypatch)
+    calls = forbid_decrypt(monkeypatch)
     assert audit_cli.decrypt(date=DAY) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     refused(captured, "audit-unsafe")
     assert calls == []
     assert win.backend.calls == before
+    assert audit_files(win.mordred) == files
+    assert (tmp_path / "second-link").read_bytes() == linked
 
 
 def test_decrypt_reports_corrupt_and_foreign_files_then_continues(win, monkeypatch, capsys, tmp_path):
@@ -510,7 +538,7 @@ def test_decrypt_reports_corrupt_and_foreign_files_then_continues(win, monkeypat
 def test_decrypt_missing_native_key_never_regenerates(win, monkeypatch, capsys):
     lease = enroll(win)
     history(win, monkeypatch, [(DAY, ["a"]), (today(), ["b"])])
-    win.backend.delete_enclave_key(lease.native_key_id)
+    win.backend._keys.pop(lease.native_key_id)
     generated = native_calls(win.backend).count("generate")
     assert audit_cli.decrypt(date=DAY) == 1
     captured = capsys.readouterr()
@@ -525,7 +553,11 @@ def test_decrypt_missing_native_key_never_regenerates(win, monkeypatch, capsys):
 def test_decrypt_auth_denied_uses_windows_wording(win, monkeypatch, capsys):
     enroll(win)
     history(win, monkeypatch, [(DAY, ["a"]), (today(), ["b"])])
-    win.backend.denied_reason = "auth_failed"
+
+    def denied(*_args, **_kwargs):
+        raise _OpsError(-1, "cng", "denied", reason=OPS_AUTH_DENIED)
+
+    monkeypatch.setattr(win.backend._ops, "key_exchange", denied)
     assert audit_cli.decrypt(date=DAY) == 1
     captured = capsys.readouterr()
     assert captured.out == ""

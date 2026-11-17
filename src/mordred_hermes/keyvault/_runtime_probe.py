@@ -48,7 +48,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final, NamedTuple
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 
 __all__ = [
     "GatewayDiscoveryUnavailable",
@@ -362,7 +362,7 @@ def _desktop_runtime_python(home: Path) -> Path | None:
     if not launcher.is_file() or not os.access(launcher, os.X_OK):
         return None
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603 - list argv, no shell
             [str(launcher), "--run-module", "site"],
             capture_output=True,
             text=True,
@@ -399,7 +399,7 @@ def discover_runtime_python(home: Path | None = None, explicit: str | Path | Non
 
     override = explicit if explicit is not None else os.environ.get(RUNTIME_PYTHON_ENV)
     if sys.platform == "win32":
-        from .._windows_runtime import resolve_windows_python
+        from .._core._windows_runtime import resolve_windows_python
 
         if override is not None:
             return resolve_windows_python(home, override=str(override))
@@ -491,8 +491,8 @@ def environment_key(python: Path) -> str:
 def _ps(args: list[str]) -> str | None:
     """Run ``ps`` with ``args``; ``None`` on any failure (missing, timeout, rc!=0)."""
     try:
-        proc = subprocess.run(
-            ["ps", *args],
+        proc = subprocess.run(  # noqa: S603 - list argv, no shell
+            ["ps", *args],  # noqa: S607 - PATH lookup of a system tool is intended
             capture_output=True,
             text=True,
             timeout=_PS_TIMEOUT_S,
@@ -575,7 +575,7 @@ def _state_file_pid(home: Path) -> int | None:
 def _module_arg(tokens: list[str]) -> str | None:
     """The module name following ``-m``, if the argv runs one."""
     for index, token in enumerate(tokens[:-1]):
-        if token == "-m":
+        if token == "-m":  # noqa: S105 - CLI flag, not a secret
             return tokens[index + 1]
     return None
 
@@ -839,7 +839,7 @@ def _run_runtime_probe(
                 script = Path(directory) / "hermes"
                 script.write_text(probe_src, encoding="utf-8")
                 command = [str(python), str(script)]
-            proc = subprocess.run(
+            proc = subprocess.run(  # noqa: S603 - list argv, no shell
                 command,
                 capture_output=True,
                 text=True,

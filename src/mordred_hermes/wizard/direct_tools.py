@@ -82,7 +82,7 @@ _SET_LOCK = threading.Lock()
 
 
 def _windows() -> bool:
-    from .. import _config_text_io
+    from .._core import _config_text_io
 
     return _config_text_io._windows()
 
@@ -100,7 +100,7 @@ def _read_text(home: Path) -> str | None:
     """config.yaml's text, ``None`` when there is none; a sealed-away vault copy is refused."""
     try:
         if _windows():
-            from .._config_io import CanonicalPaths, read_canonical_snapshot
+            from .._core._config_io import CanonicalPaths, read_canonical_snapshot
 
             snapshot = read_canonical_snapshot(CanonicalPaths(home))
             return None if snapshot.config is None else snapshot.config.data.decode("utf-8")
@@ -162,7 +162,7 @@ def _spawn_reader(text: str, strict_empty: bool) -> dict[str, Any] | None:
     env = {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME")}
     env["MORDRED_CONFIG_DECRYPT"] = "0"  # a reader: never on the config.yaml materialize/reseal lifecycle
     try:
-        done = subprocess.run(
+        done = subprocess.run(  # noqa: S603 - list argv, no shell
             _reader_argv(strict_empty),
             input=text.encode("utf-8"),
             capture_output=True,  # stderr (ruamel's warnings quote the document) is dropped unread
@@ -254,7 +254,7 @@ def _run(command: Path, home: Path, *args: str) -> tuple[int, str]:
     env["HERMES_HOME"] = str(home)
     env["MORDRED_CONFIG_DECRYPT"] = "0"  # the running process's lifecycle owns the plaintext; the child only edits it
     try:
-        done = subprocess.run(
+        done = subprocess.run(  # noqa: S603 - list argv, no shell
             [str(command), "config", *args],
             cwd=home,
             env=env,

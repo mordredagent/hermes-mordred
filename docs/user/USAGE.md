@@ -207,6 +207,14 @@ hermes-mordred network use tor              # or: vpn, clearnet
 hermes-mordred network status               # active path + liveness
 ```
 
+If `config.yaml` is damaged or another Mordred process holds it on Windows,
+`network status` and `status` report the configured path as `unavailable`
+(`configured_path` in `--json`) rather than the `clearnet` default, while
+`network init` and `setup` stop without prompting or changing your settings.
+An invalid `default_path` or a blank `plugins` / `mordred_network` key is the
+exception: those two commands prompt, keep your other saved settings, and your
+answers repair it.
+
 ### `install` — policy-gated skill install
 ```sh
 hermes-mordred install <skill-name>         # or a path to a dir containing SKILL.md
@@ -231,7 +239,7 @@ nonzero. Windows skips excluded env/config targets and uses CNG memory.
 an `all` batch. Production file-vault operations refuse unsupported default
 stores before enrollment. Linux memory does not use that store.
 `all` does not include SQLite databases; use
-[`databases encrypt`](#databases--encrypt-hermess-sqlite-databases-macos) separately on macOS.
+[`databases encrypt`](#databases--encrypt-hermess-sqlite-databases-macos) separately on an admitted platform (macOS, Linux, Windows Server).
 ```sh
 hermes-mordred encryption status                        # all targets (non-prompting)
 hermes-mordred encryption enable  TARGET                # TARGET: env, config, memory, workspace, or all
@@ -409,7 +417,7 @@ hermes-mordred keyvault list                # list key IDs
 hermes-mordred keyvault verify-digest       # integrity check
 hermes-mordred keyvault export --output <path>  # create a new mode-0600 MRKV snapshot
 hermes-mordred keyvault recover --blob <path>   # restore from a backup blob
-hermes-mordred keyvault reset               # DESTROY profile-owned key material + remove the keyvault (irreversible; --yes to skip the prompt)
+hermes-mordred keyvault reset               # DESTROY profile keys, Mail/Telegram credentials and all their local history (--yes confirms the full scope)
 hermes-mordred keyvault enable-se           # macOS: build+install Secure Enclave helper (ad-hoc signed, no Apple Developer account)
                                 # safe to refresh; key policy is selected only by fresh init/recovery — see §4.3
 hermes-mordred keyvault enable-tpm          # Linux: build+install TPM 2.0 helper (machine-bound, Tier 2)
@@ -634,8 +642,8 @@ hermes-mordred desktop uninstall
 > button that jumps there), running or in need of attention, and a "Why this
 > step?" block that explains the reason in plain words. The Telegram and mail
 > counts come from Mordred's encrypted store, so they are right after a restart
-> too. Linux shows its existing list, with databases and mail marked as not
-> available; Windows keeps its own page.
+> too. Linux shows its existing list with the database step, and mail marked as
+> not available; Windows keeps its own page with the same database step.
 >
 > **Tool calls from the page.** The **Tool calls** card under Maintenance has
 > one checkbox, "Let Hermes call Mordred's tools directly (recommended with a
@@ -667,23 +675,38 @@ hermes-mordred desktop uninstall
 > switches act only while the browser activity feature is enabled and never
 > stop recording. The Windows page is unchanged; use the CLI there.
 >
-> **Database encryption from the page.** The step "Encrypt Hermes databases"
-> lists the plaintext and unreadable (encrypted) database files it finds, and
-> warns when backup archives in the Hermes home may still hold plaintext copies.
+> **Database encryption from the page.** The step "Encrypt Hermes databases" is
+> on the macOS, Linux and Windows Server pages. On Windows 11 and other Windows
+> workstation editions it says database encryption is not supported and has no
+> button. It warns when backup archives in the Hermes home may still hold plaintext
+> copies; it does not list database files, because status never opens them.
 > The page never converts or arms anything itself: Hermes Desktop keeps its
 > databases open, so **Encrypt databases** only schedules the conversion, which
 > runs at the next restart before Hermes opens them, and the step offers
-> **Restart now**. The Telegram import and the mail step wait until the
-> databases are encrypted, because `mordred.db` only opens then. The outcomes
-> are: not armed yet, the conversion is scheduled (also when no file needs
-> converting, and asking again changes nothing); armed and no plaintext file, the
-> step is done and says "Database encryption: on"; armed but a plaintext file
-> appeared (a new or restored file), the page schedules nothing and tells you to
-> quit Hermes and run `hermes-mordred databases encrypt` in Terminal; a pending
-> conversion that did not run, a pending decryption or a leftover journal, the
-> page tells you to check `hermes-mordred databases status` in Terminal; armed but
-> this Hermes process not yet protected, the page asks you to restart Hermes
-> Desktop.
+> **Restart now**. Starting Hermes any other way, not only from Hermes Desktop, also
+> runs the scheduled conversion. A vault key created from the page needs no Touch ID by default. If
+> your key asks for Touch ID every time, the Desktop backend may be unable to get
+> that approval, so use `hermes-mordred databases encrypt` in Terminal. The Telegram
+> import and the mail step wait until the databases are encrypted, because
+> `mordred.db` only opens then. The outcomes are: not armed yet, the conversion is
+> scheduled (asking again changes nothing); armed, the step is done and says
+> "Database encryption: on"; armed but this Hermes process not yet protected, the
+> page asks you to restart Hermes Desktop; a home too large to convert during a
+> restart, the page schedules nothing and tells you to quit Hermes and run
+> `hermes-mordred databases encrypt` in Terminal; a pending decryption, a leftover
+> journal or a pending conversion on an armed home, the page tells you to check
+> `hermes-mordred databases status` in Terminal.
+>
+> If a scheduled conversion could not run, Hermes starts on its plain databases and
+> the step says what to do, with **Cancel** to drop the schedule: Hermes was busy
+> (quit all Hermes processes, then restart); memory is not encrypted yet (go to the
+> memory step); the key was not available (restart, or use Terminal if it stays
+> unavailable); an earlier attempt was cut off while authenticating, which is not
+> retried on its own (press **Cancel** and **Encrypt databases** again, or use
+> Terminal); anything else (run `hermes-mordred databases encrypt` in Terminal). If a
+> conversion stops partway,
+> Hermes refuses to start rather than open a half-converted home: a later start
+> tries again, and `hermes-mordred databases encrypt` in Terminal finishes it.
 >
 > The vault comes first. Its own step shows the eight-word recovery passphrase
 > BEFORE anything is created and asks you to tick "I have written it down"; only
@@ -691,7 +714,7 @@ hermes-mordred desktop uninstall
 > The next step encrypts Hermes's memory, and if it fails you retry it without a
 > new passphrase. The vault step is also where you choose "Ask for Touch ID every
 > time Hermes unlocks the vault". It is off by default, because Hermes Desktop
-> starts its backend in the background and cannot answer a prompt; the page shows
+> starts its backend in the background and may be unable to answer a prompt; the page shows
 > the policy the key actually has, and your Telegram and mail keys keep their own
 > Touch ID setting. If an earlier vault was removed but its Keychain anchor was left
 > behind, the page shows the exact `security delete-generic-password` command to run
@@ -751,7 +774,7 @@ hermes-mordred uninstall --purge-data   # also delete Mordred's data and device 
 ```sh
 hermes-mordred databases status            # each Hermes database: plaintext / encrypted
 hermes-mordred databases encrypt --dry-run # list what would be encrypted
-hermes-mordred databases encrypt           # encrypt them all (or at the next Hermes start)
+hermes-mordred databases encrypt           # encrypt them all; quit Hermes first
 hermes-mordred databases decrypt           # back to plain SQLite; encryption off
 ```
 > Hermes keeps its conversation history and other state in SQLite files
@@ -763,10 +786,11 @@ hermes-mordred databases decrypt           # back to plain SQLite; encryption of
 > first) and is unlocked once per Hermes process. Files of other programs
 > (Hermes's install, toolchains, MCP servers, skills) and anything outside the
 > Hermes home are left alone. If any Hermes process is running, even before
-> opening a database, conversion is scheduled. Quit all Hermes processes, then
-> restart; the conversion runs before the new process opens any database. The
-> conversion is all-or-nothing and verified (same tables and row counts); an
-> interrupted one is completed on the next start. Old plaintext blocks are
+> opening a database, the command stops without changing anything. Quit all
+> Hermes processes and run it again. The
+> conversion is all-or-nothing and verified (same tables and row counts); after
+> an interruption Hermes refuses to start until you run the command again, which
+> completes it. Old plaintext blocks are
 > replaced, not overwritten: on an SSD they can survive in free space or APFS
 > local snapshots until reused (FileVault keeps them unreadable). Tools outside
 > Hermes (a SQLite browser, the `sqlite3` command) can no longer open these
@@ -775,15 +799,19 @@ hermes-mordred databases decrypt           # back to plain SQLite; encryption of
 > key, and that no plaintext database has appeared; strict policy stops the turn,
 > lenient policy warns you (through the agent and Hermes Desktop). The agent is
 > told the checked status, so it does not claim encryption that is not in
-> effect. `decrypt` (also scheduled for the next start if Hermes is running)
-> converts everything back. A missing or wrong key leaves encryption enabled
+> effect. `decrypt` (also refused while Hermes is running) converts everything
+> back. A missing or wrong key leaves encryption enabled
 > and reports failure. Normal uninstall also restores the databases before
 > removing the package or keys. `status` and `--dry-run` do not execute pending
 > conversions.
 >
+> The Mordred page in Hermes Desktop can schedule the same conversion for the next
+> restart ([`desktop`](#desktop--mordred-setup-page-in-hermes-desktop)); use this
+> command for a very large home.
+>
 > On Linux and Windows, ordinary homes continue using plain SQLite: memory
-> encryption does not encrypt `state.db`. Database encryption is supported only
-> on macOS. If you copy a home with its database-encryption marker or conversion
+> encryption does not encrypt `state.db`. Database encryption is admitted on macOS,
+> Linux and Windows Server, not on Windows workstation editions. If you copy a home with its database-encryption marker or conversion
 > journal to Linux/Windows, startup refuses to open it. Run `databases decrypt`
 > on macOS and let it finish before moving the home.
 
@@ -1031,7 +1059,10 @@ hermes-mordred telegram logout --forget --force   # go on even if the imported r
 > not distinguished`; messages synced afterwards carry the exact sender,
 > forward and quote information. A sync into `mordred.db` is one all-or-nothing
 > run: if it is interrupted nothing is readable and the next sync fetches those
-> chats again. Linux and Windows keep the `.enc` archive and `telegram_ask`.
+> chats again. Qualified Linux/Windows native store consumers also exist in the
+> shared database rollout; their source/wheel and live-account acceptance remains
+> incomplete. Keep existing `.enc` archives until an explicit migration succeeds;
+> see [remaining database work](../dev/TODO.md#hermes-database-encryption).
 >
 > **`logout --forget` and the imported rows.** `--forget` deletes this
 > account's Telegram rows in `mordred.db` first. If that fails it stops with
@@ -1094,6 +1125,7 @@ hermes-mordred mail fetch [--max N] [--mailbox all|inbox|sent] [--since YYYY-MM-
 hermes-mordred mail status                              # adds the account label, last fetch and cursors
 hermes-mordred mail forget --yes                        # delete the sealed credentials and the cursors
 hermes-mordred mail forget --rows --yes                 # ... and the account's imported mail
+hermes-mordred mail forget --yes --force-orphan         # repair: retire a native mail key left without sealed credentials (mail_orphan_key)
 ```
 
 0. **From Hermes Desktop (optional).** The Mordred page's mail step does steps
@@ -1147,6 +1179,8 @@ crash left credentials without their metadata: run `mail forget --yes`),
 an interrupted setup left of them) exist: it never replaces them, so remove
 them first with `hermes-mordred mail forget --yes`.
 
+If `mail setup` or `mail forget` refuses with `mail_orphan_key` (a native key was left without sealed credentials, for example by a refused login), run `hermes-mordred mail forget --yes --force-orphan` once, then set up again; it refuses `--rows`/`--account`, which follow separately.
+
 `mail setup`, `mail fetch` and the Desktop page also say why a login was
 refused: the hint follows the code, as in `mail refused (imap_auth_failed:
 authentication_failed)` from `mail setup` or `mail fetch failed
@@ -1192,11 +1226,9 @@ the tool inside a running Hermes can. An HTTP proxy is refused
 ### `activity` — record browser work (preview, macOS)
 
 ```sh
-hermes-mordred activity status                # switches, protection gate, counts, peers (no content)
+hermes-mordred activity status                # switches, protection gate, counts (no content)
 hermes-mordred activity use off               # Hermes stops using the history and recording its own browser work (on: both again); next turn
 hermes-mordred activity tools off             # keep the automatic hints, drop the lookup tools (on: offer them)
-hermes-mordred activity pair-operator         # single-use code for the browser operator's collector
-hermes-mordred activity peers list            # peers revoke <peer_id> stops a collector at once
 hermes-mordred activity correct --episode ID --text "Open the official site instead"   # stores one correction event; prints its id
 hermes-mordred activity backup --output ~/mordred-activity.bak  # encrypted; file must not exist
 hermes-mordred activity restore --input ~/mordred-activity.bak  # preview; add --yes to restore
@@ -1234,9 +1266,8 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > on a host excluded in the collector itself (`site_excluded`) is never shown
 > to Hermes, also after you remove the exclusion. Your own instruction is still stored, so do not name the
 > excluded site's private details in it. Also exclude the host in the
-> collector itself when it can (the operator's `--activity-exclude-site`):
-> then nothing from that host leaves the collector but where its events fall
-> in the episode (marked `site_excluded`). If one entry of that list names no host, the
+> collector itself when it can: then nothing from that host leaves the
+> collector but where its events fall in the episode (marked `site_excluded`). If one entry of that list names no host, the
 > other entries still apply but every batch is refused
 > (`excluded_sites_invalid`; `activity status` shows `collection: refused`)
 > until you fix it, so a typo never records a site you excluded. Raw events are kept
@@ -1245,7 +1276,7 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > most once an hour.
 > `activity correct` appends your correction as one raw event to an existing
 > episode (also one a paired collector wrote); nothing is derived from it and
-> no model is called. A correction typed in the operator after a task finished
+> no model is called. A correction a collector sends after a task finished
 > is attributed to that task when it names the task's last action.
 > `activity restore` without `--yes` prints the backup's schema version,
 > generation and row counts and exits 2; with it, the content is replaced and
@@ -1254,15 +1285,15 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 >
 > **Hermes uses this history** while the feature is enabled (master switch
 > `history_enabled`, default on; `activity use off` turns it off from the next
-> turn, without a restart, and `activity use on` back on; operator collection
-> is not affected, while Hermes's own capture of its browser calls and your
-> chat corrections stops and restarts with the switch). After Hermes opens a
+> turn, without a restart, and `activity use on` back on; batches from the
+> paired extension are not affected, while Hermes's own capture of its browser
+> calls and your chat corrections stops and restarts with the switch). After Hermes opens a
 > site with `browser_navigate`, the browser result carries a short block of
 > your earlier work there (tasks, routes, outcomes, page titles, your
 > corrections; never page text or typed text). When your message names a site
 > or matches an earlier task, the turn gets a block with only your own task
 > texts and corrections (the instruction and corrections you typed, never the
-> operator's own summary) plus sites, routes, outcomes and times. Hermes can
+> collector's own summary) plus sites, routes, outcomes and times. Hermes can
 > also look things up with `mordred_browser_history` and
 > `mordred_browser_history_episode` (skill `mordred:browser-history`). Blocks
 > are bounded (`history_max_chars` 1500, `history_max_episodes` 3,
@@ -1324,7 +1355,7 @@ hermes-mordred activity retention --dry-run   # what one retention pass would re
 > arriving through a gateway, the API server or an unknown platform is
 > recorded as the agent's task, not yours, and cannot record a correction.
 > Add a gateway platform (for example `telegram`) only if that gateway is
-> used by you alone. Type `correct: …` (or the Japanese "teisei:", the operator's prefix) in Hermes chat to record
+> used by you alone. Type `correct: …` (or the Japanese "teisei:") in Hermes chat to record
 > a correction of Hermes's last browser action (`history_chat_corrections`,
 > default on); the message still goes to Hermes as usual. Recording never
 > slows or breaks a tool call: a write waits at most 250 ms for the store,
@@ -1481,7 +1512,7 @@ per-use Touch ID / passcode prompt?", or `--unattended-keys` /
 the keyvault key and the file-vault key. The default is attended. The Hermes
 Desktop setup page creates the file-vault key unattended unless "Ask for Touch
 ID every time Hermes unlocks the vault" is ticked, because Hermes Desktop
-starts its backend in the background and cannot answer a prompt. A key that
+starts its backend in the background and may be unable to answer a prompt. A key that
 already exists keeps the policy it was created with.
 
 `keyvault enable-se` may install or refresh the helper with an existing
@@ -1822,7 +1853,8 @@ including under strict mode).
   Memory is machine-bound without portable recovery.
 - **Windows**: scoped native installer, CNG custody, memory/Telegram and Desktop
   consumers exist. Env/config file-vault seals and APFS workspace integration
-  are excluded; database encryption is also unsupported. Capability status and
+  are excluded; database encryption is admitted on Windows Server only, not on
+  workstation editions including Windows 11. Capability status and
   remaining native/live/Windows 11 gates govern readiness; see
   [`SPEC.md`](../dev/SPEC.md#platform-support-v1).
 - **Fallback behavior**: macOS can use a software P-256 key in the login

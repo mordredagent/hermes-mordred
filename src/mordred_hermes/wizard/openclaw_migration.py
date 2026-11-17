@@ -37,12 +37,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .._audit_io import audit_lock_path, audit_path_stat, exclusive_audit_lock, open_audit_file
-from .._config_io import CONFIG_LIMIT
-from .._log_rotation import utcnow_iso as _utcnow_iso
-from .._policy_types import POLICY_MODES
+from .._core._audit_io import audit_lock_path, audit_path_stat, exclusive_audit_lock, open_audit_file
+from .._core._config_io import CONFIG_LIMIT
+from .._core._log_rotation import utcnow_iso as _utcnow_iso
+from .._core._policy_types import POLICY_MODES
+from .._core._yaml_io import load_plugin_section
 from .._private_fs import PrivateFSError, open_optional_confidential_directory
-from .._yaml_io import load_plugin_section
 from .policy_writer import (
     PolicySnapshot,
     PolicyWriter,

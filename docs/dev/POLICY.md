@@ -3,7 +3,7 @@
 This document owns policy input, decision matrices, and the human-readable
 audit vocabulary. Typed implementation remains authoritative:
 
-- policy/network closed sets: `src/mordred_hermes/_policy_types.py`;
+- policy/network closed sets: `src/mordred_hermes/_core/_policy_types.py`;
 - audit reasons: `privacy_check/_audit_reasons.py::ReasonCode`;
 - install/tool decisions: `privacy_check/policy.py`;
 - LLM decisions: `llm_guard/enforce.py`; and

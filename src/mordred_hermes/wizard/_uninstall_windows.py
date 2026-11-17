@@ -53,7 +53,7 @@ PLAN_NOTE = (
     "process inventory is unknown; stop them first. Retained file-vault/seal/secret-store state is excluded or "
     "not ported on Windows and is preserved unchanged."
 )
-_ROLE_LABELS = {"memory": "memory", "audit": "audit", "telegram": "Telegram"}
+_ROLE_LABELS = {"memory": "memory", "audit": "audit", "telegram": "Telegram", "mail": "mail"}
 _DELETE_MEMORY = "delete the Windows CNG memory custody key"
 _UNREADABLE = "Windows custody could not be read"
 _STOPPED = (
@@ -72,7 +72,7 @@ def erase_refusal() -> int:
     return 1
 
 
-def restores(home: Path, *, purge_data: bool = False) -> list[Restore]:
+def _memory_restores(home: Path, *, purge_data: bool = False) -> list[Restore]:
     """The memory restore the plan promises, from a load-only observation.
 
     With ``purge_data`` an enrolled profile that was never explicitly disabled
@@ -129,7 +129,7 @@ def custody_roles(home: Path, *, blocking: bool = False) -> tuple[list[str], str
     The plan reads without waiting for a lock (``blocking=False``); the purge
     itself waits, like every other lifecycle command.
     """
-    from .._config_io import CanonicalPaths, canonical_session
+    from .._core._config_io import CanonicalPaths, canonical_session
     from ..keyvault._windows_custody import windows_custody_session
     from ..keyvault._windows_profile import ROLES
 
@@ -288,3 +288,13 @@ def kept_lines(plan: UninstallPlan) -> str:
             "Remove these paths by hand once you no longer need them.",
         ]
     )
+
+
+def restores(home: Path, *, purge_data: bool = False) -> list[Restore]:
+    from . import _uninstall_databases
+    from .uninstall_cli import Restore
+
+    items = _memory_restores(home, purge_data=purge_data)
+    if not any(item.target == "databases" for item in items) and _uninstall_databases.needed(home):
+        items.insert(0, Restore("databases", _uninstall_databases.detail(home), False))
+    return items

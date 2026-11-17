@@ -5,7 +5,8 @@ runs the activity protection gate and passes the gate's keyed opener; tests pass
 a plain-SQLite opener (the only test seam). The tables share the activity
 store's encrypted file but keep their own ``import_meta``; ``activity_*`` is never touched.
 :func:`open_import_store_readonly` is the status path (the Desktop page's polling): it
-creates, initialises, upgrades and unlocks nothing (see its docstring).
+creates, initialises and upgrades nothing, and only reuses existing authenticated
+runtime authority (see its docstring).
 
 Every public method runs one short connection and one transaction (``BEGIN IMMEDIATE``
 for writes, busy timeout 2 s). SQLite failures become :class:`ImportRefused` (``busy``,
@@ -113,8 +114,6 @@ import os
 import re
 import secrets
 import sqlite3
-import stat
-import sys
 import threading
 import time
 from collections import Counter
@@ -122,17 +121,19 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final, NamedTuple, TypeVar, cast
+from typing import Any, Final, NamedTuple, TypeVar
 
+from .._core._database_contracts import DatabaseRefused
 from ..activity._gate import (
     ActivityRefused,
     Refusal,
+    _open_guarded,
     check_protection,
-    keyed_opener,
     refusal,
-    verify_keyed_connection,
+    runtime_authority,
 )
-from ..activity.store import BUSY_TIMEOUT_S
+from ..activity.store import BUSY_TIMEOUT_S, _db_errors
+from ..keyvault._storage import KeyvaultResetInProgressError
 from . import _mail_reconcile, _schema, analysis
 from .records import (
     ConversationKind,
@@ -202,7 +203,7 @@ Opener = Callable[[Path], sqlite3.Connection]
 CopyCheck = Callable[[Path], Refusal | None]
 
 _DETAILS: Final = {
-    "unsupported_platform": "the import store requires macOS database encryption",
+    "unsupported_platform": "the import store requires qualified native database encryption",
     "busy": "the import store is busy",
     "disk_full": "the disk holding the import store is full",
     "store_unavailable": "the import store is unavailable",
@@ -278,7 +279,7 @@ _NEIGHBOR_SQL: Final = f"""
     SELECT ordered.source_uid FROM ordered, anchor
     WHERE ordered.pos BETWEEN anchor.pos - ? AND anchor.pos + ?
     ORDER BY ordered.pos
-"""
+"""  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
 
 
 class ImportRefused(Exception):
@@ -360,12 +361,6 @@ class StoredPart(NamedTuple):
 # --- errors -----------------------------------------------------------------------------------
 
 
-def _db_errors() -> tuple[type[BaseException], ...]:
-    """The stdlib's and, once installed, the SQLCipher replacement's error base classes."""
-    current = sys.modules.get("sqlite3", sqlite3)
-    return (sqlite3.Error, getattr(current, "Error", sqlite3.Error))
-
-
 def _classify(exc: BaseException) -> str:
     text = str(exc).lower()
     if "locked" in text or "busy" in text:
@@ -381,6 +376,10 @@ def _refusing() -> Iterator[None]:
         yield
     except ActivityRefused as exc:  # the gate's opener refused an unkeyed connection
         raise ImportRefused(exc.code) from None
+    except DatabaseRefused:
+        raise ImportRefused("store_unavailable") from None
+    except KeyvaultResetInProgressError:  # a pending keyvault reset fences every write (an OSError, not SQLite's)
+        raise ImportRefused("store_unavailable") from None
     except _db_errors() as exc:
         raise ImportRefused(_classify(exc)) from None
 
@@ -441,6 +440,27 @@ def _decoded(fields: Sequence[str], row: Sequence[Any]) -> dict[str, Any]:
         field: _DECODERS[field](value) if field in _DECODERS else value
         for field, value in zip(fields, row, strict=True)
     }
+
+
+def _conversation(row: Sequence[Any]) -> ImportConversation:
+    values = _decoded(_CONV_FIELDS, row)
+    values["message_count"] = int(values["message_count"])
+    values["record_version"] = int(values["record_version"])
+    return ImportConversation(**values)
+
+
+@contextlib.contextmanager
+def _decoding() -> Iterator[None]:
+    """Malformed stored records refuse without exposing their contents."""
+    try:
+        yield
+    except (AttributeError, KeyError, TypeError, ValueError):
+        raise ImportRefused("store_unavailable") from None
+
+
+def _reading_order(msg: ImportMessage) -> tuple[bool, int, int, str]:
+    numeric = int(msg.message_id) if msg.message_id.isdigit() else 0
+    return msg.sent_at is None, msg.sent_at or 0, numeric, msg.message_id
 
 
 def _marks(count: int) -> str:
@@ -577,7 +597,7 @@ def _analysed(run: Callable[[], _A]) -> _A:
 
 def _index_parts(conn: sqlite3.Connection, where: str, params: Sequence[Any]) -> None:
     """Write the term-index rows of the parts selected by ``where`` (they have none yet)."""
-    rows = conn.execute(f"SELECT id, text FROM import_parts WHERE {where}", params).fetchall()
+    rows = conn.execute(f"SELECT id, text FROM import_parts WHERE {where}", params).fetchall()  # noqa: S608 - only placeholders and fixed identifiers are interpolated; values are bound
     entries = _analysed(lambda: [(part_id, analysis.index_text(text)) for part_id, text in rows])
     conn.executemany("INSERT INTO import_parts_fts (rowid, terms) VALUES (?, ?)", entries)
 
@@ -609,7 +629,7 @@ def _search_sql(
             where.append(clause)
             params.append(value)
     sql = (
-        f"SELECT p.part_uid, p.source_uid, m.conv_uid, {score} AS score FROM {tables} "
+        f"SELECT p.part_uid, p.source_uid, m.conv_uid, {score} AS score FROM {tables} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         "JOIN import_conversations c ON c.conv_uid = m.conv_uid "
         f"WHERE {' AND '.join(where) or '1'} ORDER BY {order} LIMIT ?"
     )
@@ -662,6 +682,12 @@ class ImportStore:
                 conn.execute("PRAGMA secure_delete = ON")
             conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             try:
+                if write:
+                    from ..keyvault._reset_authority import check_reset_access
+
+                    meta = self._read_meta(conn)
+                    if meta is not None and meta.get("profile_home"):
+                        check_reset_access(Path(meta["profile_home"]))
                 if guard is not None:
                     guard()
                 yield conn
@@ -687,6 +713,10 @@ class ImportStore:
         An older schema bound to ``profile_home`` is upgraded in the same transaction.
         """
         bound = os.path.realpath(profile_home)
+        from ..keyvault._reset_authority import check_reset_access
+
+        with _refusing():
+            check_reset_access(Path(bound))
         with self._transaction() as conn:
             meta = self._read_meta(conn)
             if meta is None:
@@ -782,7 +812,8 @@ class ImportStore:
         if stored is not None and tuple(stored) != values[1:3]:
             raise ImportRefused("conflict")
         conn.execute(
-            f"INSERT OR REPLACE INTO import_conversations ({_CONV_COLUMNS}) VALUES ({_marks(len(values))})", values
+            f"INSERT OR REPLACE INTO import_conversations ({_CONV_COLUMNS}) VALUES ({_marks(len(values))})",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+            values,
         )
 
     # --- runs ----------------------------------------------------------------------------
@@ -984,7 +1015,9 @@ class ImportStore:
         rows = {
             str(row[0]): ImportConversation(**_decoded(_CONV_FIELDS, row))
             for row in _select_in(
-                conn, f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid IN", [survivor, *others]
+                conn,
+                f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid IN",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+                [survivor, *others],
             )
         }
         target = rows.get(survivor)
@@ -999,9 +1032,10 @@ class ImportStore:
         for start in range(0, len(others), _CHUNK):
             chunk = list(others[start : start + _CHUNK])
             moved += conn.execute(
-                f"UPDATE import_messages SET conv_uid = ? WHERE conv_uid IN ({_marks(len(chunk))})", (survivor, *chunk)
+                f"UPDATE import_messages SET conv_uid = ? WHERE conv_uid IN ({_marks(len(chunk))})",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+                (survivor, *chunk),
             ).rowcount
-            conn.execute(f"DELETE FROM import_conversations WHERE conv_uid IN ({_marks(len(chunk))})", chunk)
+            conn.execute(f"DELETE FROM import_conversations WHERE conv_uid IN ({_marks(len(chunk))})", chunk)  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         cls._upsert_conversation(conn, merged)
         cls._recount(conn, run_id, survivor)
         return int(moved)
@@ -1090,7 +1124,8 @@ class ImportStore:
     def _merged(conn: sqlite3.Connection, conv: ImportConversation) -> ImportConversation:
         """``conv`` merged with its stored row: participants unioned, newest date, the stored title kept."""
         row = conn.execute(
-            f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid = ?", (conv.conv_uid,)
+            f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid = ?",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+            (conv.conv_uid,),
         ).fetchone()
         if row is None:
             return conv
@@ -1124,7 +1159,7 @@ class ImportStore:
     def _outcome(conn: sqlite3.Connection, run_id: str, msg: ImportMessage) -> str:
         """``inserted`` / ``duplicates`` / ``revised`` / ``conflicts`` (see the module docstring)."""
         row = conn.execute(
-            f"SELECT {_DECISION_COLUMNS}, m.run_id = ?, r.state FROM import_messages m "
+            f"SELECT {_DECISION_COLUMNS}, m.run_id = ?, r.state FROM import_messages m "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             "LEFT JOIN import_runs r ON r.run_id = m.run_id WHERE m.source_uid = ?",
             (run_id, msg.source_uid),
         ).fetchone()
@@ -1137,38 +1172,55 @@ class ImportStore:
     def _store_message(conn: sqlite3.Connection, run_id: str, msg: ImportMessage) -> None:
         values = (*_values(msg, _MESSAGE_FIELDS), run_id)
         conn.execute(
-            f"INSERT OR REPLACE INTO import_messages ({_MESSAGE_COLUMNS}, run_id) VALUES ({_marks(len(values))})",
+            f"INSERT OR REPLACE INTO import_messages ({_MESSAGE_COLUMNS}, run_id) VALUES ({_marks(len(values))})",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             values,
         )
         conn.execute("DELETE FROM import_parts WHERE source_uid = ?", (msg.source_uid,))
         rows = [_values(part, _PART_FIELDS) for part in msg.parts]
-        conn.executemany(f"INSERT INTO import_parts ({_PART_COLUMNS}) VALUES ({_marks(len(rows[0]))})", rows)
+        conn.executemany(f"INSERT INTO import_parts ({_PART_COLUMNS}) VALUES ({_marks(len(rows[0]))})", rows)  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         _index_parts(conn, "source_uid = ?", (msg.source_uid,))
 
-    def delete_source(self, source: Source | str, source_account: str) -> int:
+    def delete_source(
+        self, source: Source | str, source_account: str, *, expected_retired_account: str | None = None
+    ) -> int:
         """Delete one account's conversations, messages, parts, references and own addresses; returns messages deleted.
 
         Runs with ``PRAGMA secure_delete = ON`` and the FTS index's
         ``secure-delete`` option, so freed pages are zeroed and no index tokens remain.
         ``import_mail_refs`` rows of the deleted messages go too (and any left
         without a message), so no referenced Message-ID survives.
+
+        ``expected_retired_account`` binds Telegram storage forget to its
+        observed retirement marker, checked and removed in this transaction.
         """
         value = _source_value(source)
+        if expected_retired_account is not None and (
+            value != Source.TELEGRAM.value or source_account != expected_retired_account
+        ):
+            raise ImportRefused("conflict")
         convs = "SELECT conv_uid FROM import_conversations WHERE source = ? AND source_account = ?"
         key = (value, source_account)
         with self._transaction(secure_delete=True) as conn:
+            if expected_retired_account is not None:
+                marker = conn.execute(
+                    "SELECT value FROM import_meta WHERE key = ?", (TELEGRAM_RETIRED_ACCOUNT,)
+                ).fetchone()
+                if marker != (expected_retired_account,):
+                    raise ImportRefused("conflict")
             for table in ("import_parts", "import_mail_refs"):
                 conn.execute(
-                    f"DELETE FROM {table} WHERE source_uid IN "
+                    f"DELETE FROM {table} WHERE source_uid IN "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                     f"(SELECT source_uid FROM import_messages WHERE conv_uid IN ({convs}))",
                     key,
                 )
-            deleted = conn.execute(f"DELETE FROM import_messages WHERE conv_uid IN ({convs})", key).rowcount
+            deleted = conn.execute(f"DELETE FROM import_messages WHERE conv_uid IN ({convs})", key).rowcount  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             conn.execute(
                 "DELETE FROM import_mail_refs WHERE source_uid NOT IN (SELECT source_uid FROM import_messages)"
             )
             conn.execute("DELETE FROM import_conversations WHERE source = ? AND source_account = ?", key)
             conn.execute("DELETE FROM import_accounts WHERE source = ? AND account = ?", key)
+            if expected_retired_account is not None:
+                conn.execute("DELETE FROM import_meta WHERE key = ?", (TELEGRAM_RETIRED_ACCOUNT,))
         return int(deleted)
 
     # --- reads (committed runs only) -----------------------------------------------------
@@ -1177,7 +1229,7 @@ class ImportStore:
         """The subset of ``source_uids`` stored under a committed run."""
         uids = list(dict.fromkeys(source_uids))
         with self._transaction(write=False) as conn:
-            rows = _select_in(conn, f"SELECT m.source_uid FROM {_COMMITTED_MESSAGES} WHERE m.source_uid IN", uids)
+            rows = _select_in(conn, f"SELECT m.source_uid FROM {_COMMITTED_MESSAGES} WHERE m.source_uid IN", uids)  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         return {str(row[0]) for row in rows}
 
     def classify_incoming(self, copies: Iterable[IncomingCopy]) -> dict[str, str]:
@@ -1192,12 +1244,72 @@ class ImportStore:
         with self._transaction(write=False) as conn:
             rows = _select_in(
                 conn,
-                f"SELECT m.source_uid, {_DECISION_COLUMNS}, 0, r.state FROM import_messages m "
+                f"SELECT m.source_uid, {_DECISION_COLUMNS}, 0, r.state FROM import_messages m "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 "LEFT JOIN import_runs r ON r.run_id = m.run_id WHERE m.source_uid IN",
                 list(incoming),
             )
         stored = {str(row[0]): tuple(row)[1:] for row in rows}
         return {uid: _decision(stored.get(uid), copy) for uid, copy in incoming.items()}
+
+    def conversations(self, source: Source | str, source_account: str) -> dict[str, ImportConversation]:
+        """Every conversation of one source account, including its last published ``sync_cursor``.
+
+        Conversation metadata is published by ``upsert_conversation``; unlike
+        message reads, it is not filtered by an import run's state.
+        """
+        source_value = _source_value(source)
+        with self._transaction(write=False) as conn, _decoding():
+            rows = conn.execute(
+                f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE source = ? AND source_account = ?",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+                (source_value, source_account),
+            ).fetchall()
+            convs = [_conversation(row) for row in rows]
+        return {conv.conv_uid: conv for conv in convs}
+
+    def conversation_stats(self, conv_uids: Iterable[str]) -> dict[str, tuple[int, int | None]]:
+        """``conv_uid -> (committed message count, newest sent_at)``; empty conversations are omitted."""
+        uids = list(dict.fromkeys(conv_uids))
+        stats: dict[str, tuple[int, int | None]] = {}
+        with self._transaction(write=False) as conn, _decoding():
+            for start in range(0, len(uids), _CHUNK):
+                chunk = uids[start : start + _CHUNK]
+                for conv_uid, count, last in conn.execute(
+                    f"SELECT m.conv_uid, count(*), max(m.sent_at) FROM {_COMMITTED_MESSAGES} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+                    f"WHERE m.conv_uid IN ({_marks(len(chunk))}) GROUP BY m.conv_uid",
+                    chunk,
+                ):
+                    stats[str(conv_uid)] = (int(count), None if last is None else int(last))
+        return stats
+
+    def conversation_messages(
+        self, conv_uids: Sequence[str], *, since: int | None = None, until: int | None = None
+    ) -> dict[str, list[ImportMessage]]:
+        """Committed messages with parts, in reading order, for the requested conversations.
+
+        Bounds are half-open (``since <= sent_at < until``); unknown dates
+        match only when neither bound is set. Equal dates use numeric message
+        ids, then id text, with unknown dates last. Selection and hydration
+        share one read transaction so every message reflects the same snapshot.
+        """
+        uids = list(dict.fromkeys(conv_uids))
+        bounds = [("m.sent_at >= ?", since), ("m.sent_at < ?", until)]
+        clauses = "".join(f" AND {clause}" for clause, value in bounds if value is not None)
+        values = [value for _clause, value in bounds if value is not None]
+        by_conv: dict[str, list[ImportMessage]] = {}
+        with self._transaction(write=False) as conn, _decoding():
+            source_uids: list[str] = []
+            for start in range(0, len(uids), _CHUNK):
+                chunk = uids[start : start + _CHUNK]
+                sql = (
+                    f"SELECT DISTINCT m.source_uid FROM {_COMMITTED_MESSAGES} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+                    "JOIN import_parts p ON p.source_uid = m.source_uid "
+                    f"WHERE m.conv_uid IN ({_marks(len(chunk))}){clauses}"
+                )
+                source_uids.extend(str(row[0]) for row in conn.execute(sql, [*chunk, *values]))
+            hydrated = self._hydrate(conn, source_uids)
+            for msg in sorted((msg for _conv, msg in hydrated.values()), key=_reading_order):
+                by_conv.setdefault(msg.conv_uid, []).append(msg)
+        return by_conv
 
     def find_messages(
         self,
@@ -1236,7 +1348,7 @@ class ImportStore:
                 raise RecordError("unknown_enum") from None
             where.append("m.owner_class = ?")
         sql = (
-            f"SELECT m.source_uid FROM {_COMMITTED_MESSAGES} "
+            f"SELECT m.source_uid FROM {_COMMITTED_MESSAGES} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             f"JOIN import_conversations c ON c.conv_uid = m.conv_uid WHERE {' AND '.join(where)}"
         )
         chunks: list[list[str]] = [[]] if ids is None else [ids[i : i + _CHUNK] for i in range(0, len(ids), _CHUNK)]
@@ -1271,12 +1383,34 @@ class ImportStore:
         (unix seconds) excludes unknown dates. Without a query the newest
         parts come first.
         """
+        hits, _ = self.search_with_parts(
+            query, conv_uids=conv_uids, since=since, until=until, source=source, limit=limit, parts_limit=0
+        )
+        return hits
+
+    def search_with_parts(
+        self,
+        query: str | None,
+        *,
+        conv_uids: Sequence[str] | None = None,
+        since: int | None = None,
+        until: int | None = None,
+        source: Source | str | None = None,
+        limit: int = 20,
+        parts_limit: int = 20,
+    ) -> tuple[list[SearchHit], dict[str, StoredPart]]:
+        """Search and hydrate a nonnegative prefix of hits in one committed snapshot.
+
+        Filters, ranking and the bounded candidate ``limit`` match :meth:`search`.
+        ``parts_limit`` independently bounds hydration, preserving hit order.
+        Each call opens a fresh transaction; neither records nor authority are cached.
+        """
         if limit <= 0 or (conv_uids is not None and not conv_uids):
-            return []
+            return [], {}
         words = _terms(query)
         match = _analysed(lambda: analysis.match_query(words)) if words else None
         if words and match is None:
-            return []
+            return [], {}
         sql, params = _search_sql(
             match,
             conv_uids=None if conv_uids is None else list(dict.fromkeys(conv_uids)),
@@ -1286,7 +1420,14 @@ class ImportStore:
             limit=min(limit, MAX_SEARCH_LIMIT),
         )
         with self._transaction(write=False) as conn:
-            rows = conn.execute(sql, params).fetchall()
+            hits = self._search_hits(conn, sql, params)
+            wanted = [hit.part_uid for hit in hits[: max(0, parts_limit)]]
+            hydrated = self._parts_for(conn, wanted) if wanted else {}
+        return hits, hydrated
+
+    @staticmethod
+    def _search_hits(conn: sqlite3.Connection, sql: str, params: Sequence[Any]) -> list[SearchHit]:
+        rows = conn.execute(sql, params).fetchall()
         return [
             SearchHit(str(part), str(source_uid), str(conv), float(score)) for part, source_uid, conv, score in rows
         ]
@@ -1316,13 +1457,16 @@ class ImportStore:
         """Hydrate ``part_uids`` (unknown or uncommitted ones are left out) with their message and conversation."""
         uids = list(dict.fromkeys(part_uids))
         with self._transaction(write=False) as conn:
-            rows = _select_in(
-                conn,
-                f"SELECT p.part_uid, p.source_uid FROM {_COMMITTED_PARTS} WHERE p.part_uid IN",
-                uids,
-            )
-            owners = {str(part): str(source_uid) for part, source_uid in rows}
-            hydrated = self._hydrate(conn, sorted(set(owners.values())))
+            return self._parts_for(conn, uids)
+
+    def _parts_for(self, conn: sqlite3.Connection, uids: Sequence[str]) -> dict[str, StoredPart]:
+        rows = _select_in(
+            conn,
+            f"SELECT p.part_uid, p.source_uid FROM {_COMMITTED_PARTS} WHERE p.part_uid IN",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+            uids,
+        )
+        owners = {str(part): str(source_uid) for part, source_uid in rows}
+        hydrated = self._hydrate(conn, sorted(set(owners.values())))
         result: dict[str, StoredPart] = {}
         for uid in uids:
             found = hydrated.get(owners.get(uid, ""))
@@ -1340,7 +1484,7 @@ class ImportStore:
         span = max(0, min(n, MAX_NEIGHBORS))
         with self._transaction(write=False) as conn:
             anchor = conn.execute(
-                f"SELECT m.conv_uid, m.source_uid FROM {_COMMITTED_PARTS} WHERE p.part_uid = ?",
+                f"SELECT m.conv_uid, m.source_uid FROM {_COMMITTED_PARTS} WHERE p.part_uid = ?",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 (part_uid,),
             ).fetchone()
             if anchor is None:
@@ -1355,16 +1499,20 @@ class ImportStore:
         conn: sqlite3.Connection, source_uids: Sequence[str]
     ) -> dict[str, tuple[ImportConversation, ImportMessage]]:
         message_rows = _select_in(
-            conn, f"SELECT {_MESSAGE_COLUMNS} FROM import_messages WHERE source_uid IN", source_uids
+            conn,
+            f"SELECT {_MESSAGE_COLUMNS} FROM import_messages WHERE source_uid IN",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+            source_uids,
         )
         parts: dict[str, list[ImportPart]] = {}
-        for row in _select_in(conn, f"SELECT {_PART_COLUMNS} FROM import_parts WHERE source_uid IN", source_uids):
+        for row in _select_in(conn, f"SELECT {_PART_COLUMNS} FROM import_parts WHERE source_uid IN", source_uids):  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
             parts.setdefault(str(row[1]), []).append(ImportPart(**_decoded(_PART_FIELDS, row)))
         conv_uids = sorted({str(row[1]) for row in message_rows})
         convs = {
-            str(row[0]): ImportConversation(**_decoded(_CONV_FIELDS, row))
+            str(row[0]): _conversation(row)
             for row in _select_in(
-                conn, f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid IN", conv_uids
+                conn,
+                f"SELECT {_CONV_COLUMNS} FROM import_conversations WHERE conv_uid IN",  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+                conv_uids,
             )
         }
         result: dict[str, tuple[ImportConversation, ImportMessage]] = {}
@@ -1380,7 +1528,7 @@ class ImportStore:
         """Committed message count per source; a source without committed messages is left out."""
         with self._transaction(write=False) as conn:
             rows = conn.execute(
-                f"SELECT c.source, count(*) FROM {_COMMITTED_MESSAGES} "
+                f"SELECT c.source, count(*) FROM {_COMMITTED_MESSAGES} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 "JOIN import_conversations c ON c.conv_uid = m.conv_uid GROUP BY c.source ORDER BY c.source"
             ).fetchall()
         return {str(source): int(count) for source, count in rows}
@@ -1404,7 +1552,7 @@ class ImportStore:
             ):
                 add(str(source), "messages" if committed else "uncommitted_messages", int(count))
             for source, count in conn.execute(
-                f"SELECT c.source, count(*) FROM {_COMMITTED_PARTS} "
+                f"SELECT c.source, count(*) FROM {_COMMITTED_PARTS} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 "JOIN import_conversations c ON c.conv_uid = m.conv_uid GROUP BY 1"
             ):
                 add(str(source), "parts", int(count))
@@ -1427,38 +1575,33 @@ def refusal_code(exc: BaseException) -> str:
 
 
 def open_import_store(home: Path) -> ImportStore:
-    """Gate, open, verify and bind the ``import_*`` tables of ``home``'s ``mordred.db``.
-
-    The same gate and keyed opener as :func:`mordred_hermes.activity._gate.open_store`,
-    without creating or checking any activity table. Raises :class:`ImportRefused`.
-    """
+    """Authenticate before creating the fixed shared activity/import destination."""
     found = check_protection(home)
     if found is not None:
         raise ImportRefused(found.code)
     from ..activity._paths import store_path
-    from ..dbcrypt import _monitor
+    from ._protected_destination import checked_store_destination
 
-    try:
-        path = store_path(home)
-    except OSError:
-        raise ImportRefused("store_unavailable") from None
-    if path.is_file() and path.stat().st_size > 0 and _monitor.is_plaintext(path):
-        raise ImportRefused("plaintext_store")
-    store = ImportStore(path, keyed_opener)
-    store.initialize(Path(os.path.realpath(home)))
-    with store.connection() as conn:
-        found = verify_keyed_connection(conn, path)
-    if found is not None:
-        raise ImportRefused(found.code)
-    return store
+    with _refusing():
+        authority = runtime_authority(home)  # refusal precedes mkdir, even for a missing store
+        checked_store_destination(readonly_store_path(home), home=home)
+        try:
+            with authority.operation():
+                path = store_path(home)
+        except OSError:
+            raise ImportRefused("store_unavailable") from None
+
+        def opener(target: Path) -> sqlite3.Connection:
+            return _open_guarded(target, authority=authority, timeout=BUSY_TIMEOUT_S)
+
+        store = ImportStore(path, opener)
+        store.initialize(Path(os.path.realpath(home)))
+        return store
 
 
 # --- the read-only status path ----------------------------------------------------------------
 
-#: The write and read format version bytes of a SQLite header; 2 in either means WAL mode.
-_FORMAT_VERSION_BYTES: Final = slice(18, 20)
-_WAL_VERSION: Final = 2
-#: A journal or WAL sidecar next to the store: a writer is active (or crashed); the status path stays away.
+#: Existing recovery/active-writer state keeps record readers away.
 _SIDECARS: Final = ("-journal", "-wal", "-shm")
 
 
@@ -1467,69 +1610,6 @@ def readonly_store_path(home: Path) -> Path:
     from ..activity._paths import PLUGIN_DATA_SUBPATH, STORE_NAME
 
     return home.joinpath(*PLUGIN_DATA_SUBPATH, STORE_NAME)
-
-
-def readonly_uri(path: Path) -> str:
-    """``file:<path>?mode=ro`` with the path escaped, so a ``#``, ``?`` or ``%`` cannot cut it short."""
-    from urllib.parse import quote
-
-    return f"file:{quote(path.as_posix(), safe='/')}?mode=ro"
-
-
-def _sqlcipher() -> Any:
-    """The SQLCipher DB-API module itself, never the process ``sqlite3`` shim (a seam for tests)."""
-    import sqlcipher3.dbapi2 as sc
-
-    return sc
-
-
-def _env_database_key() -> Any:
-    """The database key derived from ``HERMES_MEMORY_KEY`` as it is now; ``None`` unless it decodes to 32 bytes.
-
-    Read once per open; no key provider runs, so nothing can unlock the vault or prompt.
-    """
-    from ..dbcrypt._key import derive
-    from ..keyvault._memory_hook import _decode_env_key
-
-    memory_key = _decode_env_key(os.environ)
-    return None if memory_key is None else derive(memory_key)
-
-
-def _readonly_gate(home: Path) -> str | None:
-    """The protection checks without anything that could unlock the vault or prompt; ``None`` when they pass."""
-    if sys.platform != "darwin":
-        return "unsupported_platform"
-    from .. import dbcrypt
-    from ..dbcrypt import _migrate, _shim
-
-    root = dbcrypt.root_home(home)
-    markers = (_migrate.journal_path(root), _migrate.pending_path(root), _migrate.decrypt_pending_path(root))
-    if any(path.is_file() for path in markers):
-        return "conversion_pending"  # either direction
-    if not dbcrypt.armed(root):
-        return "not_armed"
-    if not _shim.is_installed():
-        return "unprotected_process"
-    return None
-
-
-def _open_readonly(path: Path, key: Any) -> sqlite3.Connection:
-    """One connection through SQLCipher itself, keyed with ``key``: never the shim and its key provider.
-
-    ``check_same_thread`` is off because :class:`ReadOnlyImportStore` serialises its
-    single connection with its own lock across the threads that read status.
-    """
-    from ..dbcrypt._shim import apply_key
-
-    conn = _sqlcipher().connect(readonly_uri(path), uri=True, timeout=BUSY_TIMEOUT_S, check_same_thread=False)
-    try:
-        apply_key(conn, key)
-        conn.isolation_level = None  # explicit BEGIN / COMMIT, as ImportStore.connection does
-        conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_S * 1000)}")
-    except BaseException:
-        conn.close()
-        raise
-    return cast(sqlite3.Connection, conn)
 
 
 def _no_reopen(_path: Path) -> sqlite3.Connection:
@@ -1585,48 +1665,28 @@ def _lstat(path: Path) -> os.stat_result | None:
 
 
 def open_import_store_readonly(home: Path) -> ReadOnlyImportStore:
-    """Open ``home``'s ``import_*`` tables for status reads: nothing is created, initialised, upgraded or unlocked.
+    """Read existing records with runtime authority; never initialize, migrate or use ambient keys.
 
-    Its own gate sequence (never :func:`~..activity._gate.check_protection`, never a
-    key provider that could inject the vault or prompt): macOS, no database
-    conversion pending in either direction, armed, the SQLCipher shim installed,
-    and ``HERMES_MEMORY_KEY`` already in the environment and decoding to 32 bytes
-    (``no_key`` otherwise; read once, the derived key serves every later read of
-    the returned store). The path is computed without creating directories; no
-    file (or an empty one) is ``store_uninitialised``. Only rollback-journal stores
-    at rest are read: a header that says WAL (either format byte is 2), or any
-    ``-journal``, ``-wal`` or ``-shm`` next to the file (a writer in a write
-    transaction, or one that crashed), is ``store_unavailable`` before any
-    connection. A ``mode=ro`` reader of a WAL file may create ``-wal``/``-shm``
-    when a writer closes between any check and the open, a hot journal or an
-    orphan sidecar would make it roll back or map and delete it, and no lock is
-    shared with every writer (``immutable=1`` would disable locking instead).
-    Mordred never puts ``mordred.db`` in WAL mode: it is created in rollback mode,
-    a backup is written and restored in rollback mode, and only a conversion
-    keeps WAL for a file that already was. The file must not be plaintext; it is
-    opened ``mode=ro`` through SQLCipher itself (not the process ``sqlite3``
-    shim, whose key provider could inject the vault) with the derived key, and
-    any open failure is ``store_unavailable``; ``import_meta`` is read with plain
-    selects (no table: ``store_uninitialised``; a wrong key or an unreadable
-    file: ``store_unavailable``; a newer schema: ``schema_newer``; another
-    profile: ``profile_mismatch``; an older schema is read as it is). The
-    returned :class:`ReadOnlyImportStore` keeps that one connection for its life
-    and serves :meth:`ImportStore.status` and other reads on it (deferred read
-    transactions, which a writer holding ``BEGIN IMMEDIATE`` does not block);
-    callers close it (``with``) and never write through it. Raises :class:`ImportRefused` with a
-    :data:`REFUSAL_CODES` member.
+    This authenticated record reader only reuses current runtime authority; a
+    cold status poll refuses rather than acquiring custody or prompting. Pure
+    capability observation belongs to check_protection. Guarded SQLCipher owns
+    every database handle and checks rollback journal mode; raw header probes
+    cannot safely coexist with live SQLite locks.
     """
-    found = _readonly_gate(home)
+    found = check_protection(home)
     if found is not None:
-        raise ImportRefused(found)
-    key = _env_database_key()
-    if key is None:
-        raise ImportRefused("no_key")
-    path = _readonly_file(home)
+        raise ImportRefused(found.code)
+    with _refusing():
+        authority = runtime_authority(home, acquire=False)
+        path = _readonly_file(home)
+        conn = _open_guarded(path, authority=authority, timeout=BUSY_TIMEOUT_S, readonly=True, check_same_thread=False)
     try:
-        conn = _open_readonly(path, key)
-    except Exception:  # an open or sidecar failure: never stringified
-        raise ImportRefused("store_unavailable") from None
+        conn.isolation_level = None
+        if conn.execute("PRAGMA journal_mode").fetchone() != ("delete",):
+            raise ImportRefused("store_unavailable")
+    except BaseException:
+        conn.close()
+        raise
     store = ReadOnlyImportStore(path, conn)
     try:
         meta = _readonly_meta(store)
@@ -1641,33 +1701,18 @@ def open_import_store_readonly(home: Path) -> ReadOnlyImportStore:
 
 
 def _readonly_file(home: Path) -> Path:
-    """The existing, non-empty, not-plaintext, rollback-journal store of ``home`` at rest (nothing is created)."""
-    from ..dbcrypt import _monitor
+    """Metadata classification only; Task 6 performs actual checked handle admission."""
+    from ._protected_destination import checked_store_destination
 
     path = readonly_store_path(home)
-    info = _lstat(path.parent)
-    if info is not None and not stat.S_ISDIR(info.st_mode):
-        raise ImportRefused("store_unavailable")  # a planted symlink would move the store elsewhere
-    info = None if info is None else _lstat(path)
-    if info is not None and not stat.S_ISREG(info.st_mode):
-        raise ImportRefused("store_unavailable")
+    with _refusing():
+        checked_store_destination(path, home=home)
+    info = _lstat(path)
     if info is None or info.st_size == 0:
         raise ImportRefused("store_uninitialised")
-    if _wal_mode(path) or any(_lstat(Path(f"{path}{suffix}")) is not None for suffix in _SIDECARS):
-        raise ImportRefused("store_unavailable")  # rollback-journal stores at rest only: see open_import_store_readonly
-    if _monitor.is_plaintext(path):
-        raise ImportRefused("plaintext_store")
+    if any(_lstat(Path(f"{path}{suffix}")) is not None for suffix in _SIDECARS):
+        raise ImportRefused("store_unavailable")
     return path
-
-
-def _wal_mode(path: Path) -> bool:
-    """Whether the header's format bytes (18-19, plaintext also in an encrypted store) say WAL."""
-    try:
-        with path.open("rb") as handle:
-            header = handle.read(_FORMAT_VERSION_BYTES.stop)
-    except OSError:
-        raise ImportRefused("store_unavailable") from None
-    return _WAL_VERSION in header[_FORMAT_VERSION_BYTES]
 
 
 def _readonly_meta(store: ReadOnlyImportStore) -> dict[str, str] | None:

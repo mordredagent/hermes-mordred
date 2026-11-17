@@ -235,7 +235,7 @@ def _helper() -> Any:
 def test_root_allowed() -> bool:
     if os.environ.get(TEST_ROOT_ENV) != "1":
         return False
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     return hermes_home().resolve() != (Path.home() / ".hermes").resolve()
 

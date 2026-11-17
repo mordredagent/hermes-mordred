@@ -1,21 +1,19 @@
-"""The Hermes Desktop page's Windows contract (C11): syntax and explicit-metadata selection.
+"""The Hermes Desktop page's Windows contract (C11): explicit-metadata selection.
 
 ``plugin.js`` runs only inside Hermes Desktop, so this checks what can be
-checked without it: the module parses (``node --input-type=module --check``
-when Node is installed), the page asks for a Windows-capable status
+checked without it: the page asks for a Windows-capable status
 (``client_version>=3``: the page asks for 4, the start-up notice for 3), the
 Windows branch is chosen by ``hardware_kind`` and every capability name, reason
 code and step the Windows API can return has an explicit label. Readiness is
 never derived from matching English text. The Node harness lives in
-``tests/_desktop_page.py``, shared with ``test_desktop_page.py``.
+``tests/_desktop_page.py``, shared with ``test_desktop_page.py``, which owns
+the common ES-module syntax check.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 
 import pytest
 
@@ -51,20 +49,6 @@ CODES = (
     "forget_confirm_mismatch",
     "custody_busy",
 )
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
-def test_page_is_a_valid_es_module():
-    completed = subprocess.run(
-        ["node", "--input-type=module", "--check"],
-        input=source(),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=60,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
 
 
 def test_page_requests_the_windows_capable_status_and_selects_by_hardware_kind():
@@ -516,3 +500,136 @@ def test_startup_notice_mentions_a_known_newer_release_without_forcing_a_request
     assert "check.available === true" in start
     # Only when the page can act on it: not on Windows / source installs, not with a restart pending.
     assert "res.supported && !res.restart_required" in start
+
+
+# -- step 1.3 on Windows ---------------------------------------------------------------------------
+
+DB_ON = {
+    "supported": True,
+    "armed": True,
+    "encrypt_pending": False,
+    "decrypt_pending": False,
+    "journal": False,
+    "runtime_protected": True,
+    "databases": [],
+    "plaintext_backups": 0,
+    "startup_outcome": None,
+}
+DB_OFF = {**DB_ON, "armed": False, "runtime_protected": False}
+
+
+def windows_status(databases=None, *, memory=True, hardware=True, v4=True):
+    status = {
+        "ok": True,
+        "platform": "win32",
+        "hardware_kind": "cng",
+        "telegram_supported": False,
+        "checks": {"hardware": {"ok": hardware}, "memory_encryption": {"ok": memory}},
+        "capabilities": [],
+        "helper": {"state": "installed" if hardware else "missing"},
+        "memory": {"active": memory, "state": "enabled" if memory else "disabled"},
+        "hermes_model": {"model": "m", "kind": "venice", "private": True, "ok": True},
+        "jobs": [],
+    }
+    if v4:
+        status.update(
+            databases=DB_OFF if databases is None else databases,
+            imports={"available": False, "code": "store_unavailable", "sources": {}},
+            mail={"configured": False},
+        )
+    return status
+
+
+def windows_page(status, script=""):
+    return render_page(
+        """
+const requests = []
+const answers = ANSWERS
+rest = async (path, options) => {
+  if (options && options.method === 'POST') { requests.push(path); return answers.shift() }
+  return {ok: true}
+}
+const view = () => { cursor = 0; return WindowsSetup({status: STATUS, refresh: () => {}}) }
+const buttons = node => {
+  if (!node || typeof node !== 'object') return []
+  const own = node.type === 'button' ? [node.props.children] : []
+  const children = node.props && node.props.children
+  return own.concat((Array.isArray(children) ? children : [children]).flatMap(buttons))
+}
+const press = (tree, label) => find(tree, n => n.type === 'button' && n.props.children === label).props.onClick()
+const headings = node => {
+  if (!node || typeof node !== 'object') return []
+  const own = node.type === 'h3' ? [treeText(node)] : []
+  const children = node.props && node.props.children
+  return own.concat((Array.isArray(children) ? children : [children]).flatMap(headings))
+}
+let tree = view()
+SCRIPT
+console.log(JSON.stringify({text: treeText(tree), buttons: buttons(tree), headings: headings(tree), requests}))
+""".replace("STATUS", json.dumps(status))
+        .replace("SCRIPT", script)
+        .replace("ANSWERS", json.dumps([{"ok": True, "action": "scheduled", "restart_required": True}]))
+    )
+
+
+def test_windows_page_renders_databases_step_from_v4_status():
+    result = windows_page(windows_status())
+    titles = [heading for heading in result["headings"]]
+    memory = next(index for index, title in enumerate(titles) if "Encrypt Hermes memory" in title)
+    databases = next(index for index, title in enumerate(titles) if "Encrypt Hermes databases" in title)
+    assert databases == memory + 1, titles
+    assert "Encrypt databases" in result["buttons"]
+    pressed = windows_page(windows_status(), "await press(tree, 'Encrypt databases'); tree = view()\n")
+    assert pressed["requests"] == ["/databases/encrypt"]
+
+
+def test_windows_page_without_v4_has_no_databases_step():
+    result = windows_page(windows_status(v4=False))
+    assert not any("Encrypt Hermes databases" in title for title in result["headings"])
+
+
+def test_windows_workstation_shows_databases_unsupported_without_button():
+    result = windows_page(windows_status({"supported": False}))
+    assert any("Encrypt Hermes databases" in title and "Needs attention" in title for title in result["headings"])
+    assert "not supported on this system" in result["text"]
+    assert "Encrypt databases" not in result["buttons"] and "Cancel" not in result["buttons"]
+    assert "not checked" not in result["text"] and "Backup archive count" not in result["text"]
+    for promise in ("yet", "later", "soon", "future", "coming"):
+        assert f" {promise}" not in result["text"].split("not supported on this system")[1].split(".")[0]
+
+
+def test_windows_databases_step_needs_memory_first():
+    result = windows_page(windows_status(memory=False))
+    assert "Turn on memory encryption first." in result["text"]
+    assert "Encrypt databases" not in result["buttons"]
+    # Windows's steps have no anchors (the snapshot pins them), so no button that goes nowhere.
+    assert not any(str(label).startswith("Go to step") for label in result["buttons"])
+    helper = windows_page(windows_status(memory=False, hardware=False))
+    assert "Set up the hardware key helper first." in helper["text"]
+
+
+def test_windows_status_without_a_prerequisite_never_hides_a_schedule():
+    result = windows_page(windows_status({**DB_OFF, "encrypt_pending": True}, memory=False))
+    assert "Cancel" in result["buttons"]
+
+
+@pytest.mark.parametrize(
+    ("facts", "encrypt", "cancel", "phrase"),
+    [
+        ({"encrypt_pending": True}, False, True, "Scheduled."),
+        ({"encrypt_pending": True, "startup_outcome": "too_large"}, False, True, "hermes-mordred databases encrypt"),
+        ({"journal": True}, False, False, "left its journal"),
+    ],
+    ids=["scheduled", "too-large", "journal"],
+)
+def test_windows_databases_step_shows_the_shared_table(facts, encrypt, cancel, phrase):
+    result = windows_page(windows_status({**DB_OFF, **facts}))
+    assert ("Encrypt databases" in result["buttons"]) is encrypt
+    assert ("Cancel" in result["buttons"]) is cancel
+    assert phrase in result["text"]
+
+
+def test_windows_databases_done_says_on_with_no_count():
+    result = windows_page(windows_status(DB_ON))
+    assert "Database encryption: on" in result["text"]
+    assert "Encrypt databases" not in result["buttons"]

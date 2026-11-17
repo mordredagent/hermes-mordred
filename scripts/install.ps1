@@ -136,10 +136,10 @@ try {
     if ($Source -and $Version) { throw 'Choose -Source or -Version, not both.' }
     if ($Source) {
         $resolvedSource = (Get-Item -LiteralPath $Source -ErrorAction Stop).FullName
-        $package = "${resolvedSource}[keyvault,extension]"
+        $package = "${resolvedSource}[keyvault,dbcrypt,extension]"
     } elseif ($Version) {
         if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:[ab]|rc)?[0-9]*(?:\.post[0-9]+)?$') { throw '-Version must be an exact release pin.' }
-        $package = "hermes-mordred[keyvault,extension]==$Version,>=0.1.0a16"
+        $package = "hermes-mordred[keyvault,dbcrypt,extension]==$Version,>=0.1.0a16"
     } else {
         throw 'Specify an exact -Version release pin or -Source checkout/wheel. Unpublished port acceptance requires -Source.'
     }
@@ -174,7 +174,7 @@ result = []
 for line in m.requires('hermes-mordred') or []:
  r = Requirement(line)
  if r.name.lower().replace('_', '-') in ('hermes-agent', 'hermes-mordred'): continue
- if r.marker is None or any(r.marker.evaluate({'extra': e}) for e in ('', 'keyvault', 'extension')):
+ if r.marker is None or any(r.marker.evaluate({'extra': e}) for e in ('', 'keyvault', 'dbcrypt', 'extension')):
   r.marker = None
   result.append(str(r))
 print(json.dumps(result))

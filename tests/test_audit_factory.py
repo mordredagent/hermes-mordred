@@ -273,7 +273,7 @@ class TestSharedBuildAuditWriter:
 
     def test_delegates_to_make_audit_writer_with_log_bound_home(self, monkeypatch, tmp_path: Path) -> None:
         import mordred_hermes.privacy_check.audit as pc_audit
-        from mordred_hermes import _audit_support
+        from mordred_hermes._core import _audit_support
 
         seen: list[tuple[Path, Path]] = []
         sentinel = object()
@@ -298,12 +298,12 @@ def _clear_shared_writer_references() -> None:
     """Drop plugin-local references before resetting the owning registry."""
     import mordred_hermes.llm_guard as llm_guard
     import mordred_hermes.network as network
-    from mordred_hermes import _audit_support
+    from mordred_hermes._core import _audit_support
     from mordred_hermes.keyvault import extension_sign
     from mordred_hermes.privacy_check import _runtime
 
-    network._build_audit_writer.cache_clear()
-    llm_guard._build_audit_writer.cache_clear()
+    network._registration._build_audit_writer.cache_clear()
+    llm_guard._registration._build_audit_writer.cache_clear()
     extension_sign._audit_writer.cache_clear()
     _runtime.reset_state_for_tests()
     _audit_support._reset_audit_writer_registry_for_tests()
@@ -322,7 +322,7 @@ def test_shared_builder_normalizes_plaintext_writer_paths(
     clean_shared_writer_registry: None,
 ) -> None:
     """An uninitialized keyvault also gets one writer per physical path."""
-    from mordred_hermes import _audit_support
+    from mordred_hermes._core import _audit_support
 
     home = tmp_path / "home"
     log_path = home / "mordred" / "audit.log"
@@ -346,7 +346,7 @@ def test_shared_builder_preserves_final_symlink_for_writer_refusal(
     clean_shared_writer_registry: None,
 ) -> None:
     """Registry normalization must not resolve ``audit.log`` to its victim."""
-    from mordred_hermes import _audit_support
+    from mordred_hermes._core import _audit_support
 
     home = tmp_path / "home"
     mordred_dir = home / "mordred"
@@ -371,7 +371,7 @@ def test_shared_builder_rejects_conflicting_keyvault_homes(
     clean_shared_writer_registry: None,
 ) -> None:
     """One log path cannot silently inherit whichever keyvault home won first."""
-    from mordred_hermes import _audit_support
+    from mordred_hermes._core import _audit_support
 
     log_path = tmp_path / "audit" / "audit.log"
     first_home = tmp_path / "home-a"
@@ -390,7 +390,7 @@ def test_plaintext_writer_warns_when_in_process_keyvault_init_requires_restart(
     clean_shared_writer_registry: None,
 ) -> None:
     """Live references stay safe, but the plaintext lifetime is never silent."""
-    from mordred_hermes import _audit_support
+    from mordred_hermes._core import _audit_support
     from mordred_hermes.privacy_check import _keyvault_probe
 
     home = tmp_path / "home"
@@ -441,8 +441,8 @@ def test_all_plugin_factories_share_one_decryptable_mral_writer(
     monkeypatch.setattr(_identity, "resolve_backend", lambda _candidate: backend)
     monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: home)
 
-    network_writer = network._build_audit_writer(alias_path)
-    llm_writer = llm_guard._build_audit_writer(log_path)
+    network_writer = network._registration._build_audit_writer(alias_path)
+    llm_writer = llm_guard._registration._build_audit_writer(log_path)
     privacy_writer = _runtime.ensure_state(
         config_path=home / "config.yaml",
         audit_path=log_path,
@@ -455,8 +455,8 @@ def test_all_plugin_factories_share_one_decryptable_mral_writer(
 
     # A local memoizer reset must only drop that module's reference. The
     # process registry remains authoritative while other plugins are active.
-    network._build_audit_writer.cache_clear()
-    assert network._build_audit_writer(log_path) is network_writer
+    network._registration._build_audit_writer.cache_clear()
+    assert network._registration._build_audit_writer(log_path) is network_writer
 
     # Likewise, policy reload must retain the same active DEK rather than
     # constructing a writer that rotates the file out from under sibling hooks.

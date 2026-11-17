@@ -57,7 +57,7 @@ usage() {
 Usage: install.sh [OPTIONS]
 
 Install hermes-mordred into the Python environment owned by Hermes Agent.
-The platform extra (macos or keyvault) is selected automatically.
+The platform extras (macos, or keyvault and dbcrypt on Linux) are selected automatically.
 
 Options:
   --with-extension  Add the browser-extension server and Ethereum wallet extras.
@@ -121,7 +121,7 @@ add_requested_extra() {
       warn "${EXTRA_ERROR_PREFIX}the messaging extra was removed and is ignored"
       return
       ;;
-    macos | keyvault)
+    macos | keyvault | dbcrypt)
       fail "${EXTRA_ERROR_PREFIX}${extra} is selected automatically for the current platform; omit it from --extras"
       ;;
     dev | integration)
@@ -696,7 +696,7 @@ main() {
       platform_extra='macos'
       ;;
     Linux)
-      platform_extra='keyvault'
+      platform_extra='keyvault,dbcrypt'
       ;;
     *)
       fail "unsupported platform ${platform}; Mordred currently supports macOS and Linux"

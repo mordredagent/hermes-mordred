@@ -8,9 +8,9 @@ from datetime import date
 
 import pytest
 
-from mordred_hermes import _audit_io as audit
-from mordred_hermes import _log_rotation as rotation
 from mordred_hermes import _private_fs as fs
+from mordred_hermes._core import _audit_io as audit
+from mordred_hermes._core import _log_rotation as rotation
 from tests.test_audit_session import audit_path as audit_path_fixture  # noqa: F401
 
 

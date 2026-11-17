@@ -9,6 +9,7 @@ __pycache__/
 .mypy_cache/
 .dmypy.json
 .ruff_cache/
+.import_linter_cache/
 build/
 dist/
 *.egg

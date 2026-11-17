@@ -69,19 +69,19 @@ class TestReadPolicyModeFailClosed:
     """
 
     def test_absent_file_stays_lenient(self, tmp_path: Any) -> None:
-        from mordred_hermes.llm_guard import _read_policy_mode
+        from mordred_hermes.llm_guard._registration import _read_policy_mode
 
         assert _read_policy_mode(tmp_path / "absent.json") == "lenient"
 
     def test_corrupt_file_is_strict(self, tmp_path: Any) -> None:
-        from mordred_hermes.llm_guard import _read_policy_mode
+        from mordred_hermes.llm_guard._registration import _read_policy_mode
 
         p = tmp_path / "policy.json"
         p.write_text("{not json", encoding="utf-8")
         assert _read_policy_mode(p) == "strict"
 
     def test_invalid_mode_is_strict(self, tmp_path: Any) -> None:
-        from mordred_hermes.llm_guard import _read_policy_mode
+        from mordred_hermes.llm_guard._registration import _read_policy_mode
 
         p = tmp_path / "policy.json"
         p.write_text('{"policy": "garbage"}', encoding="utf-8")
@@ -145,7 +145,7 @@ class TestRegisterEntryPoint:
                 ),
                 encoding="utf-8",
             )
-            monkeypatch.setattr(guard, "DEFAULT_POLICY_JSON_PATH", policy)
+            monkeypatch.setattr(guard._registration, "DEFAULT_POLICY_JSON_PATH", policy)
 
             guard.register(_FakeCtx())
 
@@ -169,11 +169,11 @@ class TestRegisterEntryPoint:
         primary aborts the session even when the active provider would
         otherwise pass enforce's allowlist check.
         """
-        from mordred_hermes.llm_guard import (
+        from mordred_hermes.llm_guard import register
+        from mordred_hermes.llm_guard._registration import (
             _on_session_start_auxiliary,
             _on_session_start_enforce,
             _on_session_start_harness,
-            register,
         )
         from mordred_hermes.privacy_check.hooks import check_plugin_integrity
 
@@ -202,7 +202,8 @@ class TestRegisterEntryPoint:
         makes strict-mode policy authoritative against the live request,
         not just the persisted files.
         """
-        from mordred_hermes.llm_guard import _on_pre_api_request_enforce, register
+        from mordred_hermes.llm_guard import register
+        from mordred_hermes.llm_guard._registration import _on_pre_api_request_enforce
 
         ctx = _FakeCtx()
         register(ctx)
@@ -233,7 +234,7 @@ class TestSessionStartEnforceIsAuditOnly:
         from pathlib import Path
 
         import mordred_hermes.llm_guard as guard
-        from mordred_hermes.llm_guard import _on_session_start_enforce
+        from mordred_hermes.llm_guard._registration import _on_session_start_enforce
 
         tmp = Path(str(tmp_path))
         policy = tmp / "policy.json"
@@ -256,12 +257,12 @@ class TestSessionStartEnforceIsAuditOnly:
         from typing import Any, cast
 
         mp = cast(Any, monkeypatch)
-        mp.setattr(guard, "DEFAULT_POLICY_JSON_PATH", policy)
-        mp.setattr(guard, "DEFAULT_CONFIG_PATH", config_yaml)
-        mp.setattr(guard, "DEFAULT_AUTH_JSON_PATH", auth_json)
-        mp.setattr(guard, "DEFAULT_AUDIT_PATH", audit_log)
+        mp.setattr(guard._registration, "DEFAULT_POLICY_JSON_PATH", policy)
+        mp.setattr(guard._registration, "DEFAULT_CONFIG_PATH", config_yaml)
+        mp.setattr(guard._registration, "DEFAULT_AUTH_JSON_PATH", auth_json)
+        mp.setattr(guard._registration, "DEFAULT_AUDIT_PATH", audit_log)
         # Bypass the lru_cache so the test's audit path is honored.
-        guard._build_audit_writer.cache_clear()
+        guard._registration._build_audit_writer.cache_clear()
 
         # MUST NOT raise — disk says cloud-refused, but runtime override
         # may be coming via pre_api_request.
@@ -277,7 +278,7 @@ class TestSessionStartEnforceIsAuditOnly:
         from pathlib import Path
 
         import mordred_hermes.llm_guard as guard
-        from mordred_hermes.llm_guard import _on_session_start_enforce
+        from mordred_hermes.llm_guard._registration import _on_session_start_enforce
 
         tmp = Path(str(tmp_path))
         policy = tmp / "policy.json"
@@ -301,11 +302,11 @@ class TestSessionStartEnforceIsAuditOnly:
         from typing import Any, cast
 
         mp = cast(Any, monkeypatch)
-        mp.setattr(guard, "DEFAULT_POLICY_JSON_PATH", policy)
-        mp.setattr(guard, "DEFAULT_CONFIG_PATH", config_yaml)
-        mp.setattr(guard, "DEFAULT_AUTH_JSON_PATH", auth_json)
-        mp.setattr(guard, "DEFAULT_AUDIT_PATH", audit_log)
-        guard._build_audit_writer.cache_clear()
+        mp.setattr(guard._registration, "DEFAULT_POLICY_JSON_PATH", policy)
+        mp.setattr(guard._registration, "DEFAULT_CONFIG_PATH", config_yaml)
+        mp.setattr(guard._registration, "DEFAULT_AUTH_JSON_PATH", auth_json)
+        mp.setattr(guard._registration, "DEFAULT_AUDIT_PATH", audit_log)
+        guard._registration._build_audit_writer.cache_clear()
 
         # MUST NOT raise — local probe failure at session_start is
         # advisory now; pre_api_request will re-probe if runtime is local.
@@ -346,7 +347,7 @@ class TestResolveActiveProvider:
         """Stale auth.json must NOT override a concrete model.provider."""
         from pathlib import Path
 
-        from mordred_hermes.llm_guard import _resolve_active_provider
+        from mordred_hermes.llm_guard._registration import _resolve_active_provider
 
         auth = Path(str(tmp_path)) / "auth.json"
         cfg = Path(str(tmp_path)) / "config.yaml"
@@ -358,7 +359,7 @@ class TestResolveActiveProvider:
     def test_config_auto_falls_back_to_auth_json(self, tmp_path: object) -> None:
         from pathlib import Path
 
-        from mordred_hermes.llm_guard import _resolve_active_provider
+        from mordred_hermes.llm_guard._registration import _resolve_active_provider
 
         auth = Path(str(tmp_path)) / "auth.json"
         cfg = Path(str(tmp_path)) / "config.yaml"
@@ -370,7 +371,7 @@ class TestResolveActiveProvider:
     def test_config_missing_falls_back_to_auth_json(self, tmp_path: object) -> None:
         from pathlib import Path
 
-        from mordred_hermes.llm_guard import _resolve_active_provider
+        from mordred_hermes.llm_guard._registration import _resolve_active_provider
 
         auth = Path(str(tmp_path)) / "auth.json"
         cfg = Path(str(tmp_path)) / "config.yaml"  # never created
@@ -381,7 +382,7 @@ class TestResolveActiveProvider:
     def test_both_missing_returns_none(self, tmp_path: object) -> None:
         from pathlib import Path
 
-        from mordred_hermes.llm_guard import _resolve_active_provider
+        from mordred_hermes.llm_guard._registration import _resolve_active_provider
 
         auth = Path(str(tmp_path)) / "auth.json"  # absent
         cfg = Path(str(tmp_path)) / "config.yaml"  # absent
@@ -392,7 +393,7 @@ class TestResolveActiveProvider:
         """``model.provider: ""`` is unusable — fall back to auth.json."""
         from pathlib import Path
 
-        from mordred_hermes.llm_guard import _resolve_active_provider
+        from mordred_hermes.llm_guard._registration import _resolve_active_provider
 
         auth = Path(str(tmp_path)) / "auth.json"
         cfg = Path(str(tmp_path)) / "config.yaml"
@@ -406,7 +407,7 @@ class TestResolveActiveProvider:
         the strict gate / flagger key off the registry slug, not the alias."""
         from pathlib import Path
 
-        from mordred_hermes.llm_guard import _resolve_active_provider
+        from mordred_hermes.llm_guard._registration import _resolve_active_provider
 
         auth = Path(str(tmp_path)) / "auth.json"
         cfg = Path(str(tmp_path)) / "config.yaml"
@@ -418,7 +419,7 @@ class TestResolveActiveProvider:
         """An aliased ``auth.json active_provider`` (``google``) resolves to ``gemini``."""
         from pathlib import Path
 
-        from mordred_hermes.llm_guard import _resolve_active_provider
+        from mordred_hermes.llm_guard._registration import _resolve_active_provider
 
         auth = Path(str(tmp_path)) / "auth.json"
         cfg = Path(str(tmp_path)) / "config.yaml"
@@ -441,7 +442,7 @@ class TestReadAuthActiveProvider:
     def test_missing_file_returns_none(self, tmp_path: object) -> None:
         from pathlib import Path
 
-        from mordred_hermes.llm_guard import _read_auth_active_provider
+        from mordred_hermes.llm_guard._registration import _read_auth_active_provider
 
         auth = Path(str(tmp_path)) / "auth.json"  # never created
 
@@ -450,7 +451,7 @@ class TestReadAuthActiveProvider:
     def test_malformed_json_returns_none(self, tmp_path: object) -> None:
         from pathlib import Path
 
-        from mordred_hermes.llm_guard import _read_auth_active_provider
+        from mordred_hermes.llm_guard._registration import _read_auth_active_provider
 
         auth = Path(str(tmp_path)) / "auth.json"
         auth.write_text("{not valid json", encoding="utf-8")
@@ -461,7 +462,7 @@ class TestReadAuthActiveProvider:
         import json
         from pathlib import Path
 
-        from mordred_hermes.llm_guard import _read_auth_active_provider
+        from mordred_hermes.llm_guard._registration import _read_auth_active_provider
 
         auth = Path(str(tmp_path)) / "auth.json"
         auth.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
@@ -472,7 +473,7 @@ class TestReadAuthActiveProvider:
         import json
         from pathlib import Path
 
-        from mordred_hermes.llm_guard import _read_auth_active_provider
+        from mordred_hermes.llm_guard._registration import _read_auth_active_provider
 
         auth = Path(str(tmp_path)) / "auth.json"
         auth.write_text(json.dumps({"active_provider": 123}), encoding="utf-8")
@@ -483,7 +484,7 @@ class TestReadAuthActiveProvider:
         import json
         from pathlib import Path
 
-        from mordred_hermes.llm_guard import _read_auth_active_provider
+        from mordred_hermes.llm_guard._registration import _read_auth_active_provider
 
         auth = Path(str(tmp_path)) / "auth.json"
         auth.write_text(json.dumps({"active_provider": "   "}), encoding="utf-8")
@@ -494,7 +495,7 @@ class TestReadAuthActiveProvider:
         import json
         from pathlib import Path
 
-        from mordred_hermes.llm_guard import _read_auth_active_provider
+        from mordred_hermes.llm_guard._registration import _read_auth_active_provider
 
         auth = Path(str(tmp_path)) / "auth.json"
         auth.write_text(json.dumps({"active_provider": "  Anthropic  "}), encoding="utf-8")

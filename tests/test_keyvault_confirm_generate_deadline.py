@@ -14,6 +14,8 @@ from tests._keyvault_lifecycle_helpers import (
     _make_handle,
 )
 
+pytestmark = pytest.mark.usefixtures("fake_native_creation_receipts")
+
 
 @pytest.fixture
 def backend() -> FakeBackend:

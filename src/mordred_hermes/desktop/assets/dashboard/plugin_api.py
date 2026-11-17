@@ -115,7 +115,7 @@ except ImportError as _missing:  # Mordred is not in this environment
         # environment until Hermes restarts.
         command = [sys.executable, "-m", "hermes_cli.main", "pm", "install", "venv"]
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S603 - list argv, no shell
                 command,
                 capture_output=True,
                 text=True,

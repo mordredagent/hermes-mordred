@@ -51,7 +51,7 @@ class Probe:
 
     def pytest_runtest_call(self, item):
         phase("call", node=item.nodeid)
-        from mordred_hermes._home import hermes_home
+        from mordred_hermes._core._home import hermes_home
         # This hook runs only after collection and fixture setup, before the real HTTP body.
         home = hermes_home()
         (output / "called.json").write_text(json.dumps({

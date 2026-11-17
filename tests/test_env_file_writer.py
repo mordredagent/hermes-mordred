@@ -50,7 +50,7 @@ class TestDotEnvFileWriter:
         assert_private(env_path.parent, directory=True)
 
     def test_unreadable_existing_file_is_never_replaced(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        from mordred_hermes import _config_text_io
+        from mordred_hermes._core import _config_text_io
         from mordred_hermes.wizard.env_file_writer import DotEnvFileWriter
 
         env_path = tmp_path / ".env"
@@ -203,7 +203,7 @@ class TestDotEnvFileWriter:
         with two lines for the same key, the upsert must collapse them to
         a single line with the new value -- not preserve the duplicate.
 
-        Before the fix, _replace_or_strip_key rewrote every matching line
+        Before the fix, the upsert rewrote every matching line
         in place, leaving the duplicate intact (``KEY=new\\nKEY=new``).
         After the fix, only the first match is kept; subsequent matches
         are stripped.
@@ -288,7 +288,7 @@ class TestDotEnvFileWriter:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from mordred_hermes import _dotenv_io
+        from mordred_hermes._core import _dotenv_io
         from mordred_hermes.extension import api as extension_api
         from mordred_hermes.wizard import env_file_writer
 

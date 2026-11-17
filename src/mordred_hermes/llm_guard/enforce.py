@@ -32,9 +32,9 @@ from pathlib import Path
 from typing import Any, Final, TypeAlias
 from urllib.parse import urlsplit
 
-from .._audit_support import AuditWriter as _AuditWriter
-from .._audit_support import safe_audit_append
-from .._proxy_bypass import ensure_loopback_proxy_bypass as _ensure_loopback_proxy_bypass
+from .._core._audit_support import AuditWriter as _AuditWriter
+from .._core._audit_support import safe_audit_append
+from .._core._proxy_bypass import ensure_loopback_proxy_bypass as _ensure_loopback_proxy_bypass
 from . import health
 from ._cloud_endpoint import _CLOUD_ENDPOINT_HOSTS as _CLOUD_ENDPOINT_HOSTS
 from ._cloud_endpoint import _SDK_BASE_URL_ENV_VARS as _SDK_BASE_URL_ENV_VARS
@@ -92,7 +92,7 @@ class _InvalidLocalEndpoint(ValueError):
 def _safe_audit_append(audit: _AuditWriter, entry: Mapping[str, Any]) -> None:
     """Best-effort audit write binding this module's logger.
 
-    Thin wrapper over :func:`mordred_hermes._audit_support.safe_audit_append`
+    Thin wrapper over :func:`mordred_hermes._core._audit_support.safe_audit_append`
     (Codex review P1 round 6): the strict-mode refusal raises
     :class:`MordredSessionRefused` (``BaseException``-derived) and must still
     fire even if the audit write itself raises a plain ``Exception`` before

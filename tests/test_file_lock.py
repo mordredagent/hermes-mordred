@@ -1,6 +1,6 @@
 """Unit tests for the shared private-lockfile + ``flock`` primitive.
 
-Covers :mod:`mordred_hermes._file_lock` -- the pure-stdlib module that
+Covers :mod:`mordred_hermes._core._file_lock` -- the pure-stdlib module that
 single-sources the descriptor lifecycle four cross-process mutexes used to
 carry a near-verbatim copy of (``extension.pairing._state_lock``,
 ``_dotenv_io._dotenv_lock``,
@@ -39,8 +39,8 @@ from typing import Any, NoReturn, cast
 
 import pytest
 
-from mordred_hermes import _file_lock
-from mordred_hermes._file_lock import LOCK_MODE, private_flock
+from mordred_hermes._core import _file_lock
+from mordred_hermes._core._file_lock import LOCK_MODE, private_flock
 from tests._checked_fixture_helpers import file_symlink as file_symlink
 from tests._platform_test_helpers import posix_modes as posix_modes
 from tests._platform_test_helpers import rename_open_inode as rename_open_inode
@@ -279,7 +279,7 @@ def test_closes_the_descriptor_on_both_the_happy_and_failing_paths(tmp_path, loc
 
 
 def test_a_flock_failure_reaches_the_lock_handler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_model) -> None:
-    import mordred_hermes._file_lock as file_lock
+    import mordred_hermes._core._file_lock as file_lock
 
     def refuse(fd: int, operation: int) -> None:
         raise OSError(errno.ENOLCK, "no locks available")
@@ -297,7 +297,7 @@ def test_a_flock_failure_reaches_the_lock_handler(tmp_path: Path, monkeypatch: p
 def test_without_a_lock_handler_a_flock_failure_propagates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_model
 ) -> None:
-    import mordred_hermes._file_lock as file_lock
+    import mordred_hermes._core._file_lock as file_lock
 
     def refuse(fd: int, operation: int) -> None:
         raise OSError(errno.ENOLCK, "no locks available")
@@ -314,7 +314,7 @@ def test_unlock_errors_are_swallowed_only_when_asked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_model
 ) -> None:
     """``_wallet_file_lock`` swallows them so teardown cannot mask the real error."""
-    import mordred_hermes._file_lock as file_lock
+    import mordred_hermes._core._file_lock as file_lock
 
     real_flock = file_lock.fcntl.flock
 

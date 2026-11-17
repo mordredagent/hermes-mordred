@@ -184,7 +184,7 @@ def _stream(url: str, body: dict[str, Any], timeout: float) -> Iterator[str]:
     """
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     data = json.dumps({**body, "stream": True}).encode()
-    request = urllib.request.Request(url, data, {"content-type": "application/json"})
+    request = urllib.request.Request(url, data, {"content-type": "application/json"})  # noqa: S310 - loopback http endpoint checked by normalize_local_endpoint
     with opener.open(request, timeout=timeout) as response:
         if "text/event-stream" not in (response.headers.get("content-type") or ""):
             yield str(json.load(response)["choices"][0]["message"]["content"] or "")

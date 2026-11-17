@@ -17,11 +17,33 @@ mandatory-E2E platform. The second rule covers every send that has no inbound
 thread context to inherit — cron output, proactive notifications, agent-initiated
 messages — which otherwise left in cleartext into a ciphertext-only channel.
 Mordred's own needs-key notice is the sole exception (``e2e.control_notice_send``).
+
+The wrapper reaches the live adapter class through three layers, strongest
+first:
+
+1. :func:`install_registry_hook` (at plugin registration) wraps
+   ``gateway.platform_registry.PlatformRegistry.create_adapter``. Hermes runs
+   plugin discovery before the gateway creates any adapter, so every Slack /
+   Discord adapter the registry builds has a wrapped class before it connects —
+   including the window before the first inbound message, when cron delivery
+   already sends through the live adapter. A Slack/Discord adapter whose class
+   cannot be wrapped is withheld (``None``) rather than run unprotected.
+2. :func:`wrap_live_adapters` (on every inbound ``pre_gateway_dispatch``) wraps
+   the classes of the adapters the gateway actually holds, for builds whose
+   gateway bypasses the registry.
+3. :func:`install_outbound_patches` (at plugin registration) wraps statically
+   importable adapter modules; a compatibility fallback only, since Hermes 0.19
+   loads the platform plugins under a synthetic ``hermes_plugins.*`` package.
+
+This module covers the live adapter's ``send`` only. The required common-seam
+standalone tool/cron guard is installed by :mod:`standalone_outbound`. Edits and
+other live-adapter methods remain outside these wrappers (SPEC.md).
 """
 
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 from typing import Any
 
@@ -34,6 +56,7 @@ _patched: set[str] = set()
 
 _LOCKED_NOTICE = "🔒 (暗号化できないため本文を送信できませんでした)"
 _CONTEXT_UNAVAILABLE = "mordred_encrypt_context_unavailable"
+_SEND_FAILED = "mordred_encrypt_send_failed"
 
 
 def _SendResult() -> Any:
@@ -129,46 +152,46 @@ def _wrap_slack(cls: Any) -> None:
 # --- Discord ---------------------------------------------------------------
 
 
-async def _discord_encrypted_send(self: Any, chat_id: str, content: str, thread_id: str | None, ids: list[str]) -> Any:
+async def _discord_encrypted_send(self: Any, channel: Any, content: str, thread_id: str | None, ids: list[str]) -> Any:
     SendResult = _SendResult()
-    tid = thread_id or chat_id
-    channel = self._client.get_channel(int(tid))
-    if not channel:
-        channel = await self._client.fetch_channel(int(tid))
-    if not channel:
-        return SendResult(success=False, error=f"Channel {tid} not found")
-
-    # Include the parent channel id in the key lookup (threads inherit the key).
-    parent = None
-    try:
-        _p = getattr(channel, "parent_id", None) or getattr(getattr(channel, "parent", None), "id", None)
-        if _p:
-            parent = str(_p)
-    except Exception:
-        parent = None
-    lookup = [x for x in {*ids, parent or ""} if x]
+    tid = ids[0]
 
     kid = None
-    for cid in lookup:
-        kid = e2e.outbound_key_id("discord", cid, thread_id)
-        if kid:
-            break
+    try:
+        for cid in ids:
+            kid = e2e.outbound_key_id("discord", cid, thread_id)
+            # A missing kid with bindings means ambiguity, not permission to
+            # inherit a different key. Only an unbound candidate may fall back.
+            if kid or e2e.bound_channel_key_ids("discord", cid):
+                break
+    except Exception:
+        return SendResult(success=False, error="mordred_encrypt_unavailable")
     key = e2e.reply_key(kid)
     if key is None:
         return SendResult(success=False, error="mordred_encrypt_unavailable")
 
     mids: list[str] = []
-    for chunk in e2e.encrypt_reply(
-        key,
-        content,
-        self.MAX_MESSAGE_LENGTH,
-        e2e.DISCORD_MENTION_PREFIX_RE,
-        platform="discord",
-        chat_id=str(tid),
-        thread_root=thread_id,
-    ):
-        msg = await channel.send(chunk)
-        mids.append(str(msg.id))
+    try:
+        for chunk in e2e.encrypt_reply(
+            key,
+            content,
+            self.MAX_MESSAGE_LENGTH,
+            e2e.DISCORD_MENTION_PREFIX_RE,
+            platform="discord",
+            chat_id=str(tid),
+            thread_root=thread_id,
+        ):
+            msg = await channel.send(chunk)
+            mids.append(str(msg.id))
+    except Exception as exc:
+        # Gateway callers do not catch raw send errors (discord.HTTPException, a
+        # forum channel with no ``send``). Chunks already posted stay posted, and
+        # this wrapper does not fall back to plaintext. Hermes callers outside the
+        # adapter can: cron retries a failed result through the standalone sender,
+        # whose common seam is guarded separately. Log only the type: exception text is
+        # platform-controlled and may echo the payload.
+        logger.warning("mordred_e2e: Discord encrypted send failed after %d chunks: %s", len(mids), type(exc).__name__)
+        return SendResult(success=False, error=_SEND_FAILED, raw_response={"message_ids": mids})
     return SendResult(success=True, message_id=mids[0] if mids else None, raw_response={"message_ids": mids})
 
 
@@ -182,11 +205,20 @@ def _wrap_discord(cls: Any) -> None:
             try:
                 raw_thread_id = (metadata or {}).get("thread_id")
                 thread_id = str(raw_thread_id) if raw_thread_id not in (None, "") else None
-                # Only the ids this call carries. A Discord thread inherits its
-                # parent's key, but the parent is resolved from the live client
-                # inside _discord_encrypted_send, so a proactive send addressed
-                # to a bare thread id can still miss the channel-binding rule.
-                ids = [x for x in {str(chat_id), str(thread_id or "")} if x]
+                tid = thread_id or str(chat_id)
+                # This must precede the plaintext path: a parent binding is only
+                # discoverable from the live channel, so an unresolved destination
+                # cannot be treated as unbound. Every send pays for it, and on a
+                # cache miss orig_send fetches the channel a second time.
+                channel = self._client.get_channel(int(tid))
+                if channel is None:
+                    channel = await self._client.fetch_channel(int(tid))
+                if channel is None:
+                    raise ValueError("Discord destination unavailable")
+                parent = getattr(channel, "parent_id", None) or getattr(getattr(channel, "parent", None), "id", None)
+                # Destination first, then the supplied channel and inherited key.
+                # Parent discovery must not change the reply context or v3 AAD.
+                ids = list(dict.fromkeys(str(x) for x in (tid, chat_id, parent) if x is not None and x != ""))
                 encrypted = any(e2e.outbound_must_encrypt("discord", x, thread_id) for x in ids)
             except Exception as exc:
                 # As with Slack, an indeterminate encryption context is a send
@@ -195,7 +227,7 @@ def _wrap_discord(cls: Any) -> None:
                 SendResult = _SendResult()
                 return SendResult(success=False, error=_CONTEXT_UNAVAILABLE)
             if encrypted:  # fail-closed
-                return await _discord_encrypted_send(self, chat_id, content, thread_id, ids)
+                return await _discord_encrypted_send(self, channel, content, thread_id, ids)
         return await orig_send(self, chat_id, content, reply_to, metadata)
 
     send.__mordred_wrapped__ = True  # type: ignore[attr-defined]
@@ -263,6 +295,114 @@ def live_adapter_for(gateway: Any, platform: str, profile: str | None = None) ->
     return None
 
 
+def _wrap_adapter_class(name: str, adapter: Any) -> bool:
+    """Wrap ``type(adapter).send`` when ``name`` is a mandatory-E2E platform.
+
+    Shared by the create-time registry hook and the dispatch-time live wrap so
+    both keep ``_patched`` consistent. Returns ``True`` only when this call
+    installed the wrapper; ``False`` for other platforms, a ``None`` adapter,
+    a class that is already wrapped (or has no ``send``), or a class that
+    silently kept its original ``send``. Only a verified wrap is recorded in
+    ``_patched`` or logged as installed. Wrapping errors propagate: each caller
+    decides how to fail closed.
+    """
+    wrap = _WRAPPERS.get(name)
+    if wrap is None or adapter is None:
+        return False
+    cls = type(adapter)
+    send = getattr(cls, "send", None)
+    if send is None or getattr(send, "__mordred_wrapped__", False):
+        _patched.add(name)
+        return False
+    wrap(cls)
+    if not getattr(getattr(cls, "send", None), "__mordred_wrapped__", False):
+        return False
+    _patched.add(name)
+    logger.info("mordred_e2e: wrapped %s.%s.send for outbound E2E", cls.__module__, cls.__name__)
+    return True
+
+
+def _guard_created_adapter(name: Any, adapter: Any) -> Any:
+    """Return ``adapter`` with a wrapped ``send``, or ``None`` (fail closed).
+
+    Other platforms and a ``None`` result pass through untouched. A Slack or
+    Discord adapter whose class cannot be wrapped is withheld: the gateway then
+    treats the platform as "adapter creation failed" instead of connecting an
+    adapter that would send cleartext into key-bound channels. Logs carry only
+    the platform name — never the config, tokens or exception text.
+    """
+    if adapter is None:
+        return None
+    try:
+        # Same normalisation as wrap_live_adapters: a Platform enum member
+        # must not become "platform.slack" and slip past the guard.
+        platform = str(getattr(name, "value", name) or "").lower()
+    except Exception:
+        logger.error("mordred_e2e: refusing an adapter with an unreadable platform name")
+        return None
+    if platform not in _WRAPPERS:
+        return adapter
+    try:
+        _wrap_adapter_class(platform, adapter)
+        send = getattr(type(adapter), "send", None)
+        wrapped = bool(send is not None and getattr(send, "__mordred_wrapped__", False))
+        failure = "send still unwrapped"
+    except Exception as exc:
+        wrapped = False
+        failure = type(exc).__name__
+    if not wrapped:
+        logger.error(
+            "mordred_e2e: refusing the %s adapter: outbound E2E wrapper could not be installed (%s)",
+            platform,
+            failure,
+        )
+        return None
+    return adapter
+
+
+def install_registry_hook() -> bool:
+    """Wrap Slack/Discord adapters as the gateway's platform registry creates them.
+
+    Hermes builds plugin platforms through the module singleton
+    ``gateway.platform_registry.platform_registry.create_adapter`` and runs
+    plugin discovery (hence this plugin's ``register``) before the first
+    ``_create_adapter`` call, so patching the class method here guarantees
+    every Slack/Discord adapter instance has a wrapped class before it
+    connects. Without it the class was only wrapped on the first inbound
+    message, and cron output delivered through the live adapter before then
+    went out in cleartext.
+
+    Returns ``False`` when the registry is not importable (non-gateway
+    processes, tests without Hermes) or has no ``create_adapter``. Idempotent:
+    the marker lives on the patched function itself, so a re-imported registry
+    module is hooked afresh while a repeated call never double-wraps.
+    """
+    import importlib
+
+    try:
+        # import_module (not ``import a.b``) so the sys.modules entry wins over
+        # a stale ``gateway.platform_registry`` attribute on the package.
+        registry_module = importlib.import_module("gateway.platform_registry")
+    except ImportError:
+        return False
+    registry_cls = getattr(registry_module, "PlatformRegistry", None)
+    orig_create = getattr(registry_cls, "create_adapter", None)
+    if registry_cls is None or orig_create is None:
+        return False
+    if getattr(orig_create, "__mordred_wrapped__", False):
+        return True
+
+    @functools.wraps(orig_create)
+    def create_adapter(self: Any, name: Any, config: Any, *args: Any, **kwargs: Any) -> Any:
+        adapter = orig_create(self, name, config, *args, **kwargs)
+        return _guard_created_adapter(name, adapter)
+
+    create_adapter.__mordred_wrapped__ = True  # type: ignore[attr-defined]
+    registry_cls.create_adapter = create_adapter
+    logger.debug("mordred_e2e: platform registry hook installed for outbound E2E")
+    return True
+
+
 def wrap_live_adapters(gateway: Any, profile: str | None = None) -> list[str]:
     """Wrap the ``send`` of the adapter classes the gateway ACTUALLY built.
 
@@ -284,18 +424,8 @@ def wrap_live_adapters(gateway: Any, profile: str | None = None) -> list[str]:
     for plat, adapter in _live_adapter_items(gateway, profile):
         try:
             name = str(getattr(plat, "value", plat) or "").lower()
-            wrap = _WRAPPERS.get(name)
-            if wrap is None or adapter is None:
-                continue
-            cls = type(adapter)
-            send = getattr(cls, "send", None)
-            if send is None or getattr(send, "__mordred_wrapped__", False):
-                _patched.add(name)
-                continue
-            wrap(cls)
-            _patched.add(name)
-            installed.append(name)
-            logger.info("mordred_e2e: wrapped %s.%s.send for outbound E2E", cls.__module__, cls.__name__)
+            if _wrap_adapter_class(name, adapter):
+                installed.append(name)
         except BaseException:
             # Adapter objects and classes come from third-party plugins. Treat
             # even hostile descriptors/metaclasses as an unwrappable adapter;
@@ -322,11 +452,14 @@ def live_adapter_is_wrapped(gateway: Any, platform: str, profile: str | None = N
 
 
 def install_outbound_patches() -> list[str]:
-    """Best-effort wrap of statically importable adapters (pre-gateway fallback).
+    """Best-effort wrap of statically importable adapters (compatibility fallback).
 
-    Kept for builds that DO expose the adapters as ordinary modules. The
-    authoritative path is :func:`wrap_live_adapters`, driven from the live
-    gateway once its adapters exist.
+    Kept for builds that DO expose the adapters as ordinary modules. Hermes
+    0.19 loads Slack/Discord as ``hermes_plugins.<slug>`` directory plugins, so
+    on such builds these imports reach a different class object than the one
+    the gateway instantiates. The authoritative paths are
+    :func:`install_registry_hook` (every adapter the registry creates) and
+    :func:`wrap_live_adapters` (the adapters a live gateway holds).
     """
     import importlib
 

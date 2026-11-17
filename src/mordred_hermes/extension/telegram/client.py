@@ -929,7 +929,3 @@ async def sync_archive(
         raise
     state.finished_at = index.last_sync
     return state
-
-
-def empty_index() -> ArchiveIndex:
-    return ArchiveIndex()

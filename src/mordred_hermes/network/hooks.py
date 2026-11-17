@@ -34,11 +34,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final, NoReturn, cast
 
-from .._audit_support import AuditWriter as _AuditWriter
-from .._audit_support import safe_audit_append
-from .._policy_io import load_policy_mapping
-from .._policy_types import VALID_ACTIVE_PATHS, ActivePath, PolicyMode
-from .._provider_resolution import (
+from .._core._audit_support import AuditWriter as _AuditWriter
+from .._core._audit_support import safe_audit_append
+from .._core._policy_io import load_policy_mapping
+from .._core._policy_types import VALID_ACTIVE_PATHS, ActivePath, PolicyMode
+from .._core._provider_resolution import (
     read_auth_active_provider,
     read_config_model_provider,
     resolve_disk_provider,
@@ -258,7 +258,7 @@ def _reuse_frozen_route(
     """Validate the activation fingerprint and reuse the process route."""
     try:
         # Compare every activation input before mutating the runtime's policy.
-        from . import _load_runtime_config
+        from ._registration import _load_runtime_config
 
         current_config = _load_runtime_config(
             policy_json_path=policy_json_path,
@@ -457,7 +457,7 @@ def pre_api_request(
             else cast(ActivePath, _read_default_network_path_strict(config_path))
         )
         stage = "activation_config"
-        from . import _load_runtime_config
+        from ._registration import _load_runtime_config
 
         current_config = _load_runtime_config(
             policy_json_path=policy_json_path,
@@ -561,7 +561,7 @@ def pre_tool_call(
             else cast(ActivePath, _read_default_network_path_strict(config_path))
         )
         stage = "activation_config"
-        from . import _load_runtime_config
+        from ._registration import _load_runtime_config
 
         current_config = _load_runtime_config(
             policy_json_path=policy_json_path,
@@ -663,7 +663,7 @@ def wait_until_ready(*, timeout: float = 5.0, poll_interval: float = 0.05) -> bo
 def _safe_audit_append(audit: _AuditWriter, entry: Mapping[str, Any]) -> None:
     """Best-effort audit append binding this module's logger.
 
-    Thin wrapper over :func:`mordred_hermes._audit_support.safe_audit_append`
+    Thin wrapper over :func:`mordred_hermes._core._audit_support.safe_audit_append`
     -- a strict-mode refusal must still raise even if the audit write fails
     (disk full, permission denied, etc.).
     """

@@ -20,7 +20,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import _self_update as core
+from .._core import _self_update as core
 from . import _term
 
 EXIT_OK = 0

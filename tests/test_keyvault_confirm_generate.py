@@ -24,6 +24,8 @@ from tests._keyvault_lifecycle_helpers import (
     _make_handle,
 )
 
+pytestmark = pytest.mark.usefixtures("fake_native_creation_receipts")
+
 # ============================ confirm_generate (durable phase) ============================
 #
 # Contract frozen in SPEC.md §"PR4 API contract / Two-phase generate" +

@@ -24,7 +24,7 @@ import logging
 import threading
 from typing import Final
 
-from .._audit_support import safe_audit_append
+from .._core._audit_support import safe_audit_append
 
 __all__ = ["audit_capture_refused", "audit_capture_suspended", "audit_history_unavailable"]
 

@@ -711,7 +711,7 @@ class TestDecrypt:
 
     def test_decrypt_snapshot_waits_for_writer_sidecar(self, tmp_path: Path) -> None:
         """Readers never snapshot an append/rotation transaction mid-write."""
-        from mordred_hermes._audit_io import exclusive_audit_lock
+        from mordred_hermes._core._audit_io import exclusive_audit_lock
 
         active = tmp_path / "audit.log"
         active.write_bytes(b'{"fmt":"MRAL"}\ncomplete-entry\n')

@@ -218,7 +218,7 @@ _CAPABILITY_PREFIX = "capability."
 
 def _windows_checks() -> list[Check]:
     """Telegram checks plus one informational row per Windows capability; load-only."""
-    from .._home import hermes_home
+    from .._core._home import hermes_home
     from ._windows_gates import describe_capability
     from ._windows_status import capability_rows
 
@@ -536,7 +536,7 @@ WINDOWS_DONE = (
 
 def _ensure_windows_custody(input_fn: InputFn) -> bool:
     """Enrolled -> continue; not enrolled -> offer the explicit ceremony; anything else refuses."""
-    from .._home import hermes_home
+    from .._core._home import hermes_home
     from ._windows_gates import remedy
     from .keyvault_windows_cli import native_init
 
@@ -570,7 +570,7 @@ def _ensure_windows_custody(input_fn: InputFn) -> bool:
 
 def _ensure_windows_memory(input_fn: InputFn) -> bool:
     """The C6 Windows memory enable (capabilities -> gate -> ceremony -> proof -> lifecycle)."""
-    from .._home import hermes_home
+    from .._core._home import hermes_home
     from . import _windows_memory
 
     home = hermes_home()

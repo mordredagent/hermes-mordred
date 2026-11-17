@@ -49,12 +49,12 @@ class TestRegisterLoadsPolicyFromDisk:
         policy = _write_policy(tmp_path, "strict")
         config = _write_config(tmp_path, "tor")
         # Point register() at the synthetic config files.
-        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
-        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_CONFIG_PATH", config)
         # Prevent NDJSONWriter from writing to ~/.hermes by pointing at tmp.
-        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
         # Clear the lru_cache so the new audit path is honored.
-        net_pkg._build_audit_writer.cache_clear()
+        net_pkg._registration._build_audit_writer.cache_clear()
 
         ctx = _FakeCtx()
         net_pkg.register(ctx)
@@ -74,10 +74,10 @@ class TestRegisterLoadsPolicyFromDisk:
 
         policy = _write_policy(tmp_path, "lenient")
         config = _write_config(tmp_path, "vpn")
-        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
-        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config)
-        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
-        net_pkg._build_audit_writer.cache_clear()
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._registration._build_audit_writer.cache_clear()
 
         ctx = _FakeCtx()
         net_pkg.register(ctx)
@@ -98,11 +98,11 @@ class TestRegisterLoadsPolicyFromDisk:
         fake_profile = tmp_path / "fake-profile"
         policy = _write_policy(tmp_path, "off")
         config = _write_config(tmp_path, "clearnet")
-        monkeypatch.setattr(net_pkg, "HERMES_BASE", fake_profile)
-        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
-        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config)
-        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
-        net_pkg._build_audit_writer.cache_clear()
+        monkeypatch.setattr(net_pkg._registration, "HERMES_BASE", fake_profile)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._registration._build_audit_writer.cache_clear()
 
         ctx = _FakeCtx()
         net_pkg.register(ctx)
@@ -126,10 +126,10 @@ class TestRegisterLoadsPolicyFromDisk:
         policy = tmp_path / "policy.json"
         policy.write_text(json.dumps({"policy": []}))
         config = _write_config(tmp_path, "clearnet")
-        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
-        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config)
-        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
-        net_pkg._build_audit_writer.cache_clear()
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._registration._build_audit_writer.cache_clear()
 
         ctx = _FakeCtx()
         net_pkg.register(ctx)
@@ -144,10 +144,10 @@ class TestRegisterLoadsPolicyFromDisk:
         from mordred_hermes.network import api
 
         # policy.json absent
-        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", tmp_path / "absent.json")
-        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", tmp_path / "absent.yaml")
-        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
-        net_pkg._build_audit_writer.cache_clear()
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_POLICY_JSON_PATH", tmp_path / "absent.json")
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_CONFIG_PATH", tmp_path / "absent.yaml")
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._registration._build_audit_writer.cache_clear()
 
         ctx = _FakeCtx()
         net_pkg.register(ctx)
@@ -188,10 +188,10 @@ class TestRegisterLoadsWizardNetworkSettings:
         from mordred_hermes.network import api
 
         policy, config = self._seed(tmp_path)
-        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
-        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config)
-        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
-        net_pkg._build_audit_writer.cache_clear()
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._registration._build_audit_writer.cache_clear()
 
         ctx = _FakeCtx()
         net_pkg.register(ctx)
@@ -226,10 +226,10 @@ class TestRegisterLoadsWizardNetworkSettings:
             "plugins:\n  mordred_network:\n    default_path: clearnet\n",
             encoding="utf-8",
         )
-        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
-        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config_path)
-        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
-        net_pkg._build_audit_writer.cache_clear()
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_CONFIG_PATH", config_path)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._registration._build_audit_writer.cache_clear()
 
         ctx = _FakeCtx()
         net_pkg.register(ctx)
@@ -257,10 +257,10 @@ class TestRegisterLoadsVpnProvider:
         policy = _write_policy(tmp_path, "off")
         config_path = tmp_path / "config.yaml"
         config_path.write_text(config_body, encoding="utf-8")
-        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy)
-        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config_path)
-        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
-        net_pkg._build_audit_writer.cache_clear()
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_POLICY_JSON_PATH", policy)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_CONFIG_PATH", config_path)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._registration._build_audit_writer.cache_clear()
         net_pkg.register(_FakeCtx())
         runtime = api._RUNTIME
         assert runtime is not None
@@ -336,10 +336,10 @@ class TestRegisterLoadsDisableIPv6FromDisk:
         from mordred_hermes import network as net_pkg
         from mordred_hermes.network import api
 
-        monkeypatch.setattr(net_pkg, "DEFAULT_POLICY_JSON_PATH", policy_path)
-        monkeypatch.setattr(net_pkg, "DEFAULT_CONFIG_PATH", config_path)
-        monkeypatch.setattr(net_pkg, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
-        net_pkg._build_audit_writer.cache_clear()
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_POLICY_JSON_PATH", policy_path)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_CONFIG_PATH", config_path)
+        monkeypatch.setattr(net_pkg._registration, "DEFAULT_AUDIT_PATH", tmp_path / "audit.log")
+        net_pkg._registration._build_audit_writer.cache_clear()
 
         ctx = _FakeCtx()
         net_pkg.register(ctx)

@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mordred_hermes import _config_io as cio
+from mordred_hermes._core import _config_io as cio
 from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.extension.telegram import _windows_archive, hardening, secrets, service, store, tee
 from mordred_hermes.extension.telegram.memory_guard import MemoryEncryptionRequired
@@ -773,8 +773,8 @@ def test_ambiguous_forget_deletion_reports_the_reconcile_gap(wt, monkeypatch, ca
     seed(wt)
     real_delete = wt.backend.delete_enclave_key
 
-    def lost(key_id):
-        real_delete(key_id)
+    def lost(key_id, **kwargs):
+        real_delete(key_id, **kwargs)
         raise RuntimeError("native deletion result lost")
 
     monkeypatch.setattr(wt.backend, "delete_enclave_key", lost)

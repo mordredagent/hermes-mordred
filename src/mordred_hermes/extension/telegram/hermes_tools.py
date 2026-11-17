@@ -23,8 +23,9 @@ Hermes model itself may read it:
 fetches new mail into ``mordred.db`` and returns counts only, so it is not a
 reader tool (see that module).
 
-Opening the archive unseals the credentials through the Secure Enclave (Touch
-ID unless disabled), exactly like the CLI and the browser extension.
+Visibility checks inspect metadata only and never acquire database authority
+or unseal credentials. Foreground archive access uses the platform's existing
+Telegram credential role, independently of the shared database root authority.
 
 **Reader mode** (SPEC "Reader mode (requirement 7)"): once a session has read
 imported history it may no longer write files, run commands, send messages,
@@ -54,6 +55,8 @@ import logging
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+from ...keyvault._presence_hosts import hermes_presence
 
 _log = logging.getLogger(__name__)
 
@@ -125,7 +128,7 @@ def _configured_model() -> tuple[str | None, str | None]:
     try:
         from ruamel.yaml import YAML
 
-        from ..._home import hermes_home
+        from ..._core._home import hermes_home
 
         data = YAML(typ="safe").load(Path(hermes_home() / "config.yaml").read_text("utf-8"))
         section = data.get("model") if isinstance(data, dict) else None
@@ -164,7 +167,7 @@ def tools_available() -> bool:
 def _store_gate_open() -> bool:
     """The ``mordred.db`` protection gate passes for this Hermes home (offline; no Telethon, no unseal)."""
     try:
-        from ..._home import hermes_home
+        from ..._core._home import hermes_home
         from ...activity._gate import check_protection
 
         return check_protection(hermes_home()) is None
@@ -291,7 +294,8 @@ async def telegram_chats(
         return _reader_refusal()
     try:
         await _require_reader_allowed(parent_agent)
-        dialogs = await _service().dialogs()
+        with hermes_presence(session_id):
+            dialogs = await _service().dialogs()
     except Exception as exc:
         return _error(exc)
     return json.dumps(
@@ -347,7 +351,8 @@ async def telegram_ask(args: dict[str, Any], parent_agent: Any = None, session_i
     meta: list[Any] = []
     try:
         await _require_reader_allowed(parent_agent)
-        parts = [chunk async for chunk in _service().ask(request, meta.append)]
+        with hermes_presence(session_id):
+            parts = [chunk async for chunk in _service().ask(request, meta.append)]
     except Exception as exc:
         return _error(exc)
     info = meta[0] if meta else None
@@ -386,7 +391,8 @@ async def mordred_history_search(
         return json.dumps({"error": exc.code})
     try:
         await _require_reader_allowed(parent_agent)
-        result = await search_service(_service(), request)
+        with hermes_presence(session_id):
+            result = await search_service(_service(), request)
     except Exception as exc:
         return _error(exc)
     return json.dumps(

@@ -61,6 +61,7 @@ from .history import (
     ImportSink,
     ImportStoreOpener,
     dialog_rows,
+    ensure_history_authority,
     list_conversations,
     load_ask_records,
     open_history_store,
@@ -179,7 +180,7 @@ def _attach_evidence(
 
 def _label_language(home: Path) -> str:
     """``plugins.mordred_imports.label_language`` (``en`` / ``ja``); anything else is ``en``."""
-    from ..._yaml_io import load_plugin_section
+    from ..._core._yaml_io import load_plugin_section
 
     section = load_plugin_section(home / "config.yaml", "mordred_imports", catch=(Exception,)) or {}
     lang = section.get("label_language")
@@ -189,8 +190,8 @@ def _label_language(home: Path) -> str:
 def _audit(event: str, decision: str, **fields: Any) -> None:
     """Best-effort audit entry. Never includes content, names, or keys."""
     try:
-        from ..._audit_support import build_audit_writer, safe_audit_append
-        from ..._home import hermes_home
+        from ..._core._audit_support import build_audit_writer, safe_audit_append
+        from ..._core._home import hermes_home
 
         writer = build_audit_writer(hermes_home() / "mordred" / "audit.log")
         safe_audit_append(writer, {"event": event, "decision": decision, "reason": None, **fields}, logger=_log)
@@ -209,15 +210,15 @@ def check_llm_policy(backend: str, base_url: str) -> None:
     contains ``"venice"`` and ``allow_cloud_llm`` is true). There is no
     interactive prompt here: ``prompt-once`` fails closed.
     """
-    from ..._home import hermes_home
-    from ..._policy_io import read_policy_mode_fail_closed
+    from ..._core._home import hermes_home
+    from ..._core._policy_io import read_policy_mode_fail_closed
     from ...llm_guard import enforce
     from ...llm_guard._exceptions import MordredSessionRefused
 
     path = hermes_home() / "mordred" / "policy.json"
     mode = read_policy_mode_fail_closed(path, default="lenient", log=_log)
     try:
-        from ..._audit_support import build_audit_writer
+        from ..._core._audit_support import build_audit_writer
 
         writer = build_audit_writer(hermes_home() / "mordred" / "audit.log")
         enforce.check_runtime_provider(
@@ -333,7 +334,13 @@ class TelegramService:
     # -- helpers --------------------------------------------------------------
 
     async def _load_secrets(self, *, fresh: bool = False) -> TelegramSecrets | None:
-        return await asyncio.to_thread(self._secrets.load, fresh=fresh)
+        try:
+            return await asyncio.to_thread(self._secrets.load, fresh=fresh)
+        except BaseException:
+            from ...keyvault._presence import revoke_current
+
+            revoke_current()
+            raise
 
     def _archive(self, value: TelegramSecrets) -> ArchiveStore:
         return ArchiveStore(value.store_key, self._archive_root)
@@ -341,12 +348,12 @@ class TelegramService:
     def _profile_home(self) -> Path:
         if self._home is not None:
             return self._home
-        from ..._home import hermes_home
+        from ..._core._home import hermes_home
 
         return hermes_home()
 
     def _select_sink(self, store: ArchiveStore, index: ArchiveIndex) -> ArchiveSink | ImportSink:
-        """``ImportSink`` iff the index is retired to ``mordred.db``, or it is fresh on macOS and the gate passes."""
+        """``ImportSink`` iff the index is retired to ``mordred.db``, or it is fresh and the shared gate passes."""
         return select_sink(store, index, home=self._profile_home(), opener=self._import_store_opener)
 
     @property
@@ -407,6 +414,7 @@ class TelegramService:
         return dialog_rows(convs[:_MAX_DIALOGS_LISTED])
 
     async def dialogs(self) -> list[dict[str, Any]]:
+        await asyncio.to_thread(ensure_history_authority, self._profile_home())
         await asyncio.to_thread(self._memory_guard)
         value = await self._load_secrets()
         if value is None:
@@ -467,6 +475,7 @@ class TelegramService:
         try:
             if not self._installed():
                 raise TelegramServiceError("telegram_not_installed")
+            await asyncio.to_thread(ensure_history_authority, self._profile_home())
             await asyncio.to_thread(self._memory_guard)
             value = await self._load_secrets(fresh=True)
             if value is None:
@@ -490,6 +499,7 @@ class TelegramService:
 
     async def _run_sync(self, value: TelegramSecrets, store: ArchiveStore, lock: Any, options: SyncOptions) -> None:
         client: Any = None
+        revoked_session = False
         try:
             # Chosen before connecting: a retired index whose store refuses never reaches Telegram.
             index = await asyncio.to_thread(store.load_index)
@@ -508,13 +518,19 @@ class TelegramService:
                 messages=result.messages_imported,
             )
         except asyncio.CancelledError:
+            from ...keyvault._presence import revoke_current
+
+            revoke_current()
             self._last_error = "sync_cancelled"
             raise
         except Exception as exc:
             code = error_code(exc, "telegram_sync_failed")
             self._last_error = code
-            if code == "telegram_session_revoked":
-                await self._forget_revoked_session()
+            revoked_session = code == "telegram_session_revoked"
+            if revoked_session:
+                from ...keyvault._presence import revoke
+
+                revoke(home=self._profile_home())
             if code == "telegram_sync_failed":
                 # Type name only: an exception message or traceback locals
                 # could carry message text.
@@ -529,6 +545,12 @@ class TelegramService:
             except StoreError as exc:
                 # A classified lock-release failure is reported, never lost.
                 self._last_error = self._last_error or exc.code
+            else:
+                # A fresh credential update may await hardware authentication.
+                # The archive scope must actually exit before that unwrap;
+                # failed release defers this best-effort cleanup to a retry.
+                if revoked_session:
+                    await self._forget_revoked_session()
             finally:
                 self._progress.finished_at = int(time.time())
 
@@ -617,6 +639,7 @@ class TelegramService:
         given) receives the report.
         """
         question = validate_question(request.question)
+        await asyncio.to_thread(ensure_history_authority, self._profile_home())
         await asyncio.to_thread(self._memory_guard)
         # A fresh Enclave unwrap for every question; nothing is cached.
         value = await self._load_secrets(fresh=True)

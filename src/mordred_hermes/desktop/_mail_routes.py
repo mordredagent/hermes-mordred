@@ -1,4 +1,4 @@
-"""``/mail/*`` and ``/imports/status``: Desktop step 2.5, mail over IMAP (macOS; a sub-router of ``api.router``).
+"""``/mail/*`` and ``/imports/status``: Desktop step 2.5, mail over IMAP (a sub-router of ``api.router``).
 
 Setup (start, finish, cancel), the ``mail_fetch`` job and forget, through the
 mail library's seams in :mod:`._seams`; shared helpers (``sys``, ``_home``,
@@ -64,7 +64,7 @@ def _mail_error(exc: BaseException, allowed: frozenset[str], fallback: str) -> J
 
 async def _gate(*, memory: bool) -> JSONResponse | None:
     api = _api()
-    if api.sys.platform != "darwin":
+    if api.sys.platform not in {"darwin", "linux", "win32"}:
         refused: JSONResponse = api._error("unsupported_platform")
         return refused
     blocked: JSONResponse | None = await api._require_memory() if memory else None
@@ -109,7 +109,7 @@ async def mail_setup_start(request: Request) -> Any:
         or not isinstance(touch_id, bool)
     ):
         return _api()._error("invalid_body")
-    blocked = await _gate(memory=True)
+    blocked = await _gate(memory=False)
     if blocked is not None:
         return blocked
     try:
@@ -138,7 +138,7 @@ async def mail_setup_finish(flow_id: str, request: Request) -> Any:
     selection = body.get("selection")
     if not (selection is None or isinstance(selection, str)):
         return _api()._error("invalid_body")
-    blocked = await _gate(memory=True)
+    blocked = await _gate(memory=False)
     if blocked is not None:
         return blocked
     try:
@@ -224,7 +224,10 @@ async def mail_fetch(request: Request) -> Any:
         job.progress = {"message": "Fetching new mail… up to 10 minutes"}
         api._emit("progress", {"job_id": job.job_id, **job.progress})
         try:
-            data = await job.run_sync(fetch_mail, options, home)
+            from ..keyvault._presence_hosts import desktop_presence
+
+            with desktop_presence(request, "mail"):
+                data = await job.run_sync(fetch_mail, options, home)
         except Exception as exc:
             _log.warning("mordred desktop mail fetch failed (%s)", type(exc).__name__)
             raise api._Fail(_projections.MAIL_FETCH_FALLBACK) from None
@@ -243,7 +246,7 @@ async def mail_fetch(request: Request) -> Any:
 async def mail_forget(request: Request) -> Any:
     """Body ``{"rows": bool, "account"?: label, "confirm"?: "delete my data"}``.
 
-    Removes the sealed credentials, the flags and the Enclave key; ``rows``
+    Removes the sealed credentials, the flags and the native mail key; ``rows``
     also deletes every message imported under the account (Takeout imports
     included) and needs the typed phrase, checked before anything is read.
     Pending setup flows are cancelled first. Answers ``{"ok": true,

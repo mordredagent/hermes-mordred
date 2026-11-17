@@ -4,7 +4,7 @@ from contextlib import ExitStack, contextmanager
 
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from mordred_hermes import _audit_session, _config_io
+from mordred_hermes._core import _audit_session, _config_io
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault import _windows_custody, windows_audit
 from tests._keyvault_fakes import FakeBackend

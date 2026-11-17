@@ -66,21 +66,21 @@ from typing import TYPE_CHECKING, Any, Final
 
 from cryptography.exceptions import InvalidTag
 
-from .._audit_io import (
+from .._core._audit_io import (
     audit_path_stat as _audit_path_stat,
 )
-from .._audit_io import (
+from .._core._audit_io import (
     exclusive_audit_lock as _exclusive_audit_lock,
 )
-from .._audit_io import (
+from .._core._audit_io import (
     open_audit_file as _open_audit_file,
 )
-from .._audit_io import (
+from .._core._audit_io import (
     read_first_line as _read_first_line,
 )
-from .._log_rotation import rotate_and_compress as _rotate_and_compress
-from .._log_rotation import today_utc_date as _today_utc_date
-from .._log_rotation import utcnow_iso as _utcnow_iso
+from .._core._log_rotation import rotate_and_compress as _rotate_and_compress
+from .._core._log_rotation import today_utc_date as _today_utc_date
+from .._core._log_rotation import utcnow_iso as _utcnow_iso
 from . import _native_key_id, _storage
 from ._exceptions import WrapAuthCancelled, WrapError, WrapKeyNotFound
 from .crypto import decrypt as _aes_decrypt
@@ -474,7 +474,7 @@ class EncryptedWriter:
         No longer merely *mirrors*
         :class:`mordred_hermes.privacy_check.audit.NDJSONWriter`'s rotation —
         the two byte-for-byte identical bodies are now the one
-        :func:`mordred_hermes._log_rotation.rotate_and_compress`: same-day
+        :func:`mordred_hermes._core._log_rotation.rotate_and_compress`: same-day
         collisions get an ``.N`` suffix; a gzip failure keeps the un-gzipped
         rotated file rather than losing data. This module's own ``_LOG`` is
         passed in, so that warning still reports under

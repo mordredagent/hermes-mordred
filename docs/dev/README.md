@@ -3,6 +3,9 @@
 Start with [`setup.md`](./setup.md) for the editable environment and safe local
 validation. This index lists every maintained developer document; completed
 design diaries and upstream snapshots remain available through Git history.
+Dated design records (specs, plans and one investigation record) retained under
+`docs/superpowers/` explain past decisions; their old checkboxes and platform
+claims do not override current SPEC/PLAN, TODO or CI evidence.
 
 ## Current sources of truth
 
@@ -14,11 +17,12 @@ design diaries and upstream snapshots remain available through Git history.
 | [`TODO.md`](./TODO.md) | Actionable work for the current release |
 | [`ROADMAP.md`](./ROADMAP.md) | Deferred work and its prerequisites |
 | [`CI.md`](./CI.md) | CI, branching, release, and changelog policy |
+| [`VALIDATION_LOG.md`](./VALIDATION_LOG.md) | Append-only live-device, native and model validation results (split from CI.md) |
 | [`PATHS.md`](./PATHS.md) | Every filesystem path Mordred reads or manages |
 | [`POLICY.md`](./POLICY.md) | Policy schema, decisions, and audit reason codes |
 | [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) | Consumed Hermes hook fields and drift validation |
 | [`SLACK_E2E.md`](./SLACK_E2E.md) | Gateway `ENC:v3` wire and mandatory-E2E behavior |
-| [`STATE_DB_ENCRYPTION.md`](./STATE_DB_ENCRYPTION.md) | macOS SQLite encryption: implemented lifecycle, scope, recovery and remaining work |
+| [`STATE_DB_ENCRYPTION.md`](./STATE_DB_ENCRYPTION.md) | Original macOS format and lifecycle notes, with links to the shared database rollout |
 | [`UPSTREAM.md`](./UPSTREAM.md) | Hermes compatibility and the zero-PR commitment |
 
 ## Operational and design references
@@ -29,11 +33,25 @@ design diaries and upstream snapshots remain available through Git history.
 | [`UBUNTU_MANUAL_INSTALL_NOTES.md`](./UBUNTU_MANUAL_INSTALL_NOTES.md) | Observed Ubuntu Desktop/TPM installation issues and remedies |
 | [`WINDOWS_CONFIG_IO.md`](./WINDOWS_CONFIG_IO.md) | Canonical Windows configuration API, ownership and verification |
 | [`WINDOWS_AUDIT_IO.md`](./WINDOWS_AUDIT_IO.md) | Opt-in checked audit sessions, bounded rotation, and validation |
+| [Cross-platform database encryption design](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md) | Shared SQLCipher architecture delivered in #270; remaining AWS native acceptance boundaries |
 
 When prose and code disagree, the typed implementation, tests, CLI parser, and
 machine contracts named by the relevant document take precedence. Correct the
 prose in the same change; do not preserve superseded guidance in the working
 tree solely as history.
+
+## Reading by task
+
+- Installation and operation: [Quickstart](../user/QUICKSTART.md),
+  [Usage](../user/USAGE.md), [Telegram](../user/TELEGRAM.md) and
+  [Extension](../user/EXTENSION.md).
+- Selecting work: [TODO triage](TODO.md#current-triage); use ROADMAP only for
+  deferred scope. Detailed component entries own the remaining work.
+- Changing behavior: SPEC for the contract, PLAN for the implementation map,
+  PATHS for storage ownership, and CI for the required validation.
+- Assessing readiness: distinguish merged code from dated native/live evidence
+  in [the validation log](VALIDATION_LOG.md#manual-live-device-validation-log). A historical run does not
+  certify a later revision or a different platform.
 
 ## Maintenance rules
 

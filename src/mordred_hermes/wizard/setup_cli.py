@@ -153,7 +153,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .._home import hermes_home as _hermes_home
+from .._core._home import hermes_home as _hermes_home
 from ..keyvault._identity import resolve_root
 from ..keyvault._memory_hook import memory_marker_path, memory_optout_marker_path
 from ..keyvault._runtime_env import _env_optout_marker_path
@@ -293,7 +293,7 @@ def _probe_hermes(*, home: Path) -> tuple[bool, str]:
     """
     import shutil
 
-    from .._yaml_io import load_yaml_mapping
+    from .._core._yaml_io import load_yaml_mapping
 
     has_hermes = shutil.which("hermes") is not None
     config_path = home / "config.yaml"
@@ -404,7 +404,7 @@ def _probe_configure(*, policy_writer: PolicyWriter) -> tuple[bool, str]:
     if not policy_writer.policy_json_path.exists():
         return False, "policy.json does not exist yet"
 
-    from .._yaml_io import load_plugin_section, load_yaml_mapping
+    from .._core._yaml_io import load_plugin_section, load_yaml_mapping
     from ..privacy_check._runtime import SIBLING_PLUGINS
 
     privacy_check = load_plugin_section(policy_writer.config_path, "mordred_privacy_check", catch=(Exception,))
@@ -492,19 +492,27 @@ def _resolve_step_configure(
 
 
 def _probe_network(*, config_path: Path) -> tuple[bool, str]:
-    """Read-only: is a network privacy path already configured?"""
-    from .._yaml_io import load_plugin_section
+    """Read-only: is a network privacy path already configured?
+
+    A config that cannot be read raises: only readable config can show that the
+    path is unconfigured and that it is safe to ask for one.
+    """
+    from ..network.settings import read_default_path_strict
 
     # Imported from ``_network_answers`` (the defining module) rather than its
     # re-export in ``_network_init``: the latter re-imports it without an
     # ``__all__``/explicit re-export marker, which ``mypy --strict`` flags.
     from ._network_answers import _VALID_PATHS
+    from ._network_status import read_network_section_or_raise
 
-    section = load_plugin_section(config_path, "mordred_network", catch=(Exception,))
+    section = read_network_section_or_raise(config_path)
     if section is None:
         return False, "plugins.mordred_network is not configured"
     path = section.get("default_path")
     if isinstance(path, str) and path in _VALID_PATHS:
+        # "Done" must match what status reports and the runtime will accept: on
+        # Windows the strict reader also refuses other fields and the policy pair.
+        read_default_path_strict(config_path)
         return True, f"default path = {path}"
     return False, "plugins.mordred_network.default_path is missing or invalid"
 
@@ -535,7 +543,17 @@ def _run_network(*, home: Path, prompt_io: PromptIO, policy_writer: PolicyWriter
 
 
 def _resolve_step_network(*, home: Path, prompt_io: PromptIO, policy_writer: PolicyWriter) -> StepResult:
-    complete, detail = _probe_network(config_path=policy_writer.config_path)
+    from ._network_status import NETWORK_UNAVAILABLE_DETAIL, NETWORK_UNAVAILABLE_REMEDY
+
+    try:
+        complete, detail = _probe_network(config_path=policy_writer.config_path)
+    except Exception as exc:  # parser diagnostics can quote config values: keep only the type name
+        return StepResult(
+            _STEP_NETWORK,
+            "blocked",
+            f"network {NETWORK_UNAVAILABLE_DETAIL} ({type(exc).__name__}); "
+            f"{NETWORK_UNAVAILABLE_REMEDY}, then re-run setup",
+        )
     if complete:
         return StepResult(_STEP_NETWORK, "done", detail)
 
@@ -1220,10 +1238,12 @@ def _resolve_windows_memory_step(
     Unreadable, unsafe or broken custody is ``"blocked"`` (manual repair, never
     reset); a missing CNG helper is ``"manual"``; an opt-out is respected.
     """
+    from .._core._config_io import passive_canonical_reads
     from ._windows_memory import observe
     from ._windows_status import setup_memory_state
 
-    action, detail = setup_memory_state(observe(home, blocking=False))
+    with passive_canonical_reads():
+        action, detail = setup_memory_state(observe(home, blocking=False))
     if action is not None:
         return StepResult(_STEP_MEMORY_ENCRYPTION, action, detail)
     return _run_gated_encryption_step(

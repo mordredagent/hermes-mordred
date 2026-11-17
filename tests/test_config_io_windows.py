@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes._config_io import (
+from mordred_hermes._core._config_io import (
     CanonicalPaths,
     PolicyPendingError,
     canonical_session,
@@ -67,7 +67,7 @@ def test_native_reader_in_fresh_process_fails_closed_on_busy(shared_home):
     program = """
 import sys
 from pathlib import Path
-from mordred_hermes._config_io import CanonicalPaths, read_canonical_snapshot
+from mordred_hermes._core._config_io import CanonicalPaths, read_canonical_snapshot
 from mordred_hermes._private_fs import PrivateFSError
 try:
     read_canonical_snapshot(CanonicalPaths(Path(sys.argv[1])))
@@ -87,7 +87,7 @@ def test_native_crash_between_members_leaves_marker_until_explicit_recovery(shar
     program = """
 import sys
 from pathlib import Path
-from mordred_hermes._config_io import CanonicalPaths, canonical_session
+from mordred_hermes._core._config_io import CanonicalPaths, canonical_session
 from mordred_hermes._private_fs import _windows_io
 original = _windows_io._Transaction.create_bytes
 def paused(self, name, data):
@@ -133,7 +133,7 @@ with canonical_session(paths, scope="policy", create=True) as session, session.p
 
 
 def test_native_custody_loan_and_audit_share_owned_policy_lock(shared_home):
-    from mordred_hermes._audit_session import audit_session
+    from mordred_hermes._core._audit_session import audit_session
 
     paths = CanonicalPaths(shared_home)
     log = shared_home / "mordred" / "audit.ndjson"

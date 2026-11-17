@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mordred_hermes import _config_io as cio
+from mordred_hermes._core import _config_io as cio
 from mordred_hermes._private_fs import PrivateFSError
 from mordred_hermes.extension.telegram import hermes_tools, memory_guard, service
 from mordred_hermes.extension.telegram.ask import AskRequest
@@ -124,7 +124,7 @@ spec = importlib.util.spec_from_file_location('_inject', sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 module.install()
-from mordred_hermes._config_io import CanonicalPaths, canonical_session
+from mordred_hermes._core._config_io import CanonicalPaths, canonical_session
 with canonical_session(CanonicalPaths(Path(os.environ['HERMES_HOME'])), scope='policy'):
     Path(sys.argv[2]).touch()
     until = time.monotonic() + 30

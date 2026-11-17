@@ -177,7 +177,7 @@ def build_spec(
 
 
 def _launchctl(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["launchctl", *args], capture_output=True, text=True, check=False)
+    return subprocess.run(["launchctl", *args], capture_output=True, text=True, check=False)  # noqa: S603, S607 - list argv, no shell; system tool resolved on PATH
 
 
 def _domain() -> str:
@@ -246,7 +246,7 @@ def status(label: str, *, agents_dir: Path | None = None, run: Runner = _launchc
 
 
 def cli(action: str, *, host: str, port: int, env_script: str | None) -> int:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     if sys.platform != "darwin":
         print("error: `extension agent` uses launchd and runs only on macOS.", file=sys.stderr)

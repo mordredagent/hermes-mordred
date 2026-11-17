@@ -10,8 +10,8 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes import _config_io as cio
-from mordred_hermes._config_io import POLICY_TRANSACTION_MARKER
+from mordred_hermes._core import _config_io as cio
+from mordred_hermes._core._config_io import POLICY_TRANSACTION_MARKER
 from mordred_hermes.privacy_check import _runtime, egress, hooks
 from mordred_hermes.privacy_check._exceptions import MordredIntegrityRefused
 from tests.test_private_fs_confidential_windows import shared_home as shared_home
@@ -251,7 +251,7 @@ def test_native_busy_generation_blocks_without_waiting(profile: Path) -> None:
     script = """
 import sys
 from pathlib import Path
-from mordred_hermes._config_io import CanonicalPaths, canonical_session
+from mordred_hermes._core._config_io import CanonicalPaths, canonical_session
 with canonical_session(CanonicalPaths(Path(sys.argv[1])), scope="policy"):
     print("locked", flush=True)
     sys.stdin.readline()

@@ -32,22 +32,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
-from .._audit_io import (
+from .._core._audit_io import (
     audit_path_stat as _audit_path_stat,
 )
-from .._audit_io import (
+from .._core._audit_io import (
     exclusive_audit_lock as _exclusive_audit_lock,
 )
-from .._audit_io import (
+from .._core._audit_io import (
     open_audit_file as _open_audit_file,
 )
-from .._audit_io import (
+from .._core._audit_io import (
     read_first_line as _read_first_line,
 )
-from .._log_rotation import next_rotation_target as _next_rotation_target
-from .._log_rotation import rotate_and_compress as _rotate_and_compress
-from .._log_rotation import today_utc_date as _today_utc_date
-from .._log_rotation import utcnow_iso as _utcnow_iso
+from .._core._log_rotation import next_rotation_target as _next_rotation_target
+from .._core._log_rotation import rotate_and_compress as _rotate_and_compress
+from .._core._log_rotation import today_utc_date as _today_utc_date
+from .._core._log_rotation import utcnow_iso as _utcnow_iso
 
 if TYPE_CHECKING:
     from ..keyvault.wrap import NativeBackend
@@ -213,7 +213,7 @@ class NDJSONWriter:
         """Rename the active file aside, gzip it, and sweep expired rotations.
 
         Shared with ``EncryptedWriter._rotate`` via
-        :func:`mordred_hermes._log_rotation.rotate_and_compress` (the two
+        :func:`mordred_hermes._core._log_rotation.rotate_and_compress` (the two
         bodies were byte-for-byte identical apart from the logger). This
         module's own ``_LOG`` is passed in, so a gzip failure is still reported
         under ``mordred.privacy_check.audit``.
@@ -376,7 +376,7 @@ def make_audit_writer(
     inject a software backend.
     """
     if _platform == "win32":
-        from .._home import hermes_home
+        from .._core._home import hermes_home
         from ._windows_audit import make_windows_audit_writer
 
         home = keyvault_home if keyvault_home is not None else hermes_home()

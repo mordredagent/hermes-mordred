@@ -219,3 +219,13 @@ def test_transaction_identity_rejects_foreign_lifetime(fs, private_path, monkeyp
                 patch.setattr(os, "getpid", lambda: -1)
                 with pytest.raises(RuntimeError):
                     transaction.directory_identity()
+
+
+def test_checked_file_flush_preserves_bytes_and_requires_identity(fs, private_path):
+    with fs.open_private_directory(private_path, create=True) as directory, directory.transaction() as tx:
+        tx.create_bytes("source", b"durable bytes")
+        identity = tx.stat("source").identity
+        tx.flush_file("source", expected_identity=identity)
+        with pytest.raises(fs.PrivateFSError):
+            tx.flush_file("source", expected_identity=fs.FileIdentity(identity.volume, b"wrong"))
+        assert tx.read_bytes("source", max_bytes=100) == b"durable bytes"

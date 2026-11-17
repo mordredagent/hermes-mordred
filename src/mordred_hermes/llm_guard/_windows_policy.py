@@ -14,10 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
-from .._config_io import CanonicalPaths, read_canonical_snapshot
-from .._policy_io import policy_mapping_from_snapshot
-from .._policy_types import VALID_POLICY_MODES
-from .._yaml_io import yaml_mapping_from_snapshot
+from .._core._config_io import CanonicalPaths, read_canonical_snapshot
+from .._core._policy_io import policy_mapping_from_snapshot
+from .._core._policy_types import VALID_POLICY_MODES
+from .._core._yaml_io import yaml_mapping_from_snapshot
 from ._exceptions import MordredSessionRefused
 from ._policy_settings import _PolicySettings, settings_from_mapping
 

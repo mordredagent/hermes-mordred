@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .._config_io import CanonicalPaths, canonical_session
+from .._core._config_io import CanonicalPaths, canonical_session
 from .._private_fs import PrivateFSError
 from ._windows_gates import classify_exception
 
@@ -48,8 +48,17 @@ def refusal(home: Path) -> str | None:
             "resolve the checked storage refusal and review a new uninstall plan"
         )
     if retained:
+        from ..dbcrypt import database_status
+
+        status = database_status(home)
+        if status.capability == "available" or (
+            status.capability == "unknown"
+            and status.dependencies is not None
+            and status.reason == "native database authority has not been authenticated"
+        ):
+            return None
         return (
-            "this home retains database protection state, which Windows cannot restore; "
-            "decrypt or reconcile the home on macOS before using or uninstalling Mordred here"
+            "this home retains database protection state on an unqualified or uncertain Windows runtime; "
+            "retain the native key/helper and reconcile the database state on its qualified original runtime"
         )
     return None

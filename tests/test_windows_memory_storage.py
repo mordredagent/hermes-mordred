@@ -6,6 +6,7 @@ import pytest
 
 from mordred_hermes._private_fs import PrivateFSError, open_private_directory
 from mordred_hermes.keyvault import _memory_storage as storage
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
 from mordred_hermes.keyvault.memory_crypto import is_sealed, seal, unseal
 from tests.test_windows_custody import fs as fs
 
@@ -26,8 +27,11 @@ def put(home, name, data):
 
 def enroll(memory):
     c, home, backend = memory
-    with c.windows_custody_session(home, create=True, backend=backend) as owner:
-        key = owner.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        c.windows_custody_session(home, create=True, backend=backend) as owner,
+    ):
+        key = owner.enroll_memory(database_lease=database_lease)
         lease = owner.lease("memory")
     return key, lease
 

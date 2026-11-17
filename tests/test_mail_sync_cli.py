@@ -29,6 +29,7 @@ from tests._mail_sync_helpers import (
     rows,
 )
 from tests.test_mail_secrets import FakeEnclave, sealed_store
+from tests.test_windows_custody import fs as fs
 
 
 @pytest.fixture
@@ -179,7 +180,7 @@ def test_setup_with_a_wrong_password_seals_nothing(
 def test_setup_refuses_other_platforms(
     setup_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: "linux")
+    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: "freebsd")
     code, _out, err = run(["mail", "setup"], capsys)
     assert code == 1 and "unsupported_platform" in err and setup_env["prompts"] == []
 
@@ -510,13 +511,13 @@ def test_status_shows_the_imap_state_but_never_the_address(
     monkeypatch.setattr(mail_cli, "_imap_flags", lambda: fetch_env["secrets"].flags())
     code, out, err = run(["mail", "status"], capsys)
     assert code == 0, err
-    assert "imap sync: account mail (Gmail All Mail" in out and "all: uid 4" in out and "last fetch:" in out
+    assert "imap sync: account mail (Gmail All Mail" in out and "cursors: unknown (passive status)" in out
     assert "@" not in out
     code, out, _err = run(["mail", "status", "--json"], capsys)
     imap = json.loads(out)["imap"]
     assert (imap["account"], imap["gmail"], imap["scope"]) == ("mail", True, ["all"])
-    assert imap["cursors"]["all"]["forward"]["uid"] == 4
-    assert imap["last_fetch"]["error"] is None
+    assert imap["cursors"] is None
+    assert imap["last_fetch"] is None
     assert "@" not in out
 
 
@@ -543,11 +544,11 @@ def test_status_projects_only_checked_fields(
         "scope": ["all"],
         "touch_id": False,
         "last_fetch": None,  # its error was not a code: the attempt is void
-        "last_success": {"at": 4},
-        "cursors": {"all": {"forward": {"low": 3}}},
+        "last_success": None,
+        "cursors": None,
     }
     code, out, _err = run(["mail", "status"], capsys)
-    assert "last fetch: never" in out and "last successful fetch: 19" in out
+    assert "cursors: unknown (passive status)" in out
 
 
 def test_status_reports_credentials_left_by_a_crash(
@@ -893,6 +894,7 @@ def test_forget_reports_an_enclave_key_it_could_not_delete(
     enclave.delete_enclave_key = broken
     code, _out, err = run(["mail", "forget", "--yes"], capsys)
     assert code == 1 and "key_left" in err and KEY_ID in enclave.keys
+    assert "`hermes-mordred mail forget --yes --force-orphan` once no sealed credentials remain" in err
     assert not sealed_forget_env["store"].sealed_path.exists()
     code, out, err = run(["mail", "forget", "--yes"], capsys)  # no file is left, the key still cannot go
     assert code == 1 and "key_left" in err and KEY_ID in enclave.keys
@@ -901,6 +903,100 @@ def test_forget_reports_an_enclave_key_it_could_not_delete(
     code, _out, err = run(["mail", "forget", "--yes"], capsys)  # nothing left on disk: the retry deletes the key
     assert code == 0, err
     assert KEY_ID not in enclave.keys
+
+
+# --- forget --force-orphan (the explicit orphan-key repair) -------------------------------------------
+
+
+@pytest.mark.parametrize("argv", [["--force-orphan"], ["--force-orphan", "--rows", "--yes"],
+                                  ["--force-orphan", "--yes", "--account", "mail"]])  # fmt: skip
+def test_force_orphan_needs_yes_and_never_combines_with_row_erasure(
+    forget_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    from mordred_hermes.imports.mail import forget as forget_module
+
+    monkeypatch.setattr(forget_module, "forget", lambda *args, **kwargs: pytest.fail("forget ran"))
+    code, _out, err = run(["mail", "forget", *argv], capsys)
+    assert code == 2 and forget_env["secrets"].creds is not None
+    assert ("confirm with --yes" in err) if "--yes" not in argv else ("--force-orphan repairs only" in err)
+
+
+def test_force_orphan_reaches_the_shared_library(
+    forget_env: dict[str, Any], home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from mordred_hermes.imports.mail import forget as forget_module
+
+    seen: list[Any] = []
+    real = forget_module.forget
+
+    def spy(secret_store: Any, where: Path, **kwargs: Any) -> Any:
+        seen.append((where, kwargs["account"], kwargs["rows"], kwargs["force_orphan"]))
+        return real(secret_store, where, **kwargs)
+
+    monkeypatch.setattr(forget_module, "forget", spy)
+    code, out, err = run(["mail", "forget", "--yes", "--force-orphan"], capsys)
+    assert code == 0, err
+    assert seen == [(home, None, False, True)] and "Orphan repair done" in out
+    run(["mail", "forget", "--yes"], capsys)
+    assert seen[-1] == (home, None, False, False)  # the plain forget never requests the repair
+
+
+_REPAIR = "run `hermes-mordred mail forget --yes --force-orphan`"
+
+
+@pytest.mark.parametrize(
+    ("code", "hint"),
+    [
+        ("mail_orphan_key", f"a native mail key has no sealed credentials; {_REPAIR}"),
+        ("tee_unavailable", f"if the native mail key no longer exists on this machine, {_REPAIR}"),
+    ],
+)
+def test_forget_refusals_point_at_the_orphan_repair(
+    forget_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    code: str,
+    hint: str,
+) -> None:
+    from mordred_hermes.imports.mail import forget as forget_module
+
+    def refused(*args: Any, **kwargs: Any) -> Any:
+        raise forget_module.MailForgetError(code)
+
+    monkeypatch.setattr(forget_module, "forget", refused)
+    status, _out, err = run(["mail", "forget", "--yes"], capsys)
+    assert status == 1 and f"mail refused ({code}: {hint})" in err
+    status, _out, err = run(["mail", "forget", "--yes", "--force-orphan"], capsys)
+    assert status == 1  # a refused repair never points at itself again
+    assert ("--force-orphan`" in err) == (code == "mail_orphan_key")
+
+
+@pytest.mark.parametrize("record", ["recorded", "unrecorded"])
+def test_native_orphan_key_cli_repair_end_to_end(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], record: str
+) -> None:
+    from tests.test_mail_cross_platform_storage import orphan_after_refused_login
+
+    home.chmod(0o700)
+    secret_store, native = orphan_after_refused_login(home)
+    if record == "unrecorded":  # the pre-PR key_left state: the record went before the native delete failed
+        secret_store.key_record_path.unlink()
+    monkeypatch.setattr(mail_sync_cli, "_secret_store", lambda: secret_store)
+
+    def no_rows(_home: Path) -> Any:
+        raise RuntimeError("no database for credential custody")
+
+    monkeypatch.setattr(mail_sync_cli, "_open_store", no_rows)
+    code, _out, err = run(["mail", "forget", "--yes"], capsys)
+    assert code == 1 and "mail refused (mail_orphan_key:" in err and "--yes --force-orphan" in err
+    assert native.keys and "delete" not in native.calls
+    code, out, err = run(["mail", "forget", "--yes", "--force-orphan"], capsys)
+    assert code == 0, err
+    assert "Orphan repair done" in out and "No mail credentials were set up." not in out
+    assert native.keys == {} and native.calls.count("delete") == 1 and not secret_store.key_record_path.exists()
+    code, out, err = run(["mail", "forget", "--yes", "--force-orphan"], capsys)  # nothing left: a no-op
+    assert code == 0, err
+    assert "Orphan repair done" not in out and "No mail credentials were set up." in out
 
 
 # --- the forget library (shared with the Desktop page) ---------------------------------------------
@@ -1016,7 +1112,8 @@ def test_status_and_forget_handle_staged_leftovers(
 
     monkeypatch.setattr(secrets, "_platform", lambda: "darwin")
     folder = home / "mordred" / "mail"
-    folder.mkdir(parents=True)
+    folder.parent.mkdir(mode=0o700)
+    folder.mkdir(mode=0o700)
     (folder / ".credentials.meta.json.0011223344556677.staged").write_text("{}")  # a seal whose cleanup failed
     code, out, err = run(["mail", "status", "--json"], capsys)
     assert code == 0, err
@@ -1041,3 +1138,82 @@ def test_status_and_forget_handle_staged_leftovers(
 class _NoKeyBackend:
     def delete_enclave_key(self, _key_id: str) -> None:
         return None
+
+
+def test_windows_setup_presence_refuses_before_prompt_or_discovery(setup_env, monkeypatch, capsys):
+    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: "win32")
+    monkeypatch.setattr(
+        mail_sync_cli, "_secret_store", lambda: pytest.fail("presence refusal discovered native custody")
+    )
+    code, _, err = run(["mail", "setup"], capsys)
+    assert code == 1 and "presence_unsupported" in err and setup_env["prompts"] == []
+    assert "Windows CNG" in err and "--no-touch-id" in err
+
+
+@pytest.mark.usefixtures("fs")
+def test_windows_setup_checks_actual_mail_backend_before_prompts(fs, monkeypatch, capsys):
+    from mordred_hermes.imports.mail.secrets import MailSecretStore
+    from mordred_hermes.keyvault._windows_profile import CustodyError
+
+    custody, _, home, _ = fs
+
+    def unavailable():
+        raise CustodyError("native helper unavailable")
+
+    monkeypatch.setattr(custody, "windows_backend", unavailable)
+    monkeypatch.setattr(mail_sync_cli, "_home", lambda: home)
+    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: "win32")
+    monkeypatch.setattr(mail_sync_cli, "_isatty", lambda: True)
+    monkeypatch.setattr(mail_sync_cli, "_input", lambda *a: pytest.fail("prompt before native mail capability"))
+    secret_store = MailSecretStore(home / "mordred/mail", platform=lambda: "win32", audit_sink=lambda e: None)
+    monkeypatch.setattr(mail_sync_cli, "_secret_store", lambda: secret_store)
+    code, _, err = run(["mail", "setup", "--no-touch-id"], capsys)
+    assert code == 1 and "tee_unavailable" in err
+
+
+def test_linux_setup_uses_native_capability_instead_of_os_gate(setup_env, monkeypatch, capsys):
+    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: "linux")
+    use_server(monkeypatch, gmail_server())
+    setup_env["answers"].extend(["owner@example.com", ""])
+    code, out, err = run(["mail", "setup", "--imap-host", "imap.example.com", "--no-touch-id"], capsys)
+    assert code == 0, err
+    assert "native key" in out
+    assert setup_env["store"].flags()["touch_id"] is False
+
+
+def test_linux_default_presence_refuses_before_prompts_backend_or_connection(setup_env, monkeypatch, capsys):
+    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: "linux")
+    monkeypatch.setattr(
+        mail_sync_cli, "_secret_store", lambda: pytest.fail("default Linux presence reached native backend")
+    )
+    monkeypatch.setattr(mail_sync_cli, "_input", lambda *a: pytest.fail("default Linux presence prompted"))
+    monkeypatch.setattr(mail_sync_cli, "_connect", lambda *a: pytest.fail("default Linux presence connected"))
+    code, _, err = run(["mail", "setup", "--imap-host", "imap.example.com"], capsys)
+    assert code == 1 and "presence_unsupported" in err and "--no-touch-id" in err
+    assert "Linux TPM" in err and "Windows mail" not in err
+    assert setup_env["prompts"] == [] and setup_env["store"].flags() is None
+
+
+@pytest.mark.parametrize(
+    ("platform", "recorded", "expected"),
+    [
+        ("linux", True, None),
+        ("win32", True, None),
+        ("linux", False, False),
+        ("win32", False, False),
+        ("darwin", True, True),
+        ("darwin", False, False),
+        ("darwin", None, None),
+        ("darwin", "unsupported", None),
+        ("linux", "unknown", None),
+        ("darwin", 0, None),
+        ("darwin", 1, None),
+    ],
+)
+def test_status_never_promotes_unknown_or_unsupported_presence_to_true(monkeypatch, platform, recorded, expected):
+    monkeypatch.setattr(mail_sync_cli, "_platform", lambda: platform)
+    flags = {"account": "mail", "roles": ["inbox"], "touch_id": recorded}
+    before = dict(flags)
+    report = mail_sync_cli.imap_status(None, flags)
+    assert report["touch_id"] is expected
+    assert flags == before  # projection must not rewrite retained policy evidence

@@ -350,3 +350,60 @@ def test_list_seed_envelope_ids_is_scoped_to_key_id(tmp_path: Path) -> None:
     store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
 
     assert list_seed_envelope_ids("other-key", home=tmp_path) == []
+
+
+@pytest.mark.parametrize("hd", [False, True])
+def test_expected_signer_checked_before_signing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hd: bool) -> None:
+    from eth_keys import keys
+
+    _, log, kw = _wrap_backend(tmp_path)
+    if hd:
+        handle = ethereum.store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
+        address, _ = ethereum.derive_ethereum_key("default", handle, 0, **kw)
+
+        def sign(expected: str) -> EthereumSignature:
+            return ethereum.sign_hash_hd("default", handle, 0, b"x" * 32, expected_signer=expected, **kw)
+    else:
+        handle, address = generate_ethereum_key("default", **kw)
+
+        def sign(expected: str) -> EthereumSignature:
+            return sign_hash("default", handle, b"x" * 32, expected_signer=expected, **kw)
+
+    assert sign(address.lower()).v in (27, 28)
+    signed = []
+    monkeypatch.setattr(keys.PrivateKey, "sign_msg_hash", lambda *a: signed.append(a))
+    log.clear()
+    with pytest.raises(RuntimeError, match="wallet_signer_changed"):
+        sign("0x" + "00" * 20)
+    assert signed == []
+    assert sum(e.get("reason") == "keyvault.unwrap_authorized" for e in log) == 1
+
+
+@pytest.mark.parametrize("hd", [False, True])
+def test_wallet_approval_decrypts_exactly_twice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hd: bool) -> None:
+    from mordred_hermes.extension import wallet
+    from mordred_hermes.keyvault import api, extension_sign
+
+    backend, log, kw = _wrap_backend(tmp_path)
+    if hd:
+        handle = ethereum.store_seed_phrase("default", _HARDHAT_MNEMONIC, **kw)
+        address, _ = ethereum.derive_ethereum_key("default", handle, 0, **kw)
+        account = {"kind": "hd", "key_id": "default", "seed_envelope_id": handle, "index": 0}
+    else:
+        handle, address = generate_ethereum_key("default", **kw)
+        account = {"kind": "key", "key_id": "default", "envelope_id": handle}
+    original = api.decrypt
+
+    def decrypt(*args, **kwargs):
+        kwargs["home"] = tmp_path
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(api, "decrypt", decrypt)
+    monkeypatch.setattr(extension_sign, "_backend", lambda: backend)
+    monkeypatch.setattr(extension_sign, "_resolve_account", lambda: account)
+    monkeypatch.setattr(extension_sign, "_audit_sink", log.append)
+    log.clear()
+    prepared = wallet._prepare_sign("personal_sign", ["hello", address])
+    signature = wallet._do_sign("personal_sign", prepared.params, expected_signer=prepared.expected_signer)
+    assert signature.startswith("0x")
+    assert sum(e.get("reason") == "keyvault.unwrap_authorized" for e in log) == 2

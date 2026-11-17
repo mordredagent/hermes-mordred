@@ -5,14 +5,14 @@ from __future__ import annotations
 import subprocess
 import sys
 
-from mordred_hermes import _audit_io as audit
+from mordred_hermes._core import _audit_io as audit
 from tests.test_audit_session import audit_path as audit_path_fixture  # noqa: F401
 from tests.test_private_fs_processes import _line
 
 _CHILD = """
 import sys
 from pathlib import Path
-from mordred_hermes._audit_io import audit_session
+from mordred_hermes._core._audit_io import audit_session
 from mordred_hermes._private_fs import PrivateFSError
 print('ready', flush=True)
 try:
@@ -63,7 +63,7 @@ def test_waiting_thread_cannot_block_explicit_owner_borrow(audit_path):
 import sys, threading
 from contextlib import contextmanager
 from pathlib import Path
-from mordred_hermes._audit_io import audit_session
+from mordred_hermes._core._audit_io import audit_session
 from mordred_hermes import _private_fs as fs
 from mordred_hermes._private_fs import open_private_directory
 path=Path(sys.argv[1])
@@ -100,8 +100,8 @@ assert not thread.is_alive() and not errors, errors
 def test_minimal_import_has_no_consumer_or_crypto_dependencies():
     script = """
 import sys
-import mordred_hermes._audit_io
-import mordred_hermes._log_rotation
+import mordred_hermes._core._audit_io
+import mordred_hermes._core._log_rotation
 assert not any(name.startswith(('mordred_hermes.keyvault', 'mordred_hermes.privacy_check',
     'mordred_hermes.wizard', 'cryptography')) for name in sys.modules)
 """

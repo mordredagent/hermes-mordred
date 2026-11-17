@@ -72,13 +72,23 @@ def _write_marker(home: Path) -> Path:
     return marker
 
 
+def _configured_vault(
+    tmp_path: Path, *, config_bytes: bytes | None = _CONFIG, marker: bool = True
+) -> tuple[Path, Path, FakeBackend, FakeAnchorStore]:
+    """Create a fresh vault, optionally enroll config, and explicitly control opt-in."""
+    root, home = tmp_path / "v", tmp_path / "home"
+    home.mkdir()
+    backend, store = FakeBackend(), FakeAnchorStore()
+    _init_vault_with_config(root, backend, store, config_bytes)
+    if marker:
+        _write_marker(home)
+    return root, home, backend, store
+
+
 class TestMaterializeConfig:
     def test_no_marker_is_noop(self, tmp_path: Path) -> None:
         """Without the opt-in marker, the bootstrap never touches disk (Hermes unchanged)."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, _CONFIG)
+        root, home, backend, store = _configured_vault(tmp_path, marker=False)
 
         n = _config_bootstrap.materialize_config(root=root, home=home, backend=backend, store=store)
         assert n == 0
@@ -86,11 +96,7 @@ class TestMaterializeConfig:
 
     def test_decrypts_to_disk_when_absent(self, tmp_path: Path) -> None:
         """marker + enrolled + no plaintext → decrypt the vault config.yaml onto disk."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, _CONFIG)
-        _write_marker(home)
+        root, home, backend, store = _configured_vault(tmp_path)
 
         n = _config_bootstrap.materialize_config(root=root, home=home, backend=backend, store=store)
         assert n == 1
@@ -99,11 +105,7 @@ class TestMaterializeConfig:
 
     def test_identical_disk_is_idempotent(self, tmp_path: Path) -> None:
         """A plaintext already equal to the vault copy stays put — still 'present' (1)."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, _CONFIG)
-        _write_marker(home)
+        root, home, backend, store = _configured_vault(tmp_path)
         (home / "config.yaml").write_bytes(_CONFIG)
 
         n = _config_bootstrap.materialize_config(root=root, home=home, backend=backend, store=store)
@@ -115,11 +117,7 @@ class TestMaterializeConfig:
     def test_differing_disk_wins_and_resyncs_vault(self, tmp_path: Path) -> None:
         """An on-disk plaintext that differs (unclean prior exit / live edit) is authoritative:
         its bytes are re-enrolled into the vault, and the working copy is left in place."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, _CONFIG)
-        _write_marker(home)
+        root, home, backend, store = _configured_vault(tmp_path)
         edited = b"model: gpt-x\napi_key: should-stay-encrypted\nvoice: on\n"
         (home / "config.yaml").write_bytes(edited)
 
@@ -134,11 +132,7 @@ class TestMaterializeConfig:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A live editor that wins the absent→publish race is authoritative."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, _CONFIG)
-        _write_marker(home)
+        root, home, backend, store = _configured_vault(tmp_path)
         plaintext_path = home / "config.yaml"
         concurrent = b"model: edited-during-startup\napi_key: new-value\n"
         publish_reached = threading.Barrier(2)
@@ -172,11 +166,7 @@ class TestMaterializeConfig:
     def test_disk_present_but_not_enrolled_resyncs_vault(self, tmp_path: Path) -> None:
         """A plaintext on disk with NO enrolled config (e.g. enable was interrupted before
         enroll, or the vault was re-created) is authoritative: it is synced into the vault."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, None)  # init only, nothing enrolled
-        _write_marker(home)
+        root, home, backend, store = _configured_vault(tmp_path, config_bytes=None)  # init only, nothing enrolled
         (home / "config.yaml").write_bytes(_CONFIG)
 
         n = _config_bootstrap.materialize_config(root=root, home=home, backend=backend, store=store)
@@ -185,11 +175,7 @@ class TestMaterializeConfig:
         assert _read_vault_config(root, backend, store) == _CONFIG  # now enrolled
 
     def test_existing_config_symlink_is_rejected_without_reading_target(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, _CONFIG)
-        _write_marker(home)
+        root, home, backend, store = _configured_vault(tmp_path)
         outside = tmp_path / "outside-config"
         outside.write_bytes(b"attacker-controlled: true\n")
         outside.chmod(0o644)
@@ -213,11 +199,7 @@ class TestMaterializeConfig:
 
         Silently proceeding would start Hermes on default config without the
         operator's vault-managed settings — a downgrade we must surface."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, None)  # init only, no config enrolled
-        _write_marker(home)
+        root, home, backend, store = _configured_vault(tmp_path, config_bytes=None)  # init only, no config enrolled
 
         with pytest.raises(vault.VaultError):
             _config_bootstrap.materialize_config(root=root, home=home, backend=backend, store=store)
@@ -246,11 +228,7 @@ class TestMaterializeConfig:
         assert not (home / "config.yaml").exists()
 
     def test_tampered_manifest_fails_closed(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, _CONFIG)
-        _write_marker(home)
+        root, home, backend, store = _configured_vault(tmp_path)
         mpath = root / "manifest.1.mvmf"
         raw = bytearray(mpath.read_bytes())
         raw[-1] ^= 0x01
@@ -262,11 +240,7 @@ class TestMaterializeConfig:
 
     def test_anchor_absent_with_disk_artifacts_fails_closed(self, tmp_path: Path) -> None:
         """Manifests on disk but the device anchor gone → fail closed (anchor-delete downgrade)."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, _CONFIG)
-        _write_marker(home)
+        root, home, backend, store = _configured_vault(tmp_path)
         store.delete(_identity.vault_identity(root))  # drop anchor, keep manifests
         assert list(root.glob("manifest.*.mvmf"))
 
@@ -286,22 +260,14 @@ class TestResealConfig:
         assert (home / "config.yaml").exists()  # an unmanaged config is never deleted
 
     def test_no_plaintext_is_noop(self, tmp_path: Path) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, _CONFIG)
-        _write_marker(home)
+        root, home, backend, store = _configured_vault(tmp_path)
 
         n = _config_bootstrap.reseal_config(root=root, home=home, backend=backend, store=store)
         assert n == 0
 
     def test_unchanged_plaintext_is_removed(self, tmp_path: Path) -> None:
         """A working copy equal to the vault is just deleted — the vault already has it."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, _CONFIG)
-        _write_marker(home)
+        root, home, backend, store = _configured_vault(tmp_path)
         (home / "config.yaml").write_bytes(_CONFIG)
 
         n = _config_bootstrap.reseal_config(root=root, home=home, backend=backend, store=store)
@@ -311,11 +277,7 @@ class TestResealConfig:
 
     def test_edited_plaintext_is_reenrolled_then_removed(self, tmp_path: Path) -> None:
         """Live edits during the session are persisted into the vault before the plaintext goes."""
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, _CONFIG)
-        _write_marker(home)
+        root, home, backend, store = _configured_vault(tmp_path)
         edited = _CONFIG + b"voice: on\n"
         (home / "config.yaml").write_bytes(edited)
 
@@ -327,11 +289,7 @@ class TestResealConfig:
     def test_concurrent_replacement_after_enroll_is_not_deleted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        root, home = tmp_path / "v", tmp_path / "home"
-        home.mkdir()
-        backend, store = FakeBackend(), FakeAnchorStore()
-        _init_vault_with_config(root, backend, store, _CONFIG)
-        _write_marker(home)
+        root, home, backend, store = _configured_vault(tmp_path)
         snapshot = _CONFIG + b"voice: on\n"
         replacement = snapshot + b"model: concurrently-edited\n"
         config_path = home / "config.yaml"

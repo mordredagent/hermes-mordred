@@ -119,10 +119,11 @@ metadata:
 
 
 class TestParseInvalidInputs:
-    def test_invalid_network_requirement_value_raises(self, tmp_path: Path) -> None:
-        path = _write(
-            tmp_path,
-            """\
+    @pytest.mark.parametrize(
+        ("body", "match"),
+        [
+            pytest.param(
+                """\
 ---
 name: bad
 description: x
@@ -131,14 +132,11 @@ metadata:
     network_requirements: bogus
 ---
 """,
-        )
-        with pytest.raises(SkillMetadataError, match="network_requirements"):
-            parse(path)
-
-    def test_outbound_endpoints_must_be_list_of_strings(self, tmp_path: Path) -> None:
-        path = _write(
-            tmp_path,
-            """\
+                "network_requirements",
+                id="invalid-network-requirement-value",
+            ),
+            pytest.param(
+                """\
 ---
 name: bad
 description: x
@@ -149,14 +147,11 @@ metadata:
       - 42
 ---
 """,
-        )
-        with pytest.raises(SkillMetadataError, match="outbound_endpoints"):
-            parse(path)
-
-    def test_outbound_endpoints_string_not_list_raises(self, tmp_path: Path) -> None:
-        path = _write(
-            tmp_path,
-            """\
+                "outbound_endpoints",
+                id="outbound-endpoints-non-string-item",
+            ),
+            pytest.param(
+                """\
 ---
 name: bad
 description: x
@@ -165,28 +160,22 @@ metadata:
     outbound_endpoints: "https://oops.example.com"
 ---
 """,
-        )
-        with pytest.raises(SkillMetadataError, match="outbound_endpoints"):
-            parse(path)
-
-    def test_metadata_block_wrong_type_raises(self, tmp_path: Path) -> None:
-        path = _write(
-            tmp_path,
-            """\
+                "outbound_endpoints",
+                id="outbound-endpoints-string-not-list",
+            ),
+            pytest.param(
+                """\
 ---
 name: bad
 description: x
 metadata: "this should be a mapping"
 ---
 """,
-        )
-        with pytest.raises(SkillMetadataError, match="metadata must be a mapping"):
-            parse(path)
-
-    def test_mordred_block_wrong_type_raises(self, tmp_path: Path) -> None:
-        path = _write(
-            tmp_path,
-            """\
+                "metadata must be a mapping",
+                id="metadata-block-wrong-type",
+            ),
+            pytest.param(
+                """\
 ---
 name: bad
 description: x
@@ -194,8 +183,39 @@ metadata:
   mordred: "should be a mapping"
 ---
 """,
-        )
-        with pytest.raises(SkillMetadataError, match=r"metadata\.mordred must be a mapping"):
+                r"metadata\.mordred must be a mapping",
+                id="mordred-block-wrong-type",
+            ),
+            pytest.param(
+                """\
+---
+name: x
+description: x
+metadata:
+  mordred:
+    network_requirements: tor
+   bad_indent: true
+---
+""",
+                "malformed YAML",
+                id="malformed-yaml",
+            ),
+            pytest.param(
+                """\
+---
+- just
+- a
+- list
+---
+""",
+                "must be a YAML mapping",
+                id="frontmatter-not-a-mapping",
+            ),
+        ],
+    )
+    def test_invalid_input_raises(self, tmp_path: Path, body: str, match: str) -> None:
+        path = _write(tmp_path, body)
+        with pytest.raises(SkillMetadataError, match=match):
             parse(path)
 
     def test_unclosed_frontmatter_returns_empty(self, tmp_path: Path) -> None:
@@ -209,37 +229,6 @@ description: no closing fence
 """,
         )
         assert parse(path) == SkillMetadata(None, None, False, ())
-
-    def test_malformed_yaml_raises(self, tmp_path: Path) -> None:
-        path = _write(
-            tmp_path,
-            """\
----
-name: x
-description: x
-metadata:
-  mordred:
-    network_requirements: tor
-   bad_indent: true
----
-""",
-        )
-        with pytest.raises(SkillMetadataError, match="malformed YAML"):
-            parse(path)
-
-    def test_frontmatter_yaml_must_be_mapping(self, tmp_path: Path) -> None:
-        path = _write(
-            tmp_path,
-            """\
----
-- just
-- a
-- list
----
-""",
-        )
-        with pytest.raises(SkillMetadataError, match="must be a YAML mapping"):
-            parse(path)
 
 
 class TestEdgeCases:

@@ -36,8 +36,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal
 
-from .._audit_session import AuditSession, audit_session, read_audit_snapshot
-from .._log_rotation import audit_rotation_names
+from .._core._audit_session import AuditSession, audit_session, read_audit_snapshot
+from .._core._log_rotation import audit_rotation_names
 from .._private_fs import FileIdentity, PrivateFSError
 from . import _term, _windows_gates
 
@@ -162,7 +162,7 @@ def _refused(action: str, path: Path, exc: BaseException, outcome: str) -> Windo
 
 def default_home() -> Path:
     """The ambient Hermes home that owns the Windows audit custody role."""
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     return hermes_home()
 
@@ -370,7 +370,7 @@ def _decrypt_failure(path: Path, exc: Exception) -> tuple[str, bool] | None:
     prompt or missing key); a corrupt, foreign or vanished file is reported and
     the remaining files are still decrypted.
     """
-    from .._config_io import PolicyPendingError
+    from .._core._config_io import PolicyPendingError
     from ..keyvault._exceptions import WrapAuthCancelled, WrapError, WrapKeyNotFound
     from ..keyvault._windows_profile import CustodyError
     from ..keyvault.log_encryption import AuditLogDecryptError

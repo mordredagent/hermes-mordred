@@ -37,10 +37,8 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
   grouped into events, headlined by a loopback-only local model when one is configured;
   sealed both ways (``recall_events_result``). ``mode: "selection"`` takes a page
   selection and searches its derived keywords instead (``recall_events_selection_v1``)
-- ``activity_pair_init`` / ``activity_auth`` (pre-auth), ``activity_batch`` / ``activity_status``
-  → :mod:`mordred_hermes.extension.activity_api`. An ``activity_auth`` socket is an
-  activity principal limited to those two authed frames; the page principal never
-  reaches them; the paired extension may submit ``activity_batch``.
+- ``activity_batch`` / ``activity_status`` → :mod:`mordred_hermes.extension.activity_api`;
+  the paired extension may submit ``activity_batch``; the page principal never reaches them.
 
 Server-initiated frames: ``ping`` (app-level keepalive, see
 ``_Connection.keepalive``) and ``error`` (malformed JSON / crashed handler).
@@ -67,7 +65,6 @@ from aiohttp import WSMsgType, web
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from ..activity.peers import PeerPrincipal
 from . import activity_api, page_headers, pairing, trust
 from ._windows_storage import ExtensionStorageError
 from .crypto import (
@@ -509,6 +506,7 @@ class _Connection:
         self.imports_api = imports_api
         self.page_token = page_token  # set only for local-origin (page) sockets
         self.client_origin = client_origin
+        self._presence_connection = secrets.token_hex(16)
         self.authed = False
         # Extension sessions belong to one endorsed device key and to the exact
         # endorsement that admitted it; removing the device revokes its open
@@ -520,10 +518,6 @@ class _Connection:
         # A verified hello from an unknown device, kept for ``device_enroll``.
         self._hello: _Hello | None = None
         self._page_authenticated = False
-        # Activity peers (activity_auth) are a separate, narrower principal,
-        # revalidated per frame against their own credential record.
-        self._activity_principal: PeerPrincipal | None = None
-        self._activity_generation: bytes | None = None
         self.activity_receiver = activity_receiver
         self.activity_max_batch_bytes = activity_max_batch_bytes
         self._frame_bytes = 0
@@ -534,6 +528,9 @@ class _Connection:
 
     def cancel_background_tasks(self) -> None:
         """Stop work that would otherwise outlive this socket (and keep billing)."""
+        from ..keyvault._presence import revoke
+
+        revoke(principal=("extension", self._presence_connection))
         for task in list(self._telegram_asks.values()):
             task.cancel()
         self._telegram_asks.clear()
@@ -605,8 +602,6 @@ class _Connection:
             "auth2_hello": self._on_auth2_hello,
             "device_enroll": self._on_device_enroll,
             "auth": self._on_auth,
-            "activity_pair_init": self._on_activity_pair_init,
-            "activity_auth": self._on_activity_auth,
         }
         authed = {
             "chat": self._on_chat,
@@ -647,7 +642,27 @@ class _Connection:
                 # Error refusals reply keyed by ``id`` so the caller never hangs.
                 await self._send({"id": msg.get("id"), **refusal} if refusal["type"] == "error" else refusal)
             elif mtype in authed:
-                await authed[mtype](msg)
+                if mtype in {"telegram_sync", "telegram_dialogs", "telegram_ask"}:
+                    from .._core._home import hermes_home
+                    from ..keyvault._presence import presence_scope
+                    from ..keyvault._presence_hosts import profile_guard
+
+                    home = hermes_home().resolve()
+                    generation = (self._device_id, self._device_generation)
+                    profile_current = profile_guard(home, self._authentication_is_current)
+
+                    def current() -> bool:
+                        return (
+                            not self.ws.closed
+                            and self.authed
+                            and (self._device_id, self._device_generation) == generation
+                            and profile_current()
+                        )
+
+                    with presence_scope(home, ("extension", self._presence_connection), "telegram", valid=current):
+                        await authed[mtype](msg)
+                else:
+                    await authed[mtype](msg)
         except ExtensionStorageError as exc:
             await self._send_storage_refusal(msg, exc)
         except Exception:
@@ -663,9 +678,6 @@ class _Connection:
         """The refusal frame for a post-auth message, ``None`` when it may run."""
         if not self.authed:
             return {"type": "auth_fail", "reason": "not_authenticated"}
-        if self._activity_principal is not None and mtype not in activity_api.ACTIVITY_ALLOWED:
-            # Activity peers hold a submission-only credential: allowlist.
-            return {"type": "error", "reason": "activity_session_forbidden"}
         if not known:
             return None
         if (failure := self._authentication_failure()) is not None:
@@ -682,14 +694,15 @@ class _Connection:
     # -- pairing / auth -----------------------------------------------------
 
     def _invalidate_authentication(self) -> None:
+        from ..keyvault._presence import revoke
+
+        revoke(principal=("extension", self._presence_connection))
         self.authed = False
         self._device_id = None
         self._device_generation = None
         self._session_key = None
         self._hello = None
         self._page_authenticated = False
-        self._activity_principal = None
-        self._activity_generation = None
         # An approval captured under a revoked principal must not survive a
         # re-authentication with a replacement pairing.
         self._pending_sign.clear()
@@ -740,8 +753,6 @@ class _Connection:
             return False
         if self._page_authenticated:
             return self.page_token is not None
-        if self._activity_principal is not None:
-            return activity_api.principal_is_current(self._activity_principal, self._activity_generation)
         expected, device_id = self._device_generation, self._device_id
         if expected is None or device_id is None:
             return False
@@ -753,12 +764,6 @@ class _Connection:
             # Missing/corrupt/unreadable trust state is revocation, not a
             # reason to retain a privileged session.
             return False
-
-    async def _on_activity_pair_init(self, msg: dict[str, Any]) -> None:
-        await activity_api.on_activity_pair_init(self, msg)
-
-    async def _on_activity_auth(self, msg: dict[str, Any]) -> None:
-        await activity_api.on_activity_auth(self, msg)
 
     async def _on_activity_batch(self, msg: dict[str, Any]) -> None:
         await activity_api.on_activity_batch(self, msg)
@@ -1027,7 +1032,7 @@ class _Connection:
             await _reply(False, error="bad_token_format")
             return
         try:
-            from .._home import hermes_home
+            from .._core._home import hermes_home
 
             env_path = hermes_home() / ".env"
             updated = await asyncio.get_event_loop().run_in_executor(
@@ -1432,7 +1437,7 @@ class _Connection:
 
     async def _on_health(self, msg: dict[str, Any]) -> None:
         """Each feature's state and reason code; codes only, so the reply is not sealed."""
-        from .._home import hermes_home
+        from .._core._home import hermes_home
         from . import health
 
         items = await health.collect(
@@ -1620,6 +1625,9 @@ class _Connection:
         mid = msg.get("id")
         task = self._telegram_asks.get(mid) if isinstance(mid, str) else None
         if task is not None:
+            from ..keyvault._presence import revoke
+
+            revoke(principal=("extension", self._presence_connection))
             task.cancel()
 
     def _telegram_evidence_frame(self, mid: str, ek: bytes, report: Any) -> dict[str, Any]:
@@ -1665,8 +1673,14 @@ class _Connection:
                 return
             await self._send({"id": mid, "type": "telegram_ask_end"})
         except asyncio.CancelledError:
+            from ..keyvault._presence import revoke
+
+            revoke(principal=("extension", self._presence_connection))
             raise
         except Exception as exc:
+            from ..keyvault._presence import revoke
+
+            revoke(principal=("extension", self._presence_connection))
             await self._send(
                 {"id": mid, "type": "telegram_ask_error", "reason": error_code(exc, "telegram_ask_failed")}
             )
@@ -1829,29 +1843,22 @@ def _hermes_version() -> str:
     return "0.0.0"
 
 
-def _dotenv_assignment(raw_line: str) -> tuple[str, bool, str] | None:
-    """Return ``(name, exported, value)`` for one simple dotenv assignment."""
-    from .._dotenv_text import parse_assignment
-
-    return parse_assignment(raw_line)
-
-
 def _dotenv_has_nonempty_key(existing: str, keys: set[str]) -> bool:
     """Whether dotenv text contains one of *keys* with a non-empty value."""
-    from .._dotenv_text import has_nonempty_key
+    from .._core._dotenv_text import has_nonempty_key
 
     return has_nonempty_key(existing, keys)
 
 
 def _updated_env_text(existing: str, updates: dict[str, str]) -> str:
     """Return dotenv text with ``updates`` merged, preserving other lines."""
-    from .._dotenv_text import merge_assignments
+    from .._core._dotenv_text import merge_assignments
 
     return merge_assignments(existing, updates, mode="extension")
 
 
 def _validate_env_updates(updates: dict[str, str]) -> None:
-    from .._dotenv_text import contains_newline
+    from .._core._dotenv_text import contains_newline
 
     for key, val in updates.items():
         if contains_newline(key) or contains_newline(val):
@@ -1870,7 +1877,7 @@ def _upsert_env_vars(env_path: Path, updates: dict[str, str]) -> None:
     Slack and wizard updates cannot both read the same old file and lose one
     another's unrelated entries.
     """
-    from .._dotenv_io import update_dotenv_file
+    from .._core._dotenv_io import update_dotenv_file
 
     _validate_env_updates(updates)
     update_dotenv_file(env_path, lambda existing: _updated_env_text(existing, updates))
@@ -1882,7 +1889,7 @@ class _SlackAlreadyConfigured(Exception):
 
 def _update_slack_env(env_path: Path, updates: dict[str, str], overwrite: bool) -> bool:
     """Check-and-upsert Slack credentials in one locked dotenv transaction."""
-    from .._dotenv_io import update_dotenv_file
+    from .._core._dotenv_io import update_dotenv_file
 
     _validate_env_updates(updates)
 

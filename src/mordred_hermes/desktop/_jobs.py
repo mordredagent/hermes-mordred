@@ -50,6 +50,9 @@ class Job:
                 try:
                     return await asyncio.shield(future)
                 except asyncio.CancelledError:
+                    from ..keyvault._presence import revoke_current
+
+                    revoke_current()  # retain worker ownership, revoke OS presence immediately
                     # A completed callable can itself raise CancelledError. Retrieve
                     # that outcome exactly once instead of retrying it forever.
                     if future.done():

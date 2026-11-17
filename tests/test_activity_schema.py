@@ -13,7 +13,6 @@ import json
 import os
 import sqlite3
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -22,52 +21,18 @@ import pytest
 from mordred_hermes.activity import _schema
 from mordred_hermes.activity._gate import ActivityRefused
 from mordred_hermes.activity.contracts import (
-    DEFAULT_EXCLUDED_SITES,
     NormalizedEvent,
     canonical_digest,
     canonical_json,
-    normalize_event,
 )
 from mordred_hermes.activity.store import SUPPORTED_SCHEMA_VERSION, ActivityStore
+from tests._activity_episode_helpers import event, make_store, plain_opener, rows
 from tests._activity_schema_history import LESSON_TABLES, V2_STATEMENTS, v1_statements
 
 PEER = "operator:peer-a"
 PRODUCER = "prod-1"
 #: Columns of ``NormalizedEvent`` that schema v2 added (and that the v1 digest did not cover).
 _V2_FIELDS = frozenset({"query", "page_title", "page_text", "content_digest"})
-
-
-def plain_opener(path: Path) -> sqlite3.Connection:
-    return sqlite3.connect(path)
-
-
-def make_store(home: Path) -> ActivityStore:
-    store = ActivityStore(home / "mordred.db", plain_opener)
-    store.initialize(home)
-    return store
-
-
-def event(seq: int, episode: str = "ep-1", **overrides: Any) -> NormalizedEvent:
-    raw: dict[str, Any] = {
-        "event_id": str(uuid.uuid4()),
-        "seq": seq,
-        "episode_id": episode,
-        "source": "operator",
-        "actor": "agent",
-        "observed_at": 1000.0 + seq,
-        "phase": "dispatched",
-        "action": {"op": "click", "target": "Reports", "site": "example.com", "route": "/r"},
-        "result": {"status": "unknown"},
-        "quality": {"coverage": "selected_tab"},
-        "session_ref": {"run_id": "run-1"},
-    }
-    raw.update(overrides)
-    return normalize_event(raw, excluded_sites=DEFAULT_EXCLUDED_SITES)
-
-
-def rows(store: ActivityStore, sql: str, *params: Any) -> list[tuple[Any, ...]]:
-    with store.connection() as conn:
-        return [tuple(row) for row in conn.execute(sql, params)]
 
 
 def v1_digest(item: NormalizedEvent) -> str:

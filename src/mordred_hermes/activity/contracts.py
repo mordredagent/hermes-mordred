@@ -112,15 +112,17 @@ SCHEMA_VERSION: Final = 1
 class PeerPrincipal:
     """Authenticated submitter of activity batches.
 
-    ``peer_id`` is ``operator:<12 hex>`` for an activity peer, ``extension``
-    for the paired browser extension and ``hermes:<profile>`` for Hermes's own
-    browser calls (:mod:`.capture_hermes`, an in-process principal with trust
-    ``local``, never reachable over the network). ``trust`` and
-    ``permitted_use`` come from the authentication path, never from a payload.
+    ``peer_id`` is ``extension`` for the paired browser extension and
+    ``hermes:<profile>`` for Hermes's own browser calls (:mod:`.capture_hermes`,
+    an in-process principal with trust ``local``, never reachable over the
+    network). Stored rows may also name ``operator:<12 hex>`` peers of the
+    operator collector retired on 2026-10-30; no such principal is created any
+    more. ``trust`` and ``permitted_use`` come from the authentication path,
+    never from a payload.
     """
 
     peer_id: str
-    kind: str  # "operator" | "browser" | "hermes"
+    kind: str  # "browser" | "hermes" ("operator" only in rows stored before 2026-10-30)
     trust: str = "paired_peer"
     permitted_use: str = "learning"
 

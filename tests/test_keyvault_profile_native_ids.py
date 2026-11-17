@@ -19,6 +19,15 @@ from mordred_hermes.wizard import keyvault_cli
 from mordred_hermes.wizard._keyvault_init import _provision_audit_log_key
 from tests._keyvault_fakes import FakeBackend
 
+pytestmark = pytest.mark.usefixtures("fake_native_creation_receipts")
+
+
+@pytest.fixture(autouse=True)
+def _legacy_owned_deletion_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests._keyvault_owned_deletion import install_fake_owned_deletion
+
+    install_fake_owned_deletion(monkeypatch)
+
 
 def _prepare() -> tuple[api.SeedDisplayHandle, bytes]:
     return api.prepare_generate("profile scoped seed", "passphrase", b"\x42" * 32)
@@ -295,6 +304,11 @@ class _AmbientStoreBackend:
         return self.active.enclave_ecdh(key_id, peer_pub)
 
 
+@pytest.fixture(autouse=True)
+def _ambient_creation_receipts(fake_native_creation_receipts: Any) -> None:
+    fake_native_creation_receipts(_AmbientStoreBackend, lambda backend: backend.active)
+
+
 def test_legacy_explicit_home_can_read_key_from_historical_ambient_helper_store(tmp_path: Path) -> None:
     home = tmp_path / "explicit-home"
     backend = _AmbientStoreBackend()
@@ -461,15 +475,16 @@ def test_legacy_row_stays_readable_but_reset_never_deletes_global_id(tmp_path: P
     )
 
     backend.calls.clear()
-    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
     deleted = {key_id for operation, key_id in backend.calls if operation == "delete"}
     assert "default" not in deleted
     assert log_encryption.AUDIT_LOG_KEY_ID not in deleted
-    assert _native_key_id.scoped_native_key_id(root, "default") in deleted
+    assert deleted == set()
+    assert root.exists()
 
 
 @pytest.mark.parametrize("persisted", [None, 7, "", "mordred-hermes.native.v1.foreign"])
-def test_present_invalid_native_id_resets_only_deterministic_scoped_target(
+def test_present_invalid_native_id_retains_all_state(
     tmp_path: Path,
     persisted: object,
     capsys: pytest.CaptureFixture[str],
@@ -482,17 +497,18 @@ def test_present_invalid_native_id_resets_only_deterministic_scoped_target(
     _storage.save_meta(root, meta)
     backend.calls.clear()
 
-    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
     deleted = {key_id for operation, key_id in backend.calls if operation == "delete"}
-    assert _native_key_id.scoped_native_key_id(root, "default") in deleted
+    assert deleted == set()
     assert "default" not in deleted
     if isinstance(persisted, str):
         assert persisted not in deleted
-    assert not root.exists()
-    assert "metadata was incomplete" in capsys.readouterr().out.lower()
+    assert root.exists()
+    assert root.exists()
+    assert "unambiguous scoped ownership" in capsys.readouterr().err.lower()
 
 
-def test_surrogate_key_id_metadata_resets_cleanly_without_using_it_as_a_selector(
+def test_surrogate_key_id_metadata_retains_all_state(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -507,12 +523,13 @@ def test_surrogate_key_id_metadata_resets_cleanly_without_using_it_as_a_selector
     _storage.save_meta(root, meta)
     backend = FakeBackend()
 
-    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 0
+    assert keyvault_cli.reset_keyvault(home=tmp_path, backend=backend, assume_yes=True) == 1
 
     selected = {key_id for _operation, key_id in backend.calls}
     assert "untrusted-selector" not in selected
     assert "\ud800" not in selected
-    assert "metadata was incomplete" in capsys.readouterr().out.lower()
+    assert root.exists()
+    assert "unambiguous scoped ownership" in capsys.readouterr().err.lower()
 
 
 def test_present_null_native_id_blocks_decrypt_before_backend_io(tmp_path: Path) -> None:

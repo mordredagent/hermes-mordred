@@ -105,7 +105,7 @@ class TestSignHashWiresAuditSink:
             return fake_writer
 
         monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
-        monkeypatch.setattr("mordred_hermes._audit_support.build_audit_writer", build_writer)
+        monkeypatch.setattr("mordred_hermes._core._audit_support.build_audit_writer", build_writer)
         monkeypatch.setattr(
             extension_sign,
             "_resolve_account",

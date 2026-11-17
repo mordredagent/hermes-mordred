@@ -69,7 +69,7 @@ class HistoryProjection:
 
 
 def _history_path() -> Path:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     d = hermes_home() / "extension"
     if _storage.enabled():
@@ -185,11 +185,6 @@ def projected_history() -> HistoryProjection:
     """A viewer-friendly projection plus the status of the underlying read."""
     loaded = load_history()
     return HistoryProjection(_projected_turns(loaded.messages), loaded.status)
-
-
-def projected_turns() -> list[dict[str, str]]:
-    """A viewer-friendly [{role, content}] projection (user + assistant text)."""
-    return _projected_turns(load_messages())
 
 
 def _projected_turns(messages: list[dict[str, Any]]) -> list[dict[str, str]]:

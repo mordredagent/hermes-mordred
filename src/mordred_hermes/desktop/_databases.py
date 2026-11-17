@@ -1,12 +1,9 @@
-"""Hermes database encryption as the Desktop page sees it: facts, and schedule-or-report.
+"""Shared passive database capability projected onto the Desktop v4 API, and its one decision table.
 
-The Desktop backend never converts or arms the databases itself: it holds them
-open and keeps a runtime lease, so a conversion can only run at the next
-Hermes start (``dbcrypt.install`` runs a scheduled conversion before anything
-opens a database). :func:`status_object` reads facts without a key, a Touch ID
-prompt or a capture; :func:`encrypt_answer` turns them into the one answer of
-the total state table (SPEC "Databases from the page") and schedules the
-conversion when that is the answer. ``migrate()`` is never called from here.
+Observation never opens SQL, constructs a provider or acquires native custody.
+Facts come from ``lstat``; the single content read is Mordred's own non-secret,
+bounded startup record (:func:`._startup.read_outcome`). The routes only schedule,
+cancel or report: :mod:`..dbcrypt._startup` converts at the next start.
 """
 
 from __future__ import annotations
@@ -14,128 +11,175 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Final
 
-__all__ = ["encrypt_answer", "key_material_valid", "runtime_protected", "status_object"]
+if TYPE_CHECKING:
+    from ..dbcrypt import DatabaseIntent, DatabaseStatus
 
-_STATES = ("plaintext", "unreadable", "encrypted")
+__all__ = ["cancel_answer", "database_status_projection", "encrypt_answer", "status_object"]
 
+_FACTS: Final = ("armed", "encrypt_pending", "decrypt_pending", "journal")
 
-def key_material_valid(environ: Mapping[str, str]) -> bool:
-    """``HERMES_MEMORY_KEY`` decodes to 32 bytes (no provider is called: nothing can be injected or unlocked)."""
-    from ..keyvault._memory_hook import _decode_env_key
-
-    key = _decode_env_key(environ)
-    return key is not None and len(key) == 32
-
-
-def _pending(root: Path) -> tuple[bool, bool, bool]:
-    from ..dbcrypt import _migrate
-
-    return (
-        _migrate.pending_path(root).is_file(),
-        _migrate.decrypt_pending_path(root).is_file(),
-        _migrate.journal_path(root).is_file(),
-    )
+#: What a recorded startup outcome asks of the owner; any other value is ``startup_refused``.
+_OUTCOME_CODES: Final = {
+    "busy": "startup_busy",
+    "memory_not_enabled": "startup_memory_required",
+    "source_unavailable": "startup_key_unavailable",
+    "too_large": "startup_too_large",
+    "auth_interrupted": "startup_auth_interrupted",
+}
 
 
-def runtime_protected(home: Path, *, platform: str, environ: Mapping[str, str]) -> bool:
-    """This process runs the SQLCipher layer over an armed home with valid key material and nothing pending.
+def database_status_projection(
+    status: DatabaseStatus,
+    intent: DatabaseIntent | None = None,
+    *,
+    runtime_protected: bool = False,
+    plaintext_backups: int | None = None,
+    startup_outcome: str | None = None,
+) -> dict[str, object]:
+    """Project passive facts onto the exact v4 shape, without asserting unknown ones.
 
-    The non-unlocking counterpart of ``activity._gate.check_protection``: the
-    key check reads the environment value only, never ``dbcrypt._PROVIDER``.
+    ``supported`` is false only for known static unavailability. ``armed`` is the
+    marker alone, never proof of encryption. An unsafe or unobserved intent is
+    ``None``, which never means absent. ``databases`` stays ``[]``, meaning unknown:
+    classifying a file needs SQL.
     """
-    if platform != "darwin":
-        return False
-    from .. import dbcrypt
-    from ..dbcrypt import _shim
-
-    root = dbcrypt.root_home(home)
-    if not dbcrypt.armed(root) or any(_pending(root)):
-        return False
-    return _shim.is_installed() and key_material_valid(environ)
-
-
-def status_object(
-    home: Path, *, platform: str, sqlcipher: bool, environ: Mapping[str, str] | None = None
-) -> dict[str, Any]:
-    """``/status.databases``: persisted intent, pending work, runtime protection and key-less discovery."""
-    if platform != "darwin":
+    if status.capability == "unavailable":
         return {"supported": False}
-    from .. import dbcrypt
-    from ..dbcrypt import _migrate
-
-    env = os.environ if environ is None else environ
-    root = dbcrypt.root_home(home)
-    encrypt_pending, decrypt_pending, journal = _pending(root)
+    facts = {} if intent is None or intent.unsafe else {field: getattr(intent, field) for field in _FACTS}
     return {
-        "supported": sqlcipher,
-        "armed": dbcrypt.armed(root),
-        "encrypt_pending": encrypt_pending,
-        "decrypt_pending": decrypt_pending,
-        "journal": journal,
-        "runtime_protected": runtime_protected(home, platform=platform, environ=env),
-        "databases": _discovered(root),
-        "plaintext_backups": len(_migrate.plaintext_backups(root)),
+        "supported": True,
+        **{field: facts.get(field) for field in _FACTS},
+        "runtime_protected": runtime_protected,
+        "databases": [],
+        "plaintext_backups": plaintext_backups,
+        "startup_outcome": startup_outcome,
     }
 
 
-def _discovered(root: Path) -> list[dict[str, Any]]:
-    """Key-less discovery: ``plaintext`` or ``unreadable`` per database file (``encrypted`` needs the key).
+def _runtime_protected(root: Path) -> bool:
+    """Observe this process's installed authority: native, live, for this root, behind the shim.
 
-    Inside a Hermes process whose ``sqlite3`` is the SQLCipher shim, the offline
-    classifier may not open the files (it would drop Hermes's own SQLite locks;
-    ``dbcrypt._migrate._refuse_inside_a_runtime``), so every file is probed
-    through the process's own library instead (``dbcrypt._monitor.is_plaintext``,
-    the per-turn check's probe). Outside one the classifier runs as before.
+    Never ``check()``, an unwrap, SQL or an environment key. A failed observation is
+    "not protected", so polling cannot claim protection or fail the status answer.
     """
-    from ..dbcrypt import _migrate, _monitor, _shim
+    from .. import dbcrypt
+    from ..dbcrypt import _shim
 
-    if not _shim.is_installed():
-        return [
-            {"relative": found.relative, "state": found.state}
-            for found in _migrate.discover(root, None)
-            if isinstance(found.relative, str) and found.state in _STATES
-        ]
-    found: list[dict[str, Any]] = []
-    for path in _migrate.database_paths(root):
-        try:
-            size = path.stat().st_size
-        except OSError:
-            found.append({"relative": str(path.relative_to(root)), "state": "unreadable"})
-            continue
-        if size == 0 or path.suffix.casefold() == ".json":  # what the classifier omits as "other"
-            continue
-        state = "plaintext" if _monitor.is_plaintext(path) else "unreadable"
-        found.append({"relative": str(path.relative_to(root)), "state": state})
-    return found
+    try:
+        provider = dbcrypt._runtime._PROVIDER
+        if provider is None or not provider.runtime_native:
+            return False
+        authority = provider.current_authority
+        # A forked child's authority only goes terminal on next use, which polling never does.
+        if authority is None or authority.terminal or authority._pid != os.getpid():
+            return False
+        return authority.root == Path(os.path.realpath(root)) and _shim.is_installed()
+    except Exception:
+        return False
+
+
+def _startup_outcome(root: Path) -> str | None:
+    """The startup record's code. This bounded read is the one exception to metadata-only polling.
+
+    Only called while a conversion is scheduled: without a schedule no answer depends
+    on the record, and a legacy shared ``mordred/`` would read as a refusal.
+    """
+    from ..dbcrypt import _startup
+
+    try:
+        return _startup.read_outcome(root)
+    except Exception:
+        return "refused"  # Present and unusable: counts as "any other", never as no record.
+
+
+def _plaintext_backups(root: Path) -> int | None:
+    """Archives that may hold plaintext copies: listed, never opened. ``None`` when not listable."""
+    from ..dbcrypt import _migrate
+
+    try:
+        return len(_migrate.plaintext_backups(root))
+    except OSError:
+        return None
+
+
+def status_object(
+    home: Path, *, platform: str | None = None, sqlcipher: bool | None = None, environ: Mapping[str, str] | None = None
+) -> dict[str, object]:
+    """Passive shared observation; legacy arguments do not grant database authority."""
+    from .. import dbcrypt
+
+    status = dbcrypt.database_status(home)
+    if status.capability == "unavailable":
+        return database_status_projection(status)
+    intent = dbcrypt.database_intent(home)
+    root = dbcrypt.root_home(home)
+    known = not intent.unsafe
+    return database_status_projection(
+        status,
+        intent,
+        runtime_protected=_runtime_protected(root),
+        plaintext_backups=_plaintext_backups(root) if known else None,
+        startup_outcome=_startup_outcome(root) if known and intent.encrypt_pending else None,
+    )
 
 
 def _attention(code: str) -> dict[str, Any]:
     return {"ok": True, "action": "attention", "code": code}
 
 
+def _unknown(facts: Mapping[str, Any]) -> bool:
+    return any(facts.get(field) is None for field in _FACTS)
+
+
 def encrypt_answer(home: Path, facts: Mapping[str, Any]) -> dict[str, Any]:
     """The total decision over ``facts`` (a :func:`status_object`); schedules when that is the answer.
 
-    Raises ``OSError`` when scheduling fails (the route answers ``databases_failed``).
+    The first matching row decides. The journal precedes every other fact, because a
+    record can coexist with a journal. Raises when the size or the schedule fails (the
+    route answers ``databases_failed``).
+    """
+    from .. import dbcrypt
+    from ..dbcrypt import _migrate, _startup
+
+    if _unknown(facts):
+        return _attention("databases_failed")
+    if facts["journal"]:
+        return _attention("journal")
+    if facts["decrypt_pending"]:
+        return _attention("decrypt_pending")
+    if facts["armed"]:
+        if facts["encrypt_pending"]:
+            return _attention("stale_pending")  # startup refuses a pending conversion once armed
+        if not facts.get("runtime_protected"):
+            return {"ok": True, "action": "needs_restart", "restart_required": True}
+        return {"ok": True, "action": "done"}
+    if not facts["encrypt_pending"]:
+        root = dbcrypt.root_home(home)
+        if _startup.conversion_too_large(root):
+            return _attention("startup_too_large")
+        _migrate.schedule(root)
+    elif (outcome := facts.get("startup_outcome")) is not None:
+        return _attention(_OUTCOME_CODES.get(outcome, "startup_refused"))
+    return {"ok": True, "action": "scheduled", "restart_required": True}
+
+
+def cancel_answer(home: Path, facts: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove a schedule and its startup record; never converts, and refuses once one has started.
+
+    ``_migrate.unschedule`` rechecks the journal and marker in its own transaction, so
+    a conversion that starts after ``facts`` were read still refuses.
     """
     from .. import dbcrypt
     from ..dbcrypt import _migrate
 
-    plaintext = any(entry.get("state") == "plaintext" for entry in facts.get("databases", ()))
-    if facts.get("journal"):
-        return _attention("journal")
-    if facts.get("decrypt_pending"):
-        return _attention("decrypt_pending")
-    if not facts.get("armed"):
-        if not facts.get("encrypt_pending"):
-            _migrate.schedule(dbcrypt.root_home(home))
-        return {"ok": True, "action": "scheduled", "restart_required": True}
-    if facts.get("encrypt_pending"):
-        return _attention("stale_pending")  # startup skips a pending conversion once armed
-    if plaintext:
-        return _attention("plaintext_in_armed_home")  # quit Hermes, then `hermes-mordred databases encrypt`
-    if not facts.get("runtime_protected"):
-        return {"ok": True, "action": "needs_restart", "restart_required": True}
-    return {"ok": True, "action": "done"}
+    if _unknown(facts):
+        return _attention("databases_failed")
+    if facts["journal"] or facts["armed"]:
+        return _attention("databases_cancel_refused")
+    try:
+        _migrate.unschedule(dbcrypt.root_home(home))
+    except _migrate.MigrationError:
+        return _attention("databases_cancel_refused")
+    return {"ok": True, "action": "cancelled"}

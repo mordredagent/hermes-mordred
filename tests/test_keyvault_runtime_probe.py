@@ -16,7 +16,9 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -36,6 +38,27 @@ def _make_managed_venv(home: Path, *, python_name: str = "python3") -> Path:
     py = bindir / python_name
     py.write_text("")
     return py
+
+
+def _stub_run(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    returncode: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+    raises: Exception | None = None,
+) -> dict[str, Any]:
+    """Replace the probe subprocess; the returned dict receives the keyword arguments it was given."""
+    captured: dict[str, Any] = {}
+
+    def _fake_run(*_a: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if raises is not None:
+            raise raises
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    return captured
 
 
 # -----------------------------------------------------------------------------
@@ -152,39 +175,58 @@ class TestLauncherResolution:
 
 
 # -----------------------------------------------------------------------------
-# runtime_env_injection_available
+# The fail-closed misses the capability probes share
 # -----------------------------------------------------------------------------
-class TestRuntimeInjectionAvailable:
-    def test_none_python_is_unavailable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+_Probe = Callable[..., tuple[bool, str]]
+
+_ENV_INJECTION = pytest.param(runtime_env_injection_available, id="env-injection")
+_CONFIG_DECRYPT = pytest.param(runtime_config_decrypt_available, id="config-decrypt")
+
+
+class TestProbeFailsClosed:
+    @pytest.mark.parametrize("probe", [_ENV_INJECTION, _CONFIG_DECRYPT])
+    def test_none_python_is_unavailable(self, probe: _Probe, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(RUNTIME_PYTHON_ENV, raising=False)
         monkeypatch.setattr(shutil, "which", lambda _name: None)
-        ok, detail = runtime_env_injection_available(home=tmp_path)
+        ok, detail = probe(home=tmp_path)
         assert ok is False
         assert "could not locate" in detail
 
-    def test_oserror_when_interpreter_missing(self, tmp_path: Path) -> None:
-        ok, detail = runtime_env_injection_available(home=tmp_path, runtime_python=tmp_path / "ghost-python")
+    @pytest.mark.parametrize("probe", [_ENV_INJECTION, _CONFIG_DECRYPT])
+    def test_oserror_when_interpreter_missing(self, probe: _Probe, tmp_path: Path) -> None:
+        ok, detail = probe(home=tmp_path, runtime_python=tmp_path / "ghost-python")
         assert ok is False
         assert "could not run" in detail
 
-    def test_nonzero_returncode_reports_stderr(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(args=[], returncode=11, stdout="", stderr="plugin not registered")
-
-        monkeypatch.setattr(subprocess, "run", _fake_run)
-        ok, detail = runtime_env_injection_available(home=tmp_path, runtime_python=Path("/any/python"))
+    @pytest.mark.parametrize(
+        ("probe", "returncode", "stderr"),
+        [
+            pytest.param(runtime_env_injection_available, 11, "plugin not registered", id="env-injection"),
+            pytest.param(runtime_config_decrypt_available, 21, ".pth hook not installed", id="config-decrypt"),
+            pytest.param(runtime_memory_encryption_available, 31, "ENTRY_DELIMITER missing", id="memory-encryption"),
+        ],
+    )
+    def test_nonzero_returncode_reports_stderr(
+        self, probe: _Probe, returncode: int, stderr: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_run(monkeypatch, returncode=returncode, stderr=stderr)
+        ok, detail = probe(home=tmp_path, runtime_python=Path("/any/python"))
         assert ok is False
-        assert "plugin not registered" in detail
+        assert stderr in detail
 
-    def test_timeout_is_unavailable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
-            raise subprocess.TimeoutExpired(cmd="python", timeout=1.0)
-
-        monkeypatch.setattr(subprocess, "run", _fake_run)
-        ok, detail = runtime_env_injection_available(home=tmp_path, runtime_python=Path("/any/python"))
+    @pytest.mark.parametrize("probe", [_ENV_INJECTION, _CONFIG_DECRYPT])
+    def test_timeout_is_unavailable(self, probe: _Probe, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        _stub_run(monkeypatch, raises=subprocess.TimeoutExpired(cmd="python", timeout=1.0))
+        ok, detail = probe(home=tmp_path, runtime_python=Path("/any/python"))
         assert ok is False
         assert "timed out" in detail
 
+
+# -----------------------------------------------------------------------------
+# What each probe hands its child. Not parametrized: the three set up different
+# environments and pin different things, and that difference is the point.
+# -----------------------------------------------------------------------------
+class TestRuntimeInjectionAvailable:
     def test_strips_pythonpath_and_neutralizes_the_config_hook(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -197,13 +239,7 @@ class TestRuntimeInjectionAvailable:
         monkeypatch.setenv("PYTHONHOME", "/leak/home")
         monkeypatch.setenv("MORDRED_CONFIG_DECRYPT", "1")
         monkeypatch.setenv("HERMES_MEMORY_KEY", "synthetic-secret")
-        captured: dict[str, dict[str, str]] = {}
-
-        def _fake_run(*_a: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-            captured["env"] = dict(kwargs["env"])  # type: ignore[arg-type]
-            return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-
-        monkeypatch.setattr(subprocess, "run", _fake_run)
+        captured = _stub_run(monkeypatch)
         ok, detail = runtime_env_injection_available(home=tmp_path, runtime_python=Path("/any/python"))
         assert ok is True
         assert "can inject" in detail
@@ -213,53 +249,14 @@ class TestRuntimeInjectionAvailable:
         assert captured["env"].get("MORDRED_CONFIG_DECRYPT") == "0"
 
 
-# -----------------------------------------------------------------------------
-# runtime_config_decrypt_available — the config.yaml analogue of the env probe
-# -----------------------------------------------------------------------------
 class TestRuntimeConfigDecryptAvailable:
-    def test_none_python_is_unavailable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv(RUNTIME_PYTHON_ENV, raising=False)
-        monkeypatch.setattr(shutil, "which", lambda _name: None)
-        ok, detail = runtime_config_decrypt_available(home=tmp_path)
-        assert ok is False
-        assert "could not locate" in detail
-
-    def test_oserror_when_interpreter_missing(self, tmp_path: Path) -> None:
-        ok, detail = runtime_config_decrypt_available(home=tmp_path, runtime_python=tmp_path / "ghost-python")
-        assert ok is False
-        assert "could not run" in detail
-
-    def test_nonzero_returncode_reports_stderr(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(args=[], returncode=21, stdout="", stderr=".pth hook not installed")
-
-        monkeypatch.setattr(subprocess, "run", _fake_run)
-        ok, detail = runtime_config_decrypt_available(home=tmp_path, runtime_python=Path("/any/python"))
-        assert ok is False
-        assert ".pth hook not installed" in detail
-
-    def test_timeout_is_unavailable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
-            raise subprocess.TimeoutExpired(cmd="python", timeout=1.0)
-
-        monkeypatch.setattr(subprocess, "run", _fake_run)
-        ok, detail = runtime_config_decrypt_available(home=tmp_path, runtime_python=Path("/any/python"))
-        assert ok is False
-        assert "timed out" in detail
-
     def test_neutralizes_hook_and_strips_pythonpath(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # The probe must (a) strip a stray PYTHONPATH/PYTHONHOME like the env probe
         # and (b) set MORDRED_CONFIG_DECRYPT=0 so the .pth startup hook cannot fire
         # a vault open / Touch ID prompt while we are merely probing capability.
         monkeypatch.setenv("PYTHONPATH", "/leak/src")
         monkeypatch.setenv("PYTHONHOME", "/leak/home")
-        captured: dict[str, dict[str, str]] = {}
-
-        def _fake_run(*_a: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-            captured["env"] = dict(kwargs["env"])  # type: ignore[arg-type]
-            return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-
-        monkeypatch.setattr(subprocess, "run", _fake_run)
+        captured = _stub_run(monkeypatch)
         ok, detail = runtime_config_decrypt_available(home=tmp_path, runtime_python=Path("/any/python"))
         assert ok is True
         assert "can decrypt a sealed config.yaml" in detail
@@ -268,31 +265,13 @@ class TestRuntimeConfigDecryptAvailable:
         assert captured["env"].get("MORDRED_CONFIG_DECRYPT") == "0"
 
 
-# -----------------------------------------------------------------------------
-# runtime_memory_encryption_available — the memories/*.md analogue
-# -----------------------------------------------------------------------------
 class TestRuntimeMemoryEncryptionAvailable:
-    def test_nonzero_returncode_reports_stderr(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(args=[], returncode=31, stdout="", stderr="ENTRY_DELIMITER missing")
-
-        monkeypatch.setattr(subprocess, "run", _fake_run)
-        ok, detail = runtime_memory_encryption_available(home=tmp_path, runtime_python=Path("/any/python"))
-        assert ok is False
-        assert "ENTRY_DELIMITER missing" in detail
-
     def test_never_hands_the_memory_key_to_the_child(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """No probe needs HERMES_MEMORY_KEY, so it must not reach a child process
         from here — the probed interpreter is chosen from another process's argv."""
         monkeypatch.setenv("HERMES_MEMORY_KEY", "c2VjcmV0LW1lbW9yeS1rZXktdmFsdWUtaGVyZQ==")
         monkeypatch.setenv("PYTHONPATH", "/leak/src")
-        captured: dict[str, dict[str, str]] = {}
-
-        def _fake_run(*_a: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-            captured["env"] = dict(kwargs["env"])  # type: ignore[arg-type]
-            return subprocess.CompletedProcess(args=[], returncode=0, stdout="A", stderr="")
-
-        monkeypatch.setattr(subprocess, "run", _fake_run)
+        captured = _stub_run(monkeypatch, stdout="A")
         ok, detail = runtime_memory_encryption_available(home=tmp_path, runtime_python=Path("/any/python"))
         assert ok is True
         assert "seam A" in detail

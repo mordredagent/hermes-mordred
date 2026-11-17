@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Protocol, cast
 
-from ..._policy_types import PolicyMode
+from ..._core._policy_types import PolicyMode
 from .._exceptions import BringupFailed
 from . import _tor_windows
 
@@ -43,7 +43,7 @@ PATH_NAME: Final[str] = "tor"
 DEFAULT_PORT_CANDIDATES: Final[tuple[int, ...]] = (9050, 9150)
 DEFAULT_BOOTSTRAP_TIMEOUT: Final[float] = 30.0
 DEFAULT_GRACE_SECONDS: Final[float] = 5.0
-BOOTSTRAP_DONE_TOKEN: Final[str] = "Bootstrapped 100%"
+BOOTSTRAP_DONE_TOKEN: Final[str] = "Bootstrapped 100%"  # noqa: S105 - Tor log marker, not a secret
 # Bootstrap output caps (all platforms): one line, and lines buffered for the
 # bootstrap reader. Exceeding either is a classified bring-up failure; the
 # pump keeps draining (and discarding) the pipe so Tor never blocks on it.

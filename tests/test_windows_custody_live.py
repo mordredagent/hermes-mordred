@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
+
 pytestmark = pytest.mark.integration
 
 
@@ -25,8 +27,11 @@ pytestmark = pytest.mark.integration
 )
 def test_real_cng_memory_and_independent_audit_custody_survive_new_session():
     from mordred_hermes._private_fs import open_confidential_directory, open_private_directory
+    from mordred_hermes.keyvault import wrap
+    from mordred_hermes.keyvault._database_authority import observe_database_source
+    from mordred_hermes.keyvault._mail_key import mail_backend, mail_key_id
     from mordred_hermes.keyvault._runtime_probe import require_stopped_windows_gateways
-    from mordred_hermes.keyvault._windows_custody import windows_custody_session
+    from mordred_hermes.keyvault._windows_custody import upgrade_manifest_v2, windows_custody_session
 
     value = os.environ.get("MORDRED_WINDOWS_CUSTODY_TEST_ROOT")
     if not value:
@@ -36,9 +41,14 @@ def test_real_cng_memory_and_independent_audit_custody_survive_new_session():
         pass
     home = root / ("custody-" + uuid.uuid4().hex)
     require_stopped_windows_gateways(home)
+    with open_confidential_directory(home, create=True):
+        pass
     print(f"Isolated custody fixture: {home}")
-    with windows_custody_session(home, create=True) as session:
-        key = session.enroll_memory()
+    with (
+        database_key_mutation(root=home, generation=None) as database_lease,
+        windows_custody_session(home, create=True) as session,
+    ):
+        key = session.enroll_memory(database_lease=database_lease)
         memory = session.lease("memory")
         audit = session.enroll_role("audit")
         matches = hmac.compare_digest(session.load_memory_key(), key)
@@ -48,12 +58,24 @@ def test_real_cng_memory_and_independent_audit_custody_survive_new_session():
         assert matches, "memory custody roundtrip failed"
         session.validate_lease(memory)
         session.backend_for(audit)
+    snapshot = observe_database_source(root=home)
+    upgrade_manifest_v2(home=home)
+    with windows_custody_session(home) as session:
+        mail = session.enroll_role("mail")
+        assert len({memory.native_key_id, audit.native_key_id, mail.native_key_id}) == 3
+    assert observe_database_source(root=home) == snapshot
+    mail_id = mail_key_id(home)
+    sealed = wrap.wrap_dek(b"M" * 32, mail_id, backend=mail_backend(home=home))
+    assert wrap.unwrap_dek(sealed, mail_id, backend=mail_backend(home=home), audit_sink=lambda entry: None) == b"M" * 32
+    with windows_custody_session(home) as session:
+        session.delete_role(mail, erase_authorized=True)
+    assert observe_database_source(root=home) == snapshot
     # No hooks were armed and no memory was written; explicit opt-out satisfies
     # the same checked purge precondition a completed disable ceremony supplies.
     with open_private_directory(home / "mordred") as directory, directory.transaction() as tx:
         tx.create_bytes("memory-vault.optout", b"1\n")
-    with windows_custody_session(home) as session:
-        session.delete_role(memory)
+    with database_key_mutation(root=home, generation=None) as database_lease, windows_custody_session(home) as session:
+        session.delete_role(memory, database_lease=database_lease)
         assert session.resolve_memory_key() is None
         session.validate_lease(audit)
         session.delete_role(audit, erase_authorized=True)

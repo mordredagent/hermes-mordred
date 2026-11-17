@@ -83,7 +83,7 @@ def _settings() -> tuple[bool, frozenset[str]]:
     try:
         from ruamel.yaml import YAML
 
-        from .._home import hermes_home
+        from .._core._home import hermes_home
 
         path = Path(hermes_home()) / "config.yaml"
         data = YAML(typ="safe").load(path.read_text("utf-8")) if path.is_file() else None

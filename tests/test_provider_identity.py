@@ -1,4 +1,4 @@
-"""Tests for ``mordred_hermes._provider_identity``.
+"""Tests for ``mordred_hermes._core._provider_identity``.
 
 The normalizer resolves Hermes provider *aliases* to canonical slugs so that
 strict-mode enforcement and the transport flagger key off the same identifier
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from mordred_hermes._provider_identity import PROVIDER_ALIASES, canonicalize_provider
+from mordred_hermes._core._provider_identity import PROVIDER_ALIASES, canonicalize_provider
 
 
 @pytest.mark.parametrize(

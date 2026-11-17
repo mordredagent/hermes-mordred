@@ -88,7 +88,7 @@ def _default_probe(base_url: str) -> bool:
 
 def _command_of(pid: int) -> str | None:
     try:
-        out = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=5)
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=5)  # noqa: S603, S607 - list argv, no shell; system tool resolved on PATH
     except (OSError, subprocess.SubprocessError):
         return None
     return out.stdout.strip() or None

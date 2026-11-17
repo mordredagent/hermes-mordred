@@ -127,11 +127,6 @@ class TestSubcommandTree:
         assert ns.lines == 5
         assert callable(ns.func)
 
-    def test_keyvault_init_accepts_legacy_store_seed_flag(self) -> None:
-        ns = _build_parser().parse_args(["mordred", "keyvault", "init", "--store-seed-for-hd"])
-        assert ns.store_seed_for_hd is True
-        assert callable(ns.func)
-
     def test_vault_migrate_maps_multiple_sources_and_root(self) -> None:
         ns = _build_parser().parse_args(
             ["mordred", "vault", "migrate", "/tmp/.env", "/tmp/config.yaml", "--root", "/tmp/vault"]
@@ -140,38 +135,33 @@ class TestSubcommandTree:
         assert ns.root == "/tmp/vault"
         assert callable(ns.func)
 
-    def test_keyvault_init_defaults_to_encrypted_seed_storage(self) -> None:
-        parser = _build_parser()
-        ns = parser.parse_args(["mordred", "keyvault", "init"])
-        assert ns.store_seed_for_hd is True
-
-    def test_keyvault_init_paper_only_opts_out_of_seed_storage(self) -> None:
-        parser = _build_parser()
-        ns = parser.parse_args(["mordred", "keyvault", "init", "--paper-only"])
-        assert ns.store_seed_for_hd is False
-
-    def test_configure_with_hermes_setup_defaults_false(self) -> None:
-        parser = _build_parser()
-        ns = parser.parse_args(["mordred", "configure"])
-        assert ns.with_hermes_setup is False
+    @pytest.mark.parametrize(
+        ("flags", "store_seed"),
+        [
+            pytest.param([], True, id="default"),
+            pytest.param(["--store-seed-for-hd"], True, id="legacy-store-seed"),
+            pytest.param(["--paper-only"], False, id="paper-only"),
+        ],
+    )
+    def test_keyvault_init_seed_storage(self, flags: list[str], store_seed: bool) -> None:
+        ns = _build_parser().parse_args(["mordred", "keyvault", "init", *flags])
+        assert ns.store_seed_for_hd is store_seed
         assert callable(ns.func)
 
-    def test_configure_with_hermes_setup_flag_sets_true(self) -> None:
-        # Guards the flag-name -> dest mapping that cli_handler reads via
-        # getattr(args, "with_hermes_setup", ...); a rename would break the CLI
-        # while leaving the Namespace-based handler tests green.
-        parser = _build_parser()
-        ns = parser.parse_args(["mordred", "configure", "--with-hermes-setup"])
-        assert ns.with_hermes_setup is True
-
-    def test_configure_skip_hermes_setup_parses_as_noop(self) -> None:
-        # Deprecated flag (2026-07-16): still parses for backward compat and
-        # resolves into the same shared dest as the default (store_false), so
-        # it just reaffirms the (now default) skip behavior and leaves no
-        # vestigial attribute on the Namespace.
-        parser = _build_parser()
-        ns = parser.parse_args(["mordred", "configure", "--skip-hermes-setup"])
-        assert ns.with_hermes_setup is False
+    @pytest.mark.parametrize(
+        ("flags", "with_hermes_setup"),
+        [
+            pytest.param([], False, id="default"),
+            pytest.param(["--with-hermes-setup"], True, id="with-hermes-setup"),
+            pytest.param(["--skip-hermes-setup"], False, id="deprecated-skip-hermes-setup"),
+        ],
+    )
+    def test_configure_hermes_setup(self, flags: list[str], with_hermes_setup: bool) -> None:
+        # The handler reads this shared dest; the deprecated skip flag remains
+        # a no-op and must not leave a separate Namespace attribute behind.
+        ns = _build_parser().parse_args(["mordred", "configure", *flags])
+        assert ns.with_hermes_setup is with_hermes_setup
+        assert callable(ns.func)
         assert not hasattr(ns, "skip_hermes_setup")
 
     def test_configure_with_and_skip_hermes_setup_conflict(self) -> None:

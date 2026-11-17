@@ -19,9 +19,9 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
 
-from .._audit_session import AuditProbe, AuditSession, AuditSnapshot, audit_session, decode_audit_bytes
-from .._config_io import PublicationReceipt
-from .._log_rotation import rotate_audit, sweep_audit_retention, today_utc_date, utcnow_iso
+from .._core._audit_session import AuditProbe, AuditSession, AuditSnapshot, audit_session, decode_audit_bytes
+from .._core._config_io import PublicationReceipt
+from .._core._log_rotation import rotate_audit, sweep_audit_retention, today_utc_date, utcnow_iso
 from .._private_fs import (
     FileIdentity,
     FileMetadata,

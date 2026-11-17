@@ -8,8 +8,8 @@ from pathlib import PureWindowsPath
 
 import pytest
 
-from mordred_hermes import _audit_io as audit
 from mordred_hermes import _private_fs as fs
+from mordred_hermes._core import _audit_io as audit
 from mordred_hermes._private_fs import _windows_paths as paths
 from tests.test_audit_session import audit_path as audit_path_fixture  # noqa: F401
 from tests.test_private_fs_confidential import PRIVATE, Native, Node
@@ -192,7 +192,7 @@ def test_append_failure_is_not_retried_and_preserves_primitive_outcome(audit_pat
 
 
 def test_session_rejects_inherited_process_capability(audit_path, monkeypatch):
-    from mordred_hermes import _audit_session as module
+    from mordred_hermes._core import _audit_session as module
 
     with audit.audit_session(audit_path) as session, monkeypatch.context() as patch:
         patch.setattr(module.os, "getpid", lambda: -1)

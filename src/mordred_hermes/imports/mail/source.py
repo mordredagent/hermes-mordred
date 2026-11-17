@@ -8,9 +8,11 @@ Security contract:
 - Only regular files are read: the path is checked with :func:`os.lstat` before
   opening (a symlink, FIFO, socket or device is refused) and the opened
   descriptor is checked again with :func:`os.fstat`.
-- The mbox is streamed line by line; a message larger than
+- The source is streamed in chunks through an isolated reader process (the only
+  opener); there is no size or suffix limit and no temporary file. The mbox is
+  split line by line; a message larger than
   :data:`MAX_MESSAGE_BYTES` is dropped while reading and counted as
-  ``skipped_oversize``. No temporary files are written.
+  ``skipped_oversize``.
 - Errors carry content-free codes only.
 - :class:`TrustedBytes` carries messages fetched by the IMAP collector
   (:mod:`.imap_sync`) together with :class:`TrustedMeta`: the server's labels,
@@ -21,6 +23,7 @@ Security contract:
 
 from __future__ import annotations
 
+import contextlib
 import io
 import os
 import re
@@ -144,12 +147,12 @@ class TrustedBytes:
 
 MailSource = MboxSource | EmlSource | MboxBytes | EmlBytes | TrustedBytes
 
-_OPEN_FLAGS: Final = (
-    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-)
 
+@contextlib.contextmanager
+def _open_regular(path: Path) -> Iterator[IO[bytes]]:
+    from ...activity._gate import ActivityRefused
+    from .._protected_destination import checked_export_stream
 
-def _open_regular(path: Path) -> IO[bytes]:
     try:
         before = os.lstat(path)
     except FileNotFoundError:
@@ -159,17 +162,12 @@ def _open_regular(path: Path) -> IO[bytes]:
     if not stat.S_ISREG(before.st_mode):
         raise SourceError("not_regular_file")
     try:
-        fd = os.open(path, _OPEN_FLAGS)
-    except OSError:
+        # The isolated reader process is the only opener; this PID never opens
+        # the path, so a protected DB alias cannot lose its locks.
+        with checked_export_stream(path.absolute()) as handle:
+            yield handle
+    except (ActivityRefused, OSError):
         raise SourceError("read_error") from None
-    try:
-        after = os.fstat(fd)
-        if not stat.S_ISREG(after.st_mode) or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
-            raise SourceError("not_regular_file")
-        return os.fdopen(fd, "rb")
-    except BaseException:
-        os.close(fd)
-        raise
 
 
 def _is_blank(line: bytes) -> bool:

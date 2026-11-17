@@ -31,9 +31,18 @@ def _build_at_cli_identity(
     """
     ident = vault_cli._vault_identity(root)
     backend.generate_enclave_key(ident)
-    opened = vault.init_vault(
-        root, key_id=ident, passphrase=_PASSPHRASE, backend=backend, store=store, anchor_label=ident
-    )
+    from mordred_hermes.wizard._vault_lifecycle import _initialization_lease
+
+    with _initialization_lease(root) as lease:
+        opened = vault.init_vault(
+            root,
+            key_id=ident,
+            passphrase=_PASSPHRASE,
+            backend=backend,
+            store=store,
+            anchor_label=ident,
+            database_lease=lease,
+        )
     try:
         for name, plaintext in (files or {}).items():
             opened.enroll_file(name, plaintext)
@@ -109,7 +118,7 @@ class TestChangePassphrase:
         from cryptography.exceptions import InvalidTag
 
         backend, store = FakeBackend(), FakeAnchorStore()
-        root = tmp_path / "vault"
+        root = tmp_path / "mordred" / "vault"
         _build_at_cli_identity(root, backend, store, files={".env": b"SECRET=1\n"})
         ident = vault_cli._vault_identity(root)
         with vault.open_vault(root, key_id=ident, backend=backend, store=store, anchor_label=ident) as before:
@@ -144,7 +153,7 @@ class TestChangePassphrase:
         from cryptography.exceptions import InvalidTag
 
         backend, store = FakeBackend(), FakeAnchorStore()
-        root = tmp_path / "vault"
+        root = tmp_path / "mordred" / "vault"
         _build_at_cli_identity(root, backend, store, files={".env": b"A=1\n"})
         ident = vault_cli._vault_identity(root)
 
@@ -168,7 +177,7 @@ class TestChangePassphrase:
         from cryptography.exceptions import InvalidTag
 
         backend, store = FakeBackend(), FakeAnchorStore()
-        root = tmp_path / "vault"
+        root = tmp_path / "mordred" / "vault"
         _build_at_cli_identity(root, backend, store)
         ident = vault_cli._vault_identity(root)
         with pytest.raises(InvalidTag):
@@ -184,7 +193,7 @@ class TestChangePassphrase:
 
     def test_cli_falls_back_to_old_passphrase_when_device_unavailable(self, tmp_path: Path) -> None:
         backend, store = FakeBackend(), FakeAnchorStore()
-        root = tmp_path / "vault"
+        root = tmp_path / "mordred" / "vault"
         _build_at_cli_identity(root, backend, store, files={".env": b"Z=9\n"})
 
         # A store whose read raises makes the device path fail, forcing the CLI
@@ -204,7 +213,7 @@ class TestChangePassphrase:
 
     def test_cli_empty_new_passphrase_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         backend, store = FakeBackend(), FakeAnchorStore()
-        root = tmp_path / "vault"
+        root = tmp_path / "mordred" / "vault"
         _build_at_cli_identity(root, backend, store)
         rc = vault_cli.change_passphrase(
             root=root, prompt_io=_PromptIO(passwords=["", ""]), backend=backend, store=store
@@ -215,7 +224,7 @@ class TestChangePassphrase:
 
     def test_cli_mismatch_new_passphrase_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         backend, store = FakeBackend(), FakeAnchorStore()
-        root = tmp_path / "vault"
+        root = tmp_path / "mordred" / "vault"
         _build_at_cli_identity(root, backend, store)
         rc = vault_cli.change_passphrase(
             root=root, prompt_io=_PromptIO(passwords=["alpha", "beta"]), backend=backend, store=store
@@ -248,7 +257,7 @@ class TestChangePassphrase:
         dropped (backup that skipped it, manual cleanup) must still rotate —
         `change_passphrase` re-materializes the lock like the other write paths."""
         backend, store = FakeBackend(), FakeAnchorStore()
-        root = tmp_path / "vault"
+        root = tmp_path / "mordred" / "vault"
         _build_at_cli_identity(root, backend, store, files={".env": b"K=v\n"})
         (root / ".lock").unlink()  # simulate a vault restored without the dotfile
 
@@ -280,7 +289,7 @@ class TestRecover:
     ) -> None:
         monkeypatch.setattr(sys, "platform", "linux")
         old_backend, old_store = FakeBackend(), FakeAnchorStore()
-        root = tmp_path / "vault"
+        root = tmp_path / "mordred" / "vault"
         _build_at_cli_identity(root, old_backend, old_store, files={".env": b"SECRET=1\n"})
 
         # The new machine: nothing provisioned yet.
@@ -307,7 +316,7 @@ class TestRecover:
 
     def test_wrong_passphrase_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         old_backend, old_store = FakeBackend(), FakeAnchorStore()
-        root = tmp_path / "vault"
+        root = tmp_path / "mordred" / "vault"
         _build_at_cli_identity(root, old_backend, old_store, files={".env": b"SECRET=1\n"})
 
         new_backend, new_store = FakeBackend(), FakeAnchorStore()
@@ -335,7 +344,7 @@ class TestRecover:
     def test_tampered_manifest_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """A manifest-body edit fails the MAC under the recovered master → fail closed."""
         old_backend, old_store = FakeBackend(), FakeAnchorStore()
-        root = tmp_path / "vault"
+        root = tmp_path / "mordred" / "vault"
         _build_at_cli_identity(root, old_backend, old_store, files={".env": b"value"})
         mpath = root / "manifest.1.mvmf"
         body, _, b64tag = mpath.read_bytes().partition(b"\n")

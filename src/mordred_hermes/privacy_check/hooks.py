@@ -25,9 +25,9 @@ import sys
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
-from .._audit_support import safe_audit_append
-from .._plugin_identity import MIGRATE_COMMAND, PLUGIN_NAME
-from .._policy_types import VALID_ACTIVE_PATHS, ActivePath
+from .._core._audit_support import safe_audit_append
+from .._core._plugin_identity import MIGRATE_COMMAND, PLUGIN_NAME
+from .._core._policy_types import VALID_ACTIVE_PATHS, ActivePath
 from . import _runtime
 from ._exceptions import AuditWriterRefused, MordredIntegrityRefused
 from .policy import evaluate_pre_tool_call

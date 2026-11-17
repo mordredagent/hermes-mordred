@@ -18,8 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, Literal, TypeAlias
 
-from .._policy_types import ActivePath as ActivePath
-from .._policy_types import PolicyMode as PolicyMode
+from .._core._policy_types import ActivePath as ActivePath
+from .._core._policy_types import PolicyMode as PolicyMode
 from ._audit_reasons import ReasonCode
 
 NetworkRequirement: TypeAlias = Literal["tor", "vpn", "clearnet", "local-only"]

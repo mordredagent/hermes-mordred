@@ -108,7 +108,7 @@ def test_a_search_screen_message_is_searched_by_its_words_and_the_question() -> 
 
 
 def test_settings_follow_config_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("mordred_hermes._home.hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("mordred_hermes._core._home.hermes_home", lambda: tmp_path)
     assert turn_context._settings() == (True, frozenset({"extension"}))
     (tmp_path / "config.yaml").write_text(
         "plugins:\n  mordred_recall:\n    turn_context: false\n    turn_context_platforms: [extension, CLI, cron]\n"

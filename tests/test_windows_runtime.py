@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from mordred_hermes import _windows_runtime as runtime
+from mordred_hermes._core import _windows_runtime as runtime
 from tests._helpers import PlatformSys
 
 

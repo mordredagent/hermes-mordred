@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import mordred_hermes._home as _home
+import mordred_hermes._core._home as _home
 
 
 def test_hermes_base_matches_env_hermes_home_not_the_real_dotfile_home() -> None:

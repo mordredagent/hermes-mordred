@@ -146,7 +146,7 @@ def test_windows_install_places_assets_through_checked_primitives(windows_instal
 def test_windows_install_migrates_only_the_explicit_home(windows_install, monkeypatch):
     from ruamel.yaml import YAML
 
-    from mordred_hermes import _config_io, _config_text_io
+    from mordred_hermes._core import _config_io, _config_text_io
     from mordred_hermes.wizard import policy_writer
 
     home = windows_install.home

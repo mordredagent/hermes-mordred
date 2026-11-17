@@ -109,7 +109,7 @@ def routed() -> bool:
 
 
 def _home() -> Path:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     return hermes_home()
 
@@ -271,7 +271,7 @@ def telegram_role(home: Path | None = None) -> RoleStatus | None:
 
     Load-only and non-blocking: no native call, no unwrap, no lock wait.
     """
-    from .._config_io import CanonicalPaths, canonical_session
+    from .._core._config_io import CanonicalPaths, canonical_session
     from ..keyvault._windows_custody import windows_custody_session
 
     path = home or _home()

@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes._audit_session import AuditSession
-from mordred_hermes._config_io import PolicyPendingError
+from mordred_hermes._core._audit_session import AuditSession
+from mordred_hermes._core._config_io import PolicyPendingError
 from mordred_hermes._private_fs import FileIdentity, PrivateFSError
 from mordred_hermes.keyvault import _windows_capability
 from mordred_hermes.keyvault._exceptions import WrapAuthCancelled, WrapKeyNotFound, WrapNativeUnavailable

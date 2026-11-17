@@ -34,7 +34,7 @@ from collections.abc import Mapping
 from typing import Final
 from urllib.parse import urlsplit, urlunsplit
 
-from .._provider_identity import canonicalize_provider
+from .._core._provider_identity import canonicalize_provider
 
 # Hermes 0.19 exposes a few different slugs for the same policy-level
 # provider depending on whether a route came from auth.py, models.py, or the

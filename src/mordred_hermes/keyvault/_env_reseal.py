@@ -18,7 +18,7 @@ already depend on.
 
 Non-interactive by construction — no ``prompt_io`` seam, because there is
 nothing to prompt for: every message is emitted via
-:mod:`mordred_hermes._term` (already used elsewhere in ``keyvault``, e.g.
+:mod:`mordred_hermes._core._term` (already used elsewhere in ``keyvault``, e.g.
 :mod:`._env_write_guard` / :mod:`.api`, specifically so non-wizard packages can
 reuse it — see that module's docstring). So this module carries no dependency
 on the wizard-owned ``PromptIO`` machinery either.
@@ -43,7 +43,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .. import _term
+from .._core import _term
 from ._identity import resolve_backend, resolve_store, vault_identity
 from ._plaintext_capture import (
     capture_plaintext,
@@ -102,7 +102,7 @@ def _open_hot_or_report(
     root: Path, *, backend: NativeBackend | None = None, store: AnchorStore | None = None
 ) -> OpenVault | None:
     """Open the vault at ``root`` on the hot path (device key, no passphrase), or
-    report a reason via :mod:`mordred_hermes._term` and return ``None``.
+    report a reason via :mod:`mordred_hermes._core._term` and return ``None``.
 
     Still a keyvault-local counterpart to
     ``wizard._vault_open._open_hot_path_or_report`` — this module never reaches

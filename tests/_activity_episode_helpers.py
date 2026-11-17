@@ -28,6 +28,24 @@ def make_store(home: Path) -> ActivityStore:
     return store
 
 
+def event(seq: int, episode: str = "ep-1", **overrides: Any) -> NormalizedEvent:
+    raw: dict[str, Any] = {
+        "event_id": overrides.pop("event_id", str(uuid.uuid4())),
+        "seq": seq,
+        "episode_id": episode,
+        "source": "operator",
+        "actor": "agent",
+        "observed_at": 1000.0 + seq,
+        "phase": "dispatched",
+        "action": {"op": "click", "target": "Reports", "site": "example.com", "route": "/r"},
+        "result": {"status": "unknown"},
+        "quality": {"coverage": "selected_tab"},
+        "session_ref": {"run_id": "run-1"},
+    }
+    raw.update(overrides)
+    return normalize_event(raw, excluded_sites=DEFAULT_EXCLUDED_SITES)
+
+
 def raw_event(seq: int, episode: str, *, phase: str, op: str, **overrides: Any) -> dict[str, Any]:
     raw: dict[str, Any] = {
         "event_id": str(uuid.uuid4()),

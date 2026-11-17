@@ -3,11 +3,60 @@
 > **Status**: current implementation map. Completed PR-by-PR history lives in
 > Git and PR descriptions; this document describes the architecture to maintain
 > now. [`SPEC.md`](./SPEC.md) defines behavior and [`TODO.md`](./TODO.md) lists
-> open work.
+> open work. The dated execution sequences below retain stable headings for
+> references; they are not independent task queues. Use TODO for reconciled
+> implementation/acceptance status and CI for actual validation evidence.
 
 Mordred is a standalone Python distribution loaded through
 `hermes_agent.plugins`. It does not fork Hermes and does not submit changes to
 Hermes upstream.
+
+
+## Scoped maintenance coordination (2026-11-04)
+
+Follow [the six-task implementation plan](../superpowers/plans/2026-11-04-maintenance-six.md)
+and its [design](../superpowers/specs/2026-11-04-maintenance-six-design.md).
+Land this coordination documentation before cross-component implementation;
+use separate local worktrees/branches for YAML diagnostics, passive status,
+Windows test setup, dbcrypt admission, ImportStore history APIs and acceptance
+tooling. Integrate reviewed commits locally, run focused security modules per
+slice and one full regression at final integration. Preserve required live gates
+and distinguish historical timing weights from fresh same-host measurements.
+
+## Additional performance coordination (2026-11-04)
+
+The [additional design](../superpowers/specs/2026-11-04-additional-performance-design.md)
+and [implementation plan](../superpowers/plans/2026-11-04-additional-performance.md)
+coordinate measured Unix default-suite parallelism, audit preflight setup and
+single-snapshot public search hydration. Preserve all selected cases, per-cell
+coverage floors, native Windows shards and live gates. Enable parallel CI only
+after controlled outcome/coverage equivalence and at least 25% elapsed reduction.
+Each implementation remains a separate owner-scoped change.
+
+## Bounded macOS presence reuse
+
+`keyvault/_presence.py` binds operation-local scope, fixed-purpose credential
+observations, admission and cancellation; `_presence_transport.py` bounds the
+private pipe protocol. `PresenceSession.swift` owns native authentication and
+expiry. `_presence_hosts.py` adapts verified Hermes/Desktop identities; extension
+connections bind their pairing generation directly. No service instance stores
+caller authority. Both raw mail workers and Desktop jobs carry context and
+revoke it before draining cancelled work. A cancelled operation cannot create a
+helper after a late capability result. Weakly held operation scopes revoke a
+caller's previous profile before a late worker can acquire presence. Monitor
+checks observe the process home independently of request ContextVars; callbacks
+that read profile-specific pairing state temporarily bind only Hermes's profile
+selector in a fresh context, retaining no request-context secrets.
+Nonzero opt-in explicitly requires OS
+presence even for unattended keys; zero preserves their previous behavior.
+The native helper owns LAContext expiry, independent lock/sleep notifications
+and parent lifetime. Python owns bounded admission, prompt-free compatibility
+negotiation and operation-local profile/session/purpose binding. Existing custody
+observations remain authoritative on each decrypt. No plaintext cache is added.
+Run critical feedback and complete containing security modules, then one final
+regression, static checks and the CI extras type environment. Record isolated
+live-device evidence in VALIDATION_LOG before setting a profile to 300 seconds.
+
 
 ## Current architecture
 
@@ -26,11 +75,40 @@ names, which survive as config section names (`plugins.mordred_network`, ...);
 | `mordred_network` | `network/` | Process-wide Tor/VPN/clearnet route |
 | `mordred_keyvault` | `keyvault/` | Vault, hardware key, backup, and signing |
 | `mordred_e2e` | `extension/gateway_plugin.py` | Slack/Discord E2E gateway hook, Telegram tools |
+| (none) | `dbcrypt/` | Shared SQLCipher lifecycle, monitoring, migration and backup authority |
 | (none) | `activity/` | Encrypted browser-activity capture, store and corrections |
 
 Shared policy, path, audit, YAML, provider, and terminal boundaries live at the
 package root. The extension package also contains the standalone localhost
 WebSocket server.
+
+### E2E standalone tool and cron delivery
+
+`extension/standalone_outbound.py` installs the required guard on Hermes's
+shared `_send_to_platform` seam from `extension/gateway_plugin.register`, before
+E2E hooks are advertised. Verify its async signature at installation, preserve
+arguments/results, and make repeated registration idempotent. Missing or changed
+seams raise a deliberate startup refusal that escapes ordinary plugin error
+containment. Do not modify Hermes or its retry/deduplication policy.
+
+Use `e2e.outbound_must_encrypt`, remembered keys and channel bindings. Resolve
+Discord destination/parent context before delegation; retain actual destination
+and supplied thread root when inheriting keys. Protected sends use
+`e2e.encrypt_reply` and explicit routed platform HTTP clients; Slack ciphertext
+bypasses Markdown conversion. Reject protected attachments as a whole and refuse
+new protected forum posts whose thread ID is unknown. Return content-free errors
+on key/context/transport failure, without a plaintext retry.
+
+Drive real Hermes tool and cron delivery with destination I/O replaced, decrypt
+captured v3 payloads, and cover ordinary sends, threads, parent inheritance,
+ambiguous/missing keys, lookup failure, chunk failure, attachments, forum refusal,
+registration and import order. Run the critical preset, complete E2E modules,
+static checks, Hermes 0.13.0 floor and locked-version compatibility, then one
+full final regression. The floor tool does not parse Slack thread targets; its
+shared seam and real cron origin-thread delivery still require coverage. Before
+release, record authorized Slack/Discord browser-extension decryption in
+`VALIDATION_LOG.md`. Edits, streaming and other live-adapter media/prompt APIs
+remain a separate E2E change.
 
 ## Phase 0 — Operational Setup (one-time, blocking everything else)
 
@@ -237,7 +315,7 @@ regressing silently.
 Database encryption is implemented in `dbcrypt`: the startup shim selects
 SQLCipher, conversion uses journals and process-lifetime locks, and hooks check
 protection each turn. The CLI owns conversion and uninstall ordering; see
-[`STATE_DB_ENCRYPTION.md`](./STATE_DB_ENCRYPTION.md) for the macOS-only lifecycle.
+[`STATE_DB_ENCRYPTION.md`](./STATE_DB_ENCRYPTION.md) for the lifecycle and its admitted platforms.
 
 ### Documentation
 
@@ -466,7 +544,7 @@ Result: actual NitroTPM custody, Python integration, cross-instance rejection,
 stop/start persistence, CLI installation, and deletion all passed. No baseline
 product defect was found in these exercised paths. Linux memory encryption
 remains inactive, as expected. Full evidence scope and limitations are recorded
-in [CI.md](CI.md#manual-live-device-validation-log).
+in [VALIDATION_LOG.md](VALIDATION_LOG.md#manual-live-device-validation-log).
 
 ### Task 1: Keyvault — isolated Linux memory-key custody
 
@@ -1314,8 +1392,8 @@ an acceptance failure in the requested live run.
 |---|---|---|
 | Keyvault runtime | `keyvault/_storage.py`, `_memory_key.py`, `_memory_hook.py`, `_plaintext_capture.py`, `_extension_config.py`, `log_encryption.py` | Memory custody provision/reset/purge, no replacement key on unavailable data, retained data |
 | Wizard | `wizard/env_file_writer.py`, `policy_writer.py`, `credentials_writer.py`, `audit_cli.py`, `openclaw_migration.py`, installation flows | Config preservation, permission migration, packaged installation under ordinary user |
-| Network | Network audit/config users of `_audit_io.py`, `_file_lock.py`, `_log_rotation.py` | Native startup/audit plus route/strict failure behavior |
-| LLM guard/policy | Policy and audit users of `_policy_io.py` and shared I/O | Policy integrity and refusal behavior |
+| Network | Network audit/config users of `_core/_audit_io.py`, `_core/_file_lock.py`, `_core/_log_rotation.py` | Native startup/audit plus route/strict failure behavior |
+| LLM guard/policy | Policy and audit users of `_core/_policy_io.py` and shared I/O | Policy integrity and refusal behavior |
 | Privacy check | `privacy_check/audit.py` | Multi-process append/rotation, private audit retention |
 | Extension/Desktop | `extension/pairing.py`, `history.py`, `telegram/store.py`, `desktop/install.py` | Store/pairing lifecycle, runtime/UI and later Windows 11/MSIX acceptance |
 
@@ -1340,10 +1418,10 @@ without a separate instruction. Documentation is English.
 | --- | --- | --- | --- |
 | C1a: checked lifecycle primitives | #192 | `_private_fs/`, shared storage tests | deletion/metadata/enumeration/append/rename failure injection, native ACL/reparse/hardlink/identity and process-lock tests |
 | C1b: confidential shared parent | C1a | distinct `_private_fs` directory/file admission and checked absence | safe inherited ACLs accepted, private boundary unchanged, unsafe grants/owners/reparse/ancestor absence refused, new files private before bytes |
-| C2: shared policy transaction | C1 | `_policy_io.py`, `_yaml_io.py`, shared caller coordinator | cross-directory pending-marker failures, nested writer coordination and hostile cache inputs |
+| C2: shared policy transaction | C1 | `_core/_policy_io.py`, `_core/_yaml_io.py`, shared caller coordinator | cross-directory pending-marker failures, nested writer coordination and hostile cache inputs |
 | C3: wizard configuration | C2 | `wizard/policy_writer.py`, `env_file_writer.py`, `credentials_writer.py`, cleanup backups | concurrent policy/config/dotenv updates, preserved YAML, unsafe-state refusal, native configure rerun |
 | C4: native install/helper | #190, C1b | `scripts/install.ps1`, wizard interpreter/launcher resolution, native helper command and setup/status | PowerShell 5.1 and pwsh, spaces/non-ASCII, selected venv identity, owned launcher upgrade/removal, sdist/wheel installation |
-| C7a: shared audit operations | C1 | `_audit_io.py`, `_log_rotation.py` | stable transaction, append rollback, no-replace rotation, compression and identity-bound retention |
+| C7a: shared audit operations | C1 | `_core/_audit_io.py`, `_core/_log_rotation.py` | stable transaction, append rollback, no-replace rotation, compression and identity-bound retention |
 | C5: keyvault lifecycle/runtime | C1, C7a, #190, #194 | keyvault memory storage, markers, capture/export, runtime discovery/hooks, encrypted audit and file-vault gates | real CNG custody, failure preservation, runtime discovery refusal, foreign-user denial, restart/reboot, isolated reset and excluded recovery refusal |
 | C6: wizard encryption lifecycle | C3–C5 | wizard memory/Telegram/export/reset/uninstall orchestration and excluded seal/recovery gates | installed Hermes runtime consumes encrypted memory, no plaintext removal before verified runtime, verified backups and honest status |
 | C7b: audit and privacy callers | C7a, C5 | privacy writer, then wizard audit CLI in separate PRs | multi-process NDJSON/MRAL append, rollback, rotation/compression, retention/purge identity and uncertain outcomes |
@@ -2310,14 +2388,14 @@ implementation plan:
 
 | Design component | Modules |
 |---|---|
-| Operator and extension collectors | operator repository (`src/mordred/activity.py`, `activity_cli.py`, `docs/activity.md`); no collector code in this repository |
-| Authenticated receiver | `activity/peers.py` (peer credentials), `extension/activity_api.py` (frames, principal revalidation), `activity/contracts.py` (normalization, `PeerPrincipal`), `activity/ingest.py` (`build_receiver`, hourly bounded retention after append), `activity/_capture_audit.py` (`activity.capture_refused`, once per process and code) |
+| Operator and extension collectors | the paired browser extension (its collector code is not in this repository; Hermes's own capture is `activity/capture_hermes.py`); the operator collector (operator repository) was retired on 2026-10-30 |
+| Authenticated receiver | `extension/activity_api.py` (`activity_batch` / `activity_status` frames, `EXTENSION_PRINCIPAL`), `activity/contracts.py` (normalization, `PeerPrincipal`), `activity/ingest.py` (`build_receiver`, hourly bounded retention after append), `activity/_capture_audit.py` (`activity.capture_refused`, once per process and code) |
 | Secret redaction | `activity/_redaction.py` (standard-library-only masking, bounded scanning and caches); `activity/contracts.py` explicitly re-exports its public redaction functions, constants and type alongside event validation, serialization and digests |
 | Activity store | `activity/_paths.py`, `activity/_gate.py` (protection gate, keyed opener), `activity/_schema.py` (schema v3, in-place v1→v2→v3 migration), `activity/store.py` (append, episodes, status, backup/restore, `plan_retention`/`apply_retention`) |
 | Corrections | `activity/corrections.py` (record-only: one `user_correction` event appended to an existing episode; nothing derived) |
 | Term matching helpers | `activity/matching.py` (`terms` with CJK bigrams, `SessionBudget` counting characters and shown episodes per session) |
 | History for Hermes (B1) | `activity/history.py` (bounded queries `episodes_for_site` / `episodes_for_terms` / `episode_detail`, `render_block`), `activity/_history_access.py` (configuration cached by mtime, gated store reader, session budget, `activity.history_unavailable` audit), `activity/hooks_history.py` (`transform_tool_result`, `pre_llm_call`), `activity/tools.py` (`mordred_browser_history`, `mordred_browser_history_episode`, skill registration), `activity/skills/browser-history/SKILL.md` |
-| Commands | `wizard/activity_cli.py` (`status`, `use on\|off`, `tools on\|off`, `pair-operator`, `peers`, `correct`; `set_history_switch` writes `history_enabled` / `history_tools_enabled`), `wizard/activity_store_cli.py` (`backup`, `restore`, `retention`) |
+| Commands | `wizard/activity_cli.py` (`status`, `use on\|off`, `tools on\|off`, `correct`; `set_history_switch` writes `history_enabled` / `history_tools_enabled`), `wizard/activity_store_cli.py` (`backup`, `restore`, `retention`) |
 | Configuration | `activity/config.py` (`plugins.mordred_activity`; `history_tools_active` gates the lookup tools) |
 
 `plugin.py` wires `activity` after `e2e` and before `wizard`; its
@@ -2339,7 +2417,9 @@ v3 drops their tables.
 Delivery as shipped:
 
 1. **Contracts and recording** — gate, store, receiver, peer credentials, WS
-   frames, `status`/`pair-operator`/`peers` CLI, operator collector.
+   frames, `status`/`pair-operator`/`peers` CLI, operator collector. The
+   operator peer credential, its frames and the `pair-operator` / `peers`
+   commands were removed on 2026-10-30 with the operator collector.
 2. **Corrections as raw events** — `activity correct` and operator-sent
    corrections are stored as events; retention, backup and restore.
 3. **Hermes-side use of the history** — designed in
@@ -2433,7 +2513,7 @@ Each PR: `uv run python tools/run_critical_tests.py`, its changed modules,
 `uv run ruff check src tests scripts`, `uv run ruff format --check src tests
 scripts`, `uv run mypy --strict src tools scripts/keyvault_offline_digest.py`,
 and coverage at or above 80%. Live-gated results are recorded in
-[`CI.md`](CI.md#manual-live-device-validation-log) after execution; see
+[`VALIDATION_LOG.md`](VALIDATION_LOG.md#manual-live-device-validation-log) after execution; see
 [Provenance evaluation runs](CI.md#provenance-evaluation-runs).
 
 Risks: loss of per-question Touch ID for Telegram text (accepted); Hermes keeps
@@ -2525,6 +2605,11 @@ live-gated ([CI.md](CI.md#provenance-evaluation-runs)).
 **Spec:** [Desktop mail and ceremony pages](SPEC.md#desktop-mail-and-ceremony-pages-2026-10-23);
 design record
 [`2026-10-23-desktop-mail-and-ceremonies-design.md`](../superpowers/specs/2026-10-23-desktop-mail-and-ceremonies-design.md).
+D1–D4 are implemented in the merged Desktop/mail code; D5 direct-tools and D6
+history switches are also present. Remaining UI/native acceptance and regressions
+are tracked under [TODO](TODO.md#imported-message-provenance). The sequence below
+records component boundaries and validation requirements, not unstarted tasks.
+
 One component per PR, all targeting `dev`. Each PR runs
 `uv run python tools/run_critical_tests.py`, the changed test modules, `ruff` and
 `mypy --strict`; D2 and D4 also run their complete containing test modules
@@ -2600,7 +2685,7 @@ One component per PR, all targeting `dev`. Each PR runs
   adds `/imports/status`, `/databases/status`, `/vault/prepare` and `/commit`, setup finish and
   cancel, residue, restart with `job_not_found`, and malformed bodies posted to every
   secret-bearing route) and `tests/test_desktop_page.py`; the live checklist of the design is recorded in
-  [CI.md](CI.md#manual-live-device-validation-log).
+  [VALIDATION_LOG.md](VALIDATION_LOG.md#manual-live-device-validation-log).
 - Depends on: D2 and D3.
 
 ### D5: direct tool calls
@@ -2643,10 +2728,8 @@ One component per PR, all targeting `dev`. Each PR runs
   payload, restart control, recommendation, `MESSAGES`), the version 4 key sets in
   `tests/extension/test_desktop_status_v4.py`, `/tools/direct` in
   `tests/extension/test_desktop_bodies.py`, and the unchanged Windows snapshot.
-- Depends on: D4. Review records:
-  [`2026-10-23-direct-tools-codex-review.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review.md),
-  [`2026-10-23-direct-tools-codex-review-pass2.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review-pass2.md),
-  [`2026-10-23-direct-tools-codex-review-pass3.md`](../superpowers/reviews/2026-10-23-direct-tools-codex-review-pass3.md).
+- Depends on: D4. Review records: Codex review passes 1–3 (2026-10-23; notes retired
+  from the tree, available in Git history).
 
 ### D6: browser history switches
 
@@ -2696,3 +2779,110 @@ Delivered in PRs 11 and 12.
   [`CI.md`](CI.md#provenance-evaluation-runs).
 - Cost control: about 600 calls per header style, so tiers plus resumable JSONL
   output; the header A/B runs on the privacy driver only.
+
+## Cross-platform database encryption rollout (proposed, 2026-10-24)
+
+**Spec:** [Cross-platform database encryption](SPEC.md#cross-platform-database-encryption-proposed-2026-10-24).
+**Design:** [Selected Approach A](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md).
+The user approved the architecture on 2026-10-24. The
+[implementation plan](../superpowers/plans/2026-10-24-cross-platform-database-encryption.md)
+defines the stage gate, exact interfaces, test tasks and component PR boundaries.
+Product code merged in PR #270 on 2026-10-28; platform acceptance is still recorded
+separately in docs/dev/CI.md's manual validation log.
+
+Keep independent component PRs in dependency order:
+
+1. Freeze ownership, failure, compatibility and AWS acceptance contracts in
+   documentation before cross-component implementation.
+2. Establish Windows SQLCipher/VFS feasibility with the actual driver before
+   downstream Windows implementation; a probe pass is not native filesystem
+   security acceptance, and a failing or not-run gate remains visible.
+3. Establish inert lease contracts and keyvault's root database-key authority
+   and dependency guards for key disable/reset/purge, retaining independent
+   profile memory custody. Complete checked Windows I/O before activation.
+4. Port `dbcrypt` driver capability, startup, locking, migration/decryption,
+   monitoring and backup behavior; preserve existing macOS database bytes and
+   key derivation. Wizard lifecycle and uninstall consumers land separately.
+5. Port activity/import-store protection and checked storage consumers, then
+   Telegram destination selection/migration and mail credentials/collectors in
+   their own component slices. Extend Windows custody schemas explicitly before
+   adding a mail role.
+6. Complete CLI/Desktop capability consumers after their platform prerequisites
+   land, retaining truthful unsupported/pending/error states.
+7. Validate source and fresh installed wheels on the retained AWS Linux and
+   Windows hosts, record independent outcomes in CI's manual log, and perform
+   final regression at integration freeze. Windows 11/Desktop and actual
+   external-service gates remain independently tracked.
+
+The design owns architecture and acceptance boundaries; the implementation plan
+owns exact interfaces and test tasks. This rollout outline does not authorize
+skipping native gates or combining unrelated component implementations into one PR.
+
+### Desktop startup conversion slice
+
+Contracts: [startup conversion](SPEC.md#startup-conversion) and
+[Databases from the page](SPEC.md#databases-from-the-page). Land these PRs to `dev`
+in this order:
+
+1. Docs: the contracts above, paths, task list and user guidance.
+2. `dbcrypt`: shared `convert_home`, `_startup.run_scheduled_conversion` before the
+   native install checks, the record, `database_intent` and `unschedule`.
+3. `wizard`: `databases encrypt` uses `convert_home`.
+4. `desktop`: status projection, route decision, `POST /databases/cancel`, codes and
+   step 1.3 on Linux and Windows.
+5. Validation: live results in the validation log, `CI.md` and `TODO.md`.
+
+Desktop MUST NOT land before `dbcrypt`: scheduling without the startup seam makes
+Hermes refuse to start on every platform. Run a security review on PRs 2 and 4 before
+merge, and confirm the bounded record read explicitly. The 15 s, 900 s and 512 MiB
+values stay provisional until measured. Release notes MUST warn that downgrading with a
+pending marker brings the startup refusal back. Report Hermes Desktop on Linux or
+Windows Server as unverified when no such environment is available; never claim it.
+
+### Data-preserving uninstall implementation
+
+1. Establish the shared contract in SPEC before component changes.
+2. DB layer: complete preflight inventory, authenticated retained backups, fresh
+   plaintext verification, lease-bound operation permits, atomic plaintext
+   backup export and adversarial regression tests.
+3. Keyvault layer: explicitly consume restore versus deletion permits at the
+   final mutation boundaries; leave unrelated callers conservative and SQL-free.
+4. Wizard layer: root/profile plan and confirmation, read-only preflight,
+   restoration and verification, integration cleanup, then package removal.
+   Keep required recovery resources and print reinstall/export instructions.
+5. Verify each containing security test module and critical feedback, then lint,
+   formatting, strict typing and one final full regression. Native candidate
+   wheel acceptance uses isolated homes/keys on macOS Secure Enclave, Linux TPM
+   and supported Windows Server CNG; record actual evidence in CI, never infer
+   live-device coverage from mocks. No production home or key is a test fixture.
+
+Known-failure preflight includes package target availability, stopped Hermes,
+all profile restoration keys, incomplete conversion/backup records, unsupported
+archives and deletion dependencies. Preserve unknown state and require explicit
+recovery instead of guessing. Staged exports are verified against their source
+schema/count result and published only to an absent output. Retained backup
+registrations and native source bindings survive ordinary uninstall/reinstall.
+
+## Coordinated keyvault reset implementation (2026-11-05)
+
+Contract: [Coordinated keyvault reset](SPEC.md#coordinated-keyvault-reset-2026-11-05).
+Deliver this documentation contract as an independent PR to `dev` first, then
+keep component implementation changes in separate commits/review slices:
+
+1. Keyvault: extend strict reset recovery with explicit scope/progress, checked
+   internal reset authorization and selective file cleanup; retain independent
+   native sources and refuse changed ownership. Repeat failed or interrupted
+   native deletion under the checked owner, tolerating only an absent target.
+2. Imports: expose bounded offline Mail/Telegram erasure using an existing
+   exclusive lease and `maintenance_scope`, secure deletion and FTS cleanup;
+   erase previous accounts, runs, references, cursor and retirement metadata.
+3. Mail/Telegram custody: block ordinary writers during reset and permit only
+   authorized authenticated local retirement, including legacy archives.
+4. Wizard: delegate reset orchestration, preserve CLI syntax and Windows gate,
+   explain confirmation scope, journal before mutation and resume completed
+   stages safely. Do not invoke CLI subprocesses or remote logout.
+5. Verify the reproduction and isolated/combined/empty/history-only setups,
+   previous accounts, preservation, cancellation and each failure/retry boundary.
+   Run complete affected modules, critical feedback, then one full regression
+   and static checks at integration. Record explicitly gated native acceptance
+   in the manual validation log; unavailable platforms remain unverified.

@@ -158,7 +158,7 @@ def history_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tu
     store = make_store(home)
     monkeypatch.setattr(_history_access, "home", lambda: home)
     monkeypatch.setattr(_history_access, "reader", lambda _home: store)
-    yield home, store
+    return home, store
 
 
 @pytest.fixture

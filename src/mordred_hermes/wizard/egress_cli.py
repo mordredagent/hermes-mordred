@@ -33,13 +33,13 @@ _DESCRIPTIONS = {
 
 
 def _config_path() -> Path:
-    from .._home import hermes_home
+    from .._core._home import hermes_home
 
     return hermes_home() / "config.yaml"
 
 
 def _current_section(path: Path) -> dict[str, Any]:
-    from .._yaml_io import load_plugin_section
+    from .._core._yaml_io import load_plugin_section
 
     section = load_plugin_section(path, "mordred_privacy_check") or {}
     raw = section.get("tool_egress")

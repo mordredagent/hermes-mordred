@@ -36,7 +36,7 @@ memory encryption. Login requires acknowledgement of machine-bound custody
 or per-use prompt; losing the TPM, account or profile loses local credentials
 and archive access. Ordinary-user Server/NitroTPM synthetic flows are validated;
 live-account, packaged Desktop and Windows 11 acceptance remain open
-([evidence](../dev/CI.md#manual-live-device-validation-log)).
+([evidence](../dev/VALIDATION_LOG.md#manual-live-device-validation-log)).
 
 On Linux, install Rust, `pkg-config`, `libtss2-dev`, and the `telegram` extra.
 The user running Hermes must be able to open `/dev/tpmrm0` (normally via the
@@ -193,7 +193,10 @@ hermes-mordred telegram migrate-store --finalize --yes   # delete the old .enc m
   synced afterwards carry the exact sender, forwarded and quoted information.
 - `--commit` and `--finalize` cannot be combined, `--finalize` without `--yes`
   stops with exit code 2, and `--json` prints one object with counts and codes
-  only. Linux and Windows keep the `.enc` archive.
+  only. Qualified Linux/Windows native store consumers now exist, with
+  source/wheel and live-account acceptance still incomplete. Keep existing `.enc`
+  archives until explicit migration succeeds; see
+  [remaining database work](../dev/TODO.md#hermes-database-encryption).
 
 ## Check health
 

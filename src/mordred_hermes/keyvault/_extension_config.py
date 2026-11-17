@@ -46,7 +46,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NoReturn
 
-from .._file_lock import private_flock
+from .._core._file_lock import private_flock
 
 _WALLET_FILE = "wallet.json"
 _WALLET_LOCK_FILE = ".wallet.lock"
@@ -54,7 +54,7 @@ _WALLET_CONFIG_MAX_BYTES = 1024 * 1024
 _WALLET_CONFIG_ERROR = "extension wallet configuration is unreadable or invalid; refusing automatic wallet fallback"
 _WALLET_DIRECTORY_ERROR = "extension wallet directory is unsafe; refusing wallet access"
 # Nothing in this module reads these any more: ``_wallet_file_lock``'s open
-# flags are assembled inside ``mordred_hermes._file_lock.private_flock``, so
+# flags are assembled inside ``mordred_hermes._core._file_lock.private_flock``, so
 # changing them here has no effect on the lock. They survive only because
 # ``extension_sign`` re-exports them by name (a #137 facade guarantee).
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -170,7 +170,7 @@ def _wallet_file_lock(directory: Path) -> Iterator[None]:
     """Exclusive cross-process lock for wallet config reads and writes.
 
     The descriptor lifecycle is
-    :func:`mordred_hermes._file_lock.private_flock`. Three things stay specific
+    :func:`mordred_hermes._core._file_lock.private_flock`. Three things stay specific
     to this call site and are passed in rather than defaulted: there is no
     in-process thread lock (the caller's ``_validate_extension_dir`` plus the
     flock are the whole contract), the open flags omit ``O_NONBLOCK`` exactly

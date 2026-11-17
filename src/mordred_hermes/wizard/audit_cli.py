@@ -31,7 +31,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .._audit_io import exclusive_audit_lock as _exclusive_audit_lock
+from .._core._audit_io import exclusive_audit_lock as _exclusive_audit_lock
 from ..privacy_check._runtime import get_active_audit_path
 from . import _term, _windows_gates
 from ._defaults import resolve_backend

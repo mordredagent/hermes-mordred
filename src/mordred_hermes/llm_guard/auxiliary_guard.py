@@ -27,10 +27,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, NoReturn
 
-from .._audit_support import AuditWriter, build_audit_writer, safe_audit_append
-from .._policy_io import load_policy_mapping, read_policy_mode_fail_closed
-from .._provider_identity import canonicalize_provider
-from .._yaml_io import load_yaml_mapping
+from .._core._audit_support import AuditWriter, build_audit_writer, safe_audit_append
+from .._core._policy_io import load_policy_mapping, read_policy_mode_fail_closed
+from .._core._provider_identity import canonicalize_provider
+from .._core._yaml_io import load_yaml_mapping
 from . import enforce
 from ._exceptions import MordredSessionRefused
 from ._windows_policy import Decision, guarded_audit_factory, read_decision

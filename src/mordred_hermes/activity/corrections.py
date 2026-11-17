@@ -4,7 +4,7 @@
 ``user_correction`` / ``human`` / ``correction`` event of an existing episode,
 linked to the attempt it refers to (``hermes-mordred activity correct``).
 Nothing is derived from it: the correction is part of the raw history like any
-other event, and corrections the operator sends are stored the same way by the
+other event, and corrections a collector sends are stored the same way by the
 receiver.
 """
 

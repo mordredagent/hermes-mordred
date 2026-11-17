@@ -31,10 +31,16 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/memory-key.wrapped` | Linux memory provider | 127-byte TPM-wrapped memory key; private `0600`, no portable recovery |
 | `<home>/mordred/memory-key.lock` | Linux memory lifecycle | private interprocess provisioning/lifecycle lock |
 | `<home>/mordred/memory-vault.marker` | encryption CLI | arms the agent-memory at-rest encryption runtime |
+| `<root>/mordred/db-key-source.json` | explicit database source enrollment (Linux/macOS only) | private `0600` v1 metadata binding: checked physical root/provider, random 32-hex generation, and public wrapped-source/header digest; no key or plaintext-key digest. Only this validated root-local record is omitted from dependency inventory; copies, variants, and temporary records block cleanup. Retirement requires the existing exclusive root lease and a clean all-generations inventory before checked durable unlink; Windows uses its checked native memory-role generation without this file. |
 | `<home>/mordred/db-encryption.marker` | `databases encrypt` / startup conversion | arms SQLCipher for every Hermes database (`mordred_hermes.dbcrypt`) |
-| `<home>/mordred/db-encryption.pending` | `databases encrypt` while Hermes runs | converts the databases at the next Hermes start |
-| `<home>/mordred/db-decryption.pending` | `databases decrypt` while Hermes runs | turns the databases back into plain SQLite at the next Hermes start |
+| `<root>/mordred/db-encryption.pending` | Hermes Desktop **Encrypt databases**; removed by **Cancel** and by a finished conversion | `dbcrypt` converts the databases at the next Hermes start, before any database opens; it stays when that conversion could not run. See [startup conversion](SPEC.md#startup-conversion) |
+| `<root>/mordred/startup-conversion.json` | `dbcrypt` startup conversion | non-secret attempt state and outcome of a scheduled conversion (no path, key or exception text); private permissions (`0600`, Windows private ACL); removed on success, by **Cancel**, or when a start finds nothing pending |
+| `<home>/mordred/db-decryption.pending` | none today; retained from an earlier release | startup refuses while it exists; resolve it in Terminal |
 | `<home>/mordred/db-encryption.journal.json` | database conversion | swaps still to do after an interrupted conversion |
+| `<root>/mordred/db-backups.json` | registered backup publication | inventory of registered encrypted backups; each entry keeps its native key generation in use |
+| `<root>/mordred/db-backups.journal.json` | registered backup publication/deletion | interrupted step to finish (`databases backup recover`) or forget (`--abandon --yes`, plus `--accept-unmanaged-copy` when a copy may remain) |
+| `<root>/mordred/backup-registry/` | registered backup operations | metadata lock for the inventory and journal |
+| `<destination>.mordred-backup-<hex>` | registered backup publication | staging copy beside the destination; encrypted and unmanaged once its journal is abandoned |
 | `<home>/mordred/db-encryption.lock` | database runtime / maintenance | shared runtime leases until exit; exclusive conversion and protected-home uninstall; stable inode retained after purge |
 | `<db>.mordred-enc` | database conversion | the verified converted copy (encrypted, or plain when decrypting), renamed over `<db>` |
 | `<home>/mordred/memory-vault.optout` | encryption CLI | pauses the memory hook (paused by operator) |
@@ -48,8 +54,8 @@ the optional workspace target has user-home paths of its own.
 | `<home>/mordred/reader_sessions.json` | privacy_check reader mode | durable record (SHA-256 digests) of sessions that used a reader tool |
 | `<home>/mordred/uninstall/` | `uninstall` | `.env` lines (`HERMES_MEMORY_KEY`, `MORDRED_*`) moved out of `.env`, mode `0600` |
 | `<home>/extension/` | extension and keyvault signer | pairing, E2E, WebAuthn, history, wallet config |
-| `<home>/extension/activity_pending.json` | `activity pair-operator` / extension server | pending activity pair codes (SHA-256 of the code only), `0600` |
-| `<home>/extension/activity_peers.json` | extension server (`activity_pair_init`) / `activity peers revoke` | activity peer credentials (token SHA-256 only), `0600` |
+| `<home>/extension/activity_pending.json` | none (legacy) | pending operator pair codes (SHA-256 of the code only), `0600`; inert since 2026-10-30, safe to delete |
+| `<home>/extension/activity_peers.json` | none (legacy) | operator peer credentials (token SHA-256 only), `0600`; inert since 2026-10-30, safe to delete |
 | `<home>/plugin-data/mordred/mordred.db` | `activity` component and `imports` library (SQLCipher only) | browser activity events and episodes (schema v3: `activity_meta`, `activity_events`, `activity_episodes`); `import_*` imported-message tables |
 | `<home>/.env` | Hermes + Mordred writers | plaintext runtime secrets when present |
 | `<home>/config.yaml` | Hermes + Mordred writers | Hermes config and Mordred plugin sections |
@@ -389,19 +395,13 @@ These are private mode-`0600` files beneath a real mode-`0700` directory.
 Pairing state and the software attestation private key are security-sensitive;
 do not publish them as diagnostics.
 
-The browser-activity component (`activity/peers.py`) adds two files of its own
-here, written through the same pairing helpers (atomic `0600` writes under
-the extension state lock):
-
-- `activity_pending.json` — pending activity pair codes keyed by the SHA-256
-  of the code, with expiry, label and outcome. The extension's `pair_init`
-  never reads it, and activity pairing never reads `pending.json`.
-- `activity_peers.json` — `{peer_id: {token_sha256, label, kind, created_at,
-  revoked_at}}`. Only token digests are stored; `activity peers revoke` sets
-  `revoked_at`, which ends that peer's open sockets on their next frame.
-
-The operator keeps the matching plaintext token in its own
-`~/.config/mordred/activity-peer.json` (`0600`), outside this inventory.
+Two legacy files may remain here from the retired operator collector's
+pairing (`activity/peers.py`, removed on 2026-10-30): `activity_pending.json`
+(pending pair codes keyed by the SHA-256 of the code) and
+`activity_peers.json` (`{peer_id: {token_sha256, label, kind, created_at,
+revoked_at}}`, token digests only). Nothing reads or writes them any more and
+nothing deletes them automatically; removing them by hand is safe, and
+`uninstall --purge-data` removes them with the rest of `<home>/extension/`.
 
 ## `<home>/plugin-data/mordred/mordred.db`
 
@@ -416,6 +416,9 @@ The operator keeps the matching plaintext token in its own
   encryption armed, shim installed, key resolvable, keyed connection, file not
   readable as plain SQLite, and the stored profile binding equal to this home.
   There is no plaintext fallback; on Linux and Windows the store is refused.
+  The [cross-platform proposal](../superpowers/specs/2026-10-24-cross-platform-database-encryption-design.md)
+  retains this store path and SQLCipher requirement while extending the shared
+  lifecycle. It does not yet change the supported platforms or path handling.
 - **Backup and restore:** `ActivityStore.backup` / `restore` take consistent
   SQLite-backup-API snapshots (a new `0600` file, keyed by the shim, refused if
   plaintext); restore keeps the profile binding, issues a new store
@@ -624,7 +627,10 @@ environment, the `dashboard/plugin_api.py` shim serves a fallback API
   plaintext unless Mordred's memory hook is armed; when armed, every write is
   sealed in the `HERMES-MEMORY-ENC-v1` format, and drift backups
   (`*.md.bak.<ts>`) are sealed too. On macOS Mordred stores `HERMES_MEMORY_KEY`
-  in the file-vault `.env`; Linux uses `mordred/memory-key.wrapped`, and Windows
+  in the file-vault `.env` (at runtime a vault-sourced key lives in a process-private
+  holder and never enters `os.environ`; a plaintext-sourced one is evicted at startup,
+  at session boundaries, at the start of each turn and before each tool call, with
+  the limitations SPEC.md accepts); Linux uses `mordred/memory-key.wrapped`, and Windows
   uses that wrapper through dedicated checked CNG custody. Mordred owns the
   sealed container format; Hermes owns the entry
   format inside the plaintext and the memory tool itself. The legacy

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from mordred_hermes.keyvault._database_mutation import database_key_mutation
+
 pytestmark = pytest.mark.integration
 
 
@@ -20,8 +22,8 @@ def test_installed_memory_hook_real_cng():
     import ctypes
 
     import mordred_hermes
+    from mordred_hermes._core._windows_runtime import scrubbed_environment
     from mordred_hermes._private_fs import open_confidential_directory
-    from mordred_hermes._windows_runtime import scrubbed_environment
     from mordred_hermes.keyvault._memory_storage import inventory_memory_files, windows_memory_runtime_admitted
     from mordred_hermes.keyvault._runtime_probe import require_stopped_windows_gateways
     from mordred_hermes.keyvault._windows_custody import windows_custody_session
@@ -37,9 +39,14 @@ def test_installed_memory_hook_real_cng():
     home = root / ("memory-hook-" + uuid.uuid4().hex)
     # Do not work around the C5c process gate. Failure precedes any native key.
     require_stopped_windows_gateways(home)
+    with open_confidential_directory(home, create=True):
+        pass
     try:
-        with windows_custody_session(home, create=True) as owner:
-            key = owner.enroll_memory()
+        with (
+            database_key_mutation(root=home, generation=None) as database_lease,
+            windows_custody_session(home, create=True) as owner,
+        ):
+            key = owner.enroll_memory(database_lease=database_lease)
             lease = owner.lease("memory")
         with open_confidential_directory(home / "memories", create=True) as directory, directory.transaction() as tx:
             tx.create_bytes("MEMORY.md", seal(b"synthetic smoke", key=key, name="MEMORY.md"))
@@ -94,7 +101,10 @@ print(json.dumps(dict(installed=installed, opened=opened, backup=bool(backup),
                 assert matches, "saved memory authentication failed"
         # Fixture-only removal after full authentication; no product migration
         # or marker API is being exercised or advertised as implemented.
-        with windows_custody_session(home) as owner:
+        with (
+            database_key_mutation(root=home, generation=None) as database_lease,
+            windows_custody_session(home) as owner,
+        ):
             owner.validate_lease(lease)
             with (
                 owner.canonical.publication_receipt() as receipt,
@@ -106,7 +116,7 @@ print(json.dumps(dict(installed=installed, opened=opened, backup=bool(backup),
                     receipt.mark_published()
             with owner.canonical.borrow_mordred_transaction() as tx:
                 tx.create_bytes("memory-vault.optout", b"1\n")
-            owner.delete_role(lease)
+            owner.delete_role(lease, database_lease=database_lease)
     except BaseException as exc:
         exc.add_note(f"retained isolated memory smoke profile: {home}")
         raise

@@ -13,7 +13,7 @@ components in `src/mordred_hermes/` in a fixed order: `keyvault`, `llm_guard`,
 `activity`, `wizard`.
 The pre-0.2.0a0 per-component plugin names (`mordred_network`, ...) survive
 only as `plugins.mordred_*` config section names and are migrated out of
-`plugins.enabled` / `plugins.disabled` (`_plugin_identity.py`). It is **not** a fork of Hermes upstream — never send
+`plugins.enabled` / `plugins.disabled` (`_core/_plugin_identity.py`). It is **not** a fork of Hermes upstream — never send
 PRs upstream (zero-PR commitment, `docs/dev/UPSTREAM.md`).
 
 ## Setup and everyday commands
@@ -24,12 +24,19 @@ uv run pytest -q                          # unit suite (integration marker exclu
 uv run ruff check src tests scripts
 uv run ruff format --check src tests scripts
 uv run mypy --strict src tools scripts/keyvault_offline_digest.py
+uv run lint-imports                       # import layering contracts ([tool.importlinter] in pyproject.toml)
 shellcheck scripts/*.sh native/*/build.sh # blocking in CI; brew/apt install shellcheck
 uv run pytest --cov=src/mordred_hermes    # coverage; CI floor is 80%
 ```
 
 Full guide: `docs/dev/setup.md`. Always go through `uv run` / `.venv/bin/…`;
 bare `pytest` or `hermes-mordred` may hit a different environment via PATH.
+
+Documentation-only push/PR events skip CI for `docs/**/*.md` and root
+`README.md`, `AGENTS.md`, `CLAUDE.md`, `notes.md`. Version files, executable
+examples, runtime Markdown and mixed code/doc changes still trigger CI. Manual
+dispatch remains available; see `docs/dev/CI.md`. For documentation-only edits,
+run `uv run pytest -q tests/test_docs_links.py` locally as needed.
 
 For ordinary edits, start with `uv run python tools/run_critical_tests.py` and
 the changed modules (`uv run pytest -q tests/test_<affected>.py`). Use `--list`
@@ -71,7 +78,7 @@ See `docs/dev/CI.md` for exact evidence and rerun rules.
   suites have no CI automation. The Mullvad suite has a manual-only GitHub
   Actions workflow (`integration-vpn.yml`); it never runs on pushes or PRs.
   Run the relevant gated path after changing it and record the result in
-  `docs/dev/CI.md` §Manual live-device validation log.
+  `docs/dev/VALIDATION_LOG.md` (the Manual live-device validation log).
 
 ## Git and PR conventions
 

@@ -291,7 +291,7 @@ def _remove_path(path: Path) -> bool:
 # Production resolution + CLI adapters (wired via encryption_cli dispatch)
 # -----------------------------------------------------------------------------
 def _run(cmd: list[str]) -> int:
-    return subprocess.run(cmd, check=False).returncode
+    return subprocess.run(cmd, check=False).returncode  # noqa: S603 - list argv, no shell
 
 
 def cli_enable() -> int:

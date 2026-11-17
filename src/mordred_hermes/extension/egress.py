@@ -1,9 +1,9 @@
 """Outbound route resolution shared by the extension server's own clients.
 
 The extension server talks to third parties directly (Discord's bot API, the
-Telegram MTProto network, Venice.ai). None of those clients may read ambient
-proxy environment variables on their own, so each resolves ONE explicit route
-here and passes it to its transport. The rules:
+Telegram MTProto network, Venice.ai, wallet JSON-RPC nodes). None of those
+clients may read ambient proxy environment variables on their own, so each
+resolves ONE explicit route here and passes it to its transport. The rules:
 
 - **Tor selected** → a loopback SOCKS proxy is mandatory. No proxy, a
   non-loopback proxy, or an HTTP proxy all fail closed.
@@ -20,7 +20,7 @@ import ipaddress
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
-from .._home import hermes_home
+from .._core._home import hermes_home
 
 _PROTECTED_NETWORK_PATHS = frozenset({"tor", "vpn"})
 
@@ -106,19 +106,23 @@ def loopback_proxy_host(url: str) -> bool:
         return False
 
 
-def resolve_route(target_host: str) -> EgressRoute:
+def resolve_route(target_host: str, *, platform_env_var: str | None = None) -> EgressRoute:
     """Resolve the explicit route for traffic to *target_host*.
 
     ``socks5h://`` is normalized to ``socks5://``; callers must request remote
     DNS from their SOCKS client (``rdns=True``) so hostnames never resolve
-    locally when Tor is in use.
+    locally when Tor is in use. ``platform_env_var`` preserves Hermes's
+    platform-specific proxy override while applying the same route validation.
     """
 
     tor_required = tor_route_required()
     try:
         from gateway.platforms.base import resolve_proxy_url
 
-        proxy_url = resolve_proxy_url(target_hosts=target_host)
+        if platform_env_var is None:
+            proxy_url = resolve_proxy_url(target_hosts=target_host)
+        else:
+            proxy_url = resolve_proxy_url(platform_env_var=platform_env_var, target_hosts=target_host)
     except Exception as exc:
         raise EgressError() from exc
 

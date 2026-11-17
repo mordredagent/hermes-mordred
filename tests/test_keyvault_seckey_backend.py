@@ -45,6 +45,7 @@ from mordred_hermes.keyvault._seckey_errors import (
     errSecUserCanceled,
 )
 from mordred_hermes.keyvault.wrap import NativeBackend, NativeBackendError
+from tests.test_keyvault_native_deletion import checked_audit_permit
 
 # ---------------------------------------------------------------------------
 # Software-crypto fake for the _SecKeyOps boundary
@@ -279,20 +280,22 @@ def test_get_public_key_other_error_raises_wrap_error(ops: _FakeOps, backend: _S
 
 def test_delete_is_idempotent_when_key_absent(backend: _SecKeyBackend) -> None:
     # No raise — delete of a never-generated key is a contractual no-op.
-    backend.delete_enclave_key("never-generated")
+    with checked_audit_permit(backend, "never-generated") as permit:
+        backend.delete_enclave_key("never-generated", deletion=permit)
 
 
 def test_delete_removes_generated_key(backend: _SecKeyBackend) -> None:
     backend.generate_enclave_key("k1")
-    backend.delete_enclave_key("k1")
+    with checked_audit_permit(backend, "k1") as permit:
+        backend.delete_enclave_key("k1", deletion=permit)
     with pytest.raises(WrapKeyNotFound):
         backend.get_enclave_public_key("k1")
 
 
 def test_delete_other_error_raises_wrap_error(ops: _FakeOps, backend: _SecKeyBackend) -> None:
     ops.delete_error = _OpsError(errSecAuthFailed, "OSStatus")
-    with pytest.raises(WrapError):
-        backend.delete_enclave_key("k1")
+    with checked_audit_permit(backend, "k1") as permit, pytest.raises(WrapError):
+        backend.delete_enclave_key("k1", deletion=permit)
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +442,8 @@ def test_delete_cleans_helper_legacy_and_software_namespaces() -> None:
         sw_ops=software_ops,
     )
 
-    backend.delete_enclave_key("transition-key")
+    with checked_audit_permit(backend, "transition-key") as permit:
+        backend.delete_enclave_key("transition-key", deletion=permit)
 
     assert _application_tag("transition-key") not in helper_ops._keys
     assert _application_tag("transition-key") not in legacy_ops._keys

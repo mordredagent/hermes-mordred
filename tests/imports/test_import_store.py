@@ -2,22 +2,16 @@
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import sqlite3
-import sys
-import threading
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import pytest
 
 from mordred_hermes import dbcrypt
-from mordred_hermes.activity import _gate
 from mordred_hermes.activity._gate import ActivityRefused, refusal
-from mordred_hermes.activity._paths import store_path
 from mordred_hermes.activity.store import ActivityStore
-from mordred_hermes.dbcrypt import _monitor, _shim
 from mordred_hermes.imports import _schema
 from mordred_hermes.imports import store as store_module
 from mordred_hermes.imports.records import (
@@ -27,15 +21,20 @@ from mordred_hermes.imports.records import (
     PartKind,
     ProvenanceQuality,
     RecordError,
+    Source,
     content_digest,
 )
 from mordred_hermes.imports.store import (
+    TELEGRAM_RETIRED_ACCOUNT,
     ImportRefused,
     ImportStore,
     WriteResult,
     open_import_store,
     open_import_store_readonly,
 )
+from mordred_hermes.keyvault import _storage as keyvault_storage
+from tests._activity_protection import native_root as native_root
+from tests._activity_protection import protected_runtime as protected_runtime
 
 from ._factories import (
     MAIL_CONV_UID,
@@ -92,6 +91,161 @@ def mail_message(message_id: str, text: str, *, sent_at: int | None = DAY2) -> I
         uid, PartKind.QUOTED, 1, ordinal=1, author=TANAKA, text="earlier words", quality=ProvenanceQuality.HEURISTIC
     )
     return message(uid, (authored_part, quoted), conv_uid=MAIL_CONV_UID, sent_at=sent_at, recipients=(TANAKA, SUZUKI))
+
+
+# --- public conversation history reads ------------------------------------------------------------
+
+
+def test_conversations_filter_source_and_account_and_round_trip_published_fields(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    custom = dataclasses.replace(SUZUKI, display_name="Custom observed participant", stable_id=None)
+    conv = dataclasses.replace(tg_conv(participants=(custom,)), sync_cursor="10", archived=True)
+    other = dataclasses.replace(tg_conv(), conv_uid="tg:123", conversation_id="123", source_account="100")
+    for record in (conv, other, mail_conv()):
+        store.upsert_conversation(record)
+
+    assert store.conversations(Source.TELEGRAM, OWNER_ID) == {conv.conv_uid: conv}
+    assert store.conversations("telegram", "100") == {other.conv_uid: other}
+    assert store.conversations("mail", "work") == {MAIL_CONV_UID: mail_conv()}
+    assert store.conversations("telegram", "absent") == {}
+    with pytest.raises(RecordError, match="unknown_enum"):
+        store.conversations("invalid", OWNER_ID)
+
+
+def test_conversation_reads_see_only_committed_messages_across_sources(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(1, sent_at=DAY1), authored(2, sent_at=None)])
+    commit(store, mail_conv(), [mail_message("m1@example.com", "mail", sent_at=DAY2)])
+    other = dataclasses.replace(tg_conv(), conv_uid="tg:123", conversation_id="123", source_account="100")
+    other_uid = "tg:123:1"
+    other_message = message(other_uid, (part(other_uid),), conv_uid=other.conv_uid, sent_at=DAY3)
+    commit(store, other, [other_message])
+    empty = dataclasses.replace(tg_conv(), conv_uid="tg:456", conversation_id="456")
+    store.upsert_conversation(empty)
+    for state, number in (("open", 3), ("failed", 4)):
+        for conv, msg in (
+            (tg_conv(), authored(number, sent_at=DAY3)),
+            (mail_conv(), mail_message(f"m{number}@example.com", "uncommitted")),
+        ):
+            run = store.run_begin(conv.source)
+            store.write_thread(run, [msg], conversation=conv)
+            if state == "failed":
+                store.run_fail(run, {})
+
+    wanted = [TG_CONV_UID, MAIL_CONV_UID, other.conv_uid, "absent", TG_CONV_UID]
+    assert store.conversation_stats(iter(wanted)) == {
+        TG_CONV_UID: (2, DAY1),
+        MAIL_CONV_UID: (1, DAY2),
+        other.conv_uid: (1, DAY3),
+    }
+    found = store.conversation_messages(wanted)
+    assert {key: [msg.source_uid for msg in msgs] for key, msgs in found.items()} == {
+        TG_CONV_UID: [tg_uid(1), tg_uid(2)],
+        MAIL_CONV_UID: [mail_uid("m1@example.com")],
+        other.conv_uid: [other_uid],
+    }
+    assert found[other.conv_uid] == [other_message]
+    assert store.conversation_stats([]) == store.conversation_messages([]) == {}
+    assert store.conversation_stats(["absent"]) == store.conversation_messages(["absent"]) == {}
+    assert store.conversation_stats([empty.conv_uid]) == store.conversation_messages([empty.conv_uid]) == {}
+
+
+@pytest.mark.parametrize(
+    ("since", "until", "expected"),
+    [
+        (None, None, ["1", "2", "10", "11"]),
+        (DAY2, DAY3, ["2", "10"]),
+        (None, DAY2, ["1"]),
+        (DAY3, None, []),
+        (DAY2, DAY2, []),
+    ],
+)
+def test_conversation_messages_preserve_half_open_dates_and_numeric_reading_order(
+    tmp_path: Path, since: int | None, until: int | None, expected: list[str]
+) -> None:
+    store = make_store(tmp_path)
+    commit(
+        store,
+        tg_conv(),
+        [
+            authored(10, sent_at=DAY2),
+            authored(2, sent_at=DAY2),
+            authored(11, sent_at=None),
+            authored(1, sent_at=DAY1),
+            authored(12, sent_at=DAY2),
+        ],
+    )
+    # Damaged/old stores can contain messages without parts; history has always omitted them.
+    with store.connection() as conn:
+        conn.execute("DELETE FROM import_parts WHERE source_uid = ?", (tg_uid(12),))
+    found = store.conversation_messages([TG_CONV_UID], since=since, until=until)
+    assert [msg.message_id for msg in found.get(TG_CONV_UID, [])] == expected
+    assert store.conversation_stats([TG_CONV_UID]) == {TG_CONV_UID: (5, DAY2)}
+
+
+def test_conversation_reads_chunk_and_deduplicate_uids(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(2), authored(10)])
+    mail = mail_message("m1@example.com", "mail")
+    commit(store, mail_conv(), [mail])
+    wanted = [MAIL_CONV_UID] + [f"tg:{number}" for number in range(501)] + [TG_CONV_UID, TG_CONV_UID]
+    assert store.conversation_stats(wanted) == {MAIL_CONV_UID: (1, DAY2), TG_CONV_UID: (2, authored(2).sent_at)}
+    assert store.conversation_messages(wanted) == {MAIL_CONV_UID: [mail], TG_CONV_UID: [authored(2), authored(10)]}
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("participants_json", '{"private":"SENSITIVE"}'),
+        ("participants_json", '[{"kind":"invalid"}]'),
+        ("participants_json", '"SENSITIVE"'),
+        ("message_count", "SENSITIVE"),
+        ("record_version", "SENSITIVE"),
+    ],
+)
+def test_conversations_map_malformed_rows_to_content_free_refusals(tmp_path: Path, column: str, value: str) -> None:
+    store = make_store(tmp_path)
+    store.upsert_conversation(tg_conv())
+    with store.connection() as conn:
+        conn.execute(f"UPDATE import_conversations SET {column} = ?", (value,))
+    with pytest.raises(ImportRefused) as caught:
+        store.conversations("telegram", OWNER_ID)
+    assert str(caught.value) == "store_unavailable" and "SENSITIVE" not in repr(caught.value)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    ["UPDATE import_messages SET recipients_json = 'SENSITIVE'", "UPDATE import_parts SET author_kind = 'SENSITIVE'"],
+)
+def test_conversation_messages_map_malformed_hydration_to_content_free_refusals(tmp_path: Path, sql: str) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(2)])
+    with store.connection() as conn:
+        conn.execute(sql)
+    with pytest.raises(ImportRefused) as caught:
+        store.conversation_messages([TG_CONV_UID])
+    assert str(caught.value) == "store_unavailable" and "SENSITIVE" not in repr(caught.value)
+
+
+def test_conversation_messages_hydrate_one_committed_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(2, text="snapshot")])
+    with store.connection() as conn:
+        assert conn.execute("PRAGMA journal_mode = WAL").fetchone() == ("wal",)
+    hydrate = store._hydrate
+
+    def change_after_selection(conn, uids):
+        assert conn.in_transaction
+        with sqlite3.connect(store.path) as writer:
+            # Stored text is written once; failing the run hides the conversation instead.
+            writer.execute("UPDATE import_runs SET state = 'failed'")
+        return hydrate(conn, uids)
+
+    monkeypatch.setattr(store, "_hydrate", change_after_selection)
+    found = store.conversation_messages([TG_CONV_UID])
+    assert found == {TG_CONV_UID: [authored(2, text="snapshot")]}
+    assert rows(store, "SELECT state FROM import_runs") == [("failed",)]
+    assert store.conversation_messages([TG_CONV_UID]) == {}
 
 
 # --- schema and binding ----------------------------------------------------------------------------
@@ -520,6 +674,125 @@ def test_search_without_text_lists_the_newest_parts_first(archive: ImportStore) 
     assert uids(archive.search(None, since=DAY3)) == [tg_uid(3)]
 
 
+@pytest.mark.parametrize(
+    ("query", "filters", "expected"),
+    [
+        ("LUNCH", {}, [tg_uid(2)]),
+        ("田中", {}, [tg_uid(1)]),
+        ("%", {}, []),
+        ("_", {}, []),
+        ('"見積もり" OR lunch', {}, []),
+        (None, {"conv_uids": [TG_CONV_UID, TG_CONV_UID]}, [tg_uid(3), tg_uid(2), tg_uid(1), tg_uid(4)]),
+        ("見積もり", {"source": "mail"}, [mail_uid("m1@example.com")]),
+        ("見積もり", {"since": DAY3, "until": DAY3 + 1}, [tg_uid(3)]),
+        (None, {"conv_uids": ["tg:unknown"]}, []),
+    ],
+)
+def test_search_with_parts_preserves_selection_and_complete_records(archive, query, filters, expected):
+    hits, hydrated = archive.search_with_parts(query, **filters)
+    assert uids(hits) == expected
+    assert hits == archive.search(query, **filters)
+    assert list(hydrated) == [hit.part_uid for hit in hits]
+    assert hydrated == archive.parts_for(hit.part_uid for hit in hits)
+
+
+@pytest.mark.parametrize(
+    ("limit", "parts_limit", "candidates", "parts"), [(2, 1, 2, 1), (1, 9, 1, 1), (3, 0, 3, 0), (3, -1, 3, 0)]
+)
+def test_search_with_parts_keeps_candidate_and_hydration_limits_independent(
+    archive, limit, parts_limit, candidates, parts
+):
+    hits, hydrated = archive.search_with_parts(None, limit=limit, parts_limit=parts_limit)
+    assert len(hits) == candidates
+    assert list(hydrated) == [hit.part_uid for hit in hits[:parts]]
+
+
+@pytest.mark.parametrize("filters", [{"limit": 0}, {"limit": -1}, {"conv_uids": []}])
+def test_search_with_parts_early_returns_do_not_open(tmp_path, filters):
+    def forbidden(_path):
+        pytest.fail("early return must not open a store")
+
+    store = ImportStore(tmp_path / "absent.db", forbidden)
+    assert store.search_with_parts(None, **filters) == ([], {})
+    assert not store.path.exists()
+
+
+def test_search_with_parts_clamps_candidates_before_hydration(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(i) for i in range(1, 5)])
+    monkeypatch.setattr(store_module, "MAX_SEARCH_LIMIT", 2)
+    hits, hydrated = store.search_with_parts(None, limit=10, parts_limit=10)
+    assert len(hits) == len(hydrated) == 2
+
+
+def test_search_with_parts_excludes_uncommitted_and_orders_multipart(tmp_path):
+    store = make_store(tmp_path)
+    original = mail_message("m1@example.com", "earlier words")
+    commit(store, mail_conv(), [original])
+    run = store.run_begin("telegram")
+    store.write_thread(run, [authored(1, text="earlier words")], conversation=tg_conv())
+    hits, hydrated = store.search_with_parts(None)
+    assert [hit.part_uid for hit in hits] == [f"{original.source_uid}#a", f"{original.source_uid}#q1"]
+    assert all(found.message == original and found.conversation == mail_conv() for found in hydrated.values())
+    assert store.search_with_parts("missing") == ([], {})
+
+
+def test_search_with_parts_hydrates_one_snapshot_and_next_call_is_fresh(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    first, second = authored(1, text="budget original"), authored(2, text="budget deleted")
+    commit(store, tg_conv(), [first, second])
+    with store.connection() as conn:
+        assert conn.execute("PRAGMA journal_mode = WAL").fetchone() == ("wal",)
+    hydrate = store._hydrate
+    changed = False
+
+    def change_after_selection(conn, source_uids):
+        nonlocal changed
+        assert conn.in_transaction
+        if not changed:
+            changed = True
+            with sqlite3.connect(store.path) as writer:
+                # Stored text is written once; a deleted message is the change to miss.
+                writer.execute("DELETE FROM import_parts WHERE source_uid = ?", (second.source_uid,))
+                writer.execute("DELETE FROM import_messages WHERE source_uid = ?", (second.source_uid,))
+        return hydrate(conn, source_uids)
+
+    monkeypatch.setattr(store, "_hydrate", change_after_selection)
+    hits, hydrated = store.search_with_parts("budget")
+    assert set(uids(hits)) == {first.source_uid, second.source_uid}
+    assert {found.message for found in hydrated.values()} == {first, second}
+    next_hits, next_parts = store.search_with_parts("budget")
+    assert uids(next_hits) == [first.source_uid]
+    assert [found.part.text for found in next_parts.values()] == ["budget original"]
+
+
+def test_search_with_parts_rolls_back_closes_and_sanitizes_hydration_failure(tmp_path, monkeypatch):
+    seed = make_store(tmp_path)
+    commit(seed, tg_conv(), [authored(1)])
+    events = []
+
+    class TrackedConnection(sqlite3.Connection):
+        def rollback(self):
+            events.append(("rollback", self.in_transaction))
+            return super().rollback()
+
+        def close(self):
+            events.append(("close", self.in_transaction))
+            return super().close()
+
+    store = ImportStore(seed.path, lambda path: sqlite3.connect(path, factory=TrackedConnection))
+
+    def fail_hydration(conn, _source_uids):
+        assert conn.in_transaction
+        raise sqlite3.DatabaseError("SENSITIVE hydration failure")
+
+    monkeypatch.setattr(store, "_hydrate", fail_hydration)
+    with pytest.raises(ImportRefused, match=r"^store_unavailable$"):
+        store.search_with_parts(None)
+    assert events == [("rollback", True), ("close", False)]
+    assert seed.search(None)  # released connection and transaction
+
+
 def test_parts_for_round_trips_the_stored_records(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     original = mail_message("m1@example.com", "見積もり from mail")
@@ -704,615 +977,391 @@ def test_opener_failures_become_content_free_refusals(tmp_path: Path, error: Bas
     assert "import store" in caught.value.refusal.detail
 
 
-# --- the protection gate --------------------------------------------------------------------------
+def _pend_reset(home: Path) -> None:
+    """Any entry at the reset journal path fences the profile (``assert_keyvault_active``)."""
+    journal = keyvault_storage.reset_journal_path(home / "mordred" / "keyvault")
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_bytes(b"pending")
 
 
-@pytest.fixture
-def protected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A home that passes every process/home-level check (armed, shim loaded, key resolves)."""
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(_shim, "is_installed", lambda: True)
-    # The plaintext probe goes through the process's own SQLite library; here that is the stdlib
-    # (the fakes below are plain sqlite3), and sqlcipher3 need not be importable.
-    monkeypatch.setattr(_monitor, "_own_sqlite", lambda: (sqlite3, False))
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", lambda: object())
-    dbcrypt.arm(tmp_path)
-    return tmp_path
+def test_a_pending_keyvault_reset_is_a_store_refusal(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    _pend_reset(tmp_path)
 
-
-class _ClaimsKey(sqlite3.Connection):
-    """Plain SQLite pretending to be keyed (the shim's connection carries ``mordred_key``)."""
-
-    mordred_key: Any = "pretend"
-
-
-class _ClaimsKeyModule:
-    @staticmethod
-    def connect(database: str, **kwargs: Any) -> sqlite3.Connection:
-        return sqlite3.connect(database, factory=_ClaimsKey, **kwargs)
-
-
-def test_open_refuses_a_plain_home_before_creating_anything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
-
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store(tmp_path)
-    assert caught.value.code == "not_armed"
-    assert not (tmp_path / "plugin-data").exists()
-
-
-def test_open_refuses_other_platforms(protected: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "platform", "linux")
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store(protected)
-    assert caught.value.code == "unsupported_platform"
-    assert caught.value.refusal.detail == "the import store requires macOS database encryption"
-
-
-def test_open_refuses_an_unkeyed_process_connection(protected: Path) -> None:
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store(protected)
-    assert caught.value.code == "unkeyed_connection"
-    path = store_path(protected)
-    assert not path.exists() or path.stat().st_size == 0
-
-
-def test_open_refuses_a_planted_plaintext_store(protected: Path) -> None:
-    path = store_path(protected)
-    with sqlite3.connect(path) as planted:
-        planted.execute("CREATE TABLE planted (x INTEGER)")
-    planted.close()
-
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store(protected)
-    assert caught.value.code == "plaintext_store"
-
-
-def test_open_refuses_a_store_that_reads_without_the_key(protected: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_gate, "_process_sqlite", lambda: _ClaimsKeyModule)
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store(protected)
-    assert caught.value.code == "plaintext_store"
-
-
-def test_open_binds_only_the_import_tables(protected: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_gate, "_process_sqlite", lambda: _ClaimsKeyModule)
-    monkeypatch.setattr(_monitor, "is_plaintext", lambda _path: False)
-
-    store = open_import_store(protected)
-
-    assert store.path == store_path(protected)
-    assert store.meta().profile_home == str(protected.resolve())
-    tables = {name for (name,) in rows(store, "SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert "import_meta" in tables and "activity_meta" not in tables
-
-
-def test_open_refuses_a_store_bound_to_another_profile(protected: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_gate, "_process_sqlite", lambda: _ClaimsKeyModule)
-    monkeypatch.setattr(_monitor, "is_plaintext", lambda _path: False)
-    other = protected / "elsewhere"
-    other.mkdir()
-    ImportStore(store_path(protected), sqlite3.connect).initialize(other)
-
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store(protected)
-    assert caught.value.code == "profile_mismatch"
-
-
-def test_open_refuses_an_unusable_data_directory(protected: Path) -> None:
-    (protected / "plugin-data").mkdir()
-    (protected / "plugin-data" / "mordred").write_text("not a directory", encoding="utf-8")
-
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store(protected)
-    assert caught.value.code == "store_unavailable"
-
-
-# --- the read-only opener (status polling) ----------------------------------------------------------
-
-MEMORY_KEY = "hex:" + "11" * 32
-
-
-class _ReadOnlyModule:
-    """A stand-in for SQLCipher itself (plain SQLite ignores the key pragmas), recording every ``connect``."""
-
-    calls: ClassVar[list[tuple[str, dict[str, Any]]]] = []
-    Error = sqlite3.Error
-
-    @classmethod
-    def connect(cls, database: str, **kwargs: Any) -> sqlite3.Connection:
-        cls.calls.append((database, kwargs))
-        return sqlite3.connect(database, **kwargs)
-
-
-class _NoProcessSqlite:
-    """The process ``sqlite3`` (the shim, with its key provider): the read-only path must never reach it."""
-
-    @staticmethod
-    def connect(*_args: Any, **_kwargs: Any) -> sqlite3.Connection:
-        raise AssertionError("the read-only opener went through the process sqlite3")
-
-
-@pytest.fixture
-def readonly_home(protected: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A protected home whose key is already in the environment; no provider and no shared gate may run."""
-
-    def forbidden(*_args: object) -> object:
-        raise AssertionError("the read-only opener must never resolve the key or run the unlocking gate")
-
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", forbidden)
-    monkeypatch.setattr(store_module, "check_protection", forbidden)
-    monkeypatch.setenv("HERMES_MEMORY_KEY", MEMORY_KEY)
-    monkeypatch.setattr(_gate, "_process_sqlite", lambda: _NoProcessSqlite)
-    monkeypatch.setattr(store_module, "_sqlcipher", lambda: _ReadOnlyModule)
-    monkeypatch.setattr(_monitor, "is_plaintext", lambda _path: False)
-    _ReadOnlyModule.calls = []
-    return protected
-
-
-def data_dir(home: Path) -> Path:
-    return home / "plugin-data" / "mordred"
-
-
-def bound_store(home: Path) -> ImportStore:
-    """The import tables of ``home``'s store, created by a writer (as ``mail import`` would)."""
-    store = ImportStore(store_path(home), sqlite3.connect)
-    store.initialize(home)
-    return store
-
-
-def test_readonly_open_of_an_uninitialised_home_creates_nothing(readonly_home: Path) -> None:
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "store_uninitialised"
-    assert not (readonly_home / "plugin-data").exists()  # not even the data directory
-    data_dir(readonly_home).mkdir(parents=True)
-    for prepare in (lambda: None, lambda: (data_dir(readonly_home) / "mordred.db").touch()):
-        prepare()
+    for call in (lambda: store.initialize(tmp_path), lambda: store.set_meta(TELEGRAM_RETIRED_ACCOUNT, "99")):
         with pytest.raises(ImportRefused) as caught:
-            open_import_store_readonly(readonly_home)
-        assert caught.value.code == "store_uninitialised"
-    assert sorted(path.name for path in data_dir(readonly_home).iterdir()) == ["mordred.db"]
-    assert (data_dir(readonly_home) / "mordred.db").stat().st_size == 0 and _ReadOnlyModule.calls == []
-
-
-def test_readonly_open_of_a_store_without_import_tables_is_uninitialised(readonly_home: Path) -> None:
-    path = store_path(readonly_home)
-    with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE activity_meta (key TEXT)")
-    conn.close()
-    before = path.stat().st_mtime_ns, path.stat().st_size
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "store_uninitialised"
-    assert (path.stat().st_mtime_ns, path.stat().st_size) == before
-
-
-def test_readonly_open_reads_the_counts_through_a_read_only_uri(readonly_home: Path) -> None:
-    commit(bound_store(readonly_home), tg_conv(), [authored(1, text="SECRET one")])
-    status = open_import_store_readonly(readonly_home).status()
-    assert status["sources"]["telegram"] == {"conversations": 1, "messages": 1, "parts": 1, "uncommitted_messages": 0}
-    assert _ReadOnlyModule.calls and all(
-        database.startswith("file:") and database.endswith("?mode=ro") and kwargs.get("uri") is True
-        for database, kwargs in _ReadOnlyModule.calls
-    )
-
-
-def test_a_writer_holding_the_lock_does_not_block_readonly_status(
-    readonly_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    commit(bound_store(readonly_home), tg_conv(), [authored(1, text="SECRET one")])
-    monkeypatch.setattr(store_module, "BUSY_TIMEOUT_S", 0.05)
-    holder = sqlite3.connect(store_path(readonly_home), isolation_level=None)
-    holder.execute("BEGIN IMMEDIATE")  # a fetch or an import writing a batch
-    try:
-        store = open_import_store_readonly(readonly_home)
-        assert store.status()["sources"]["telegram"]["messages"] == 1
-    finally:
-        holder.rollback()
-        holder.close()
-
-
-@pytest.mark.parametrize("value", [None, "", "not a key", "hex:" + "11" * 16, "hex:" + "zz" * 32])
-def test_readonly_open_without_valid_key_material_is_no_key(
-    readonly_home: Path, value: str | None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    if value is None:
-        monkeypatch.delenv("HERMES_MEMORY_KEY")
-    else:
-        monkeypatch.setenv("HERMES_MEMORY_KEY", value)
-    bound_store(readonly_home)
-    with pytest.raises(ImportRefused) as caught:  # the fixture's provider fails the test if it is ever called
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "no_key" and _ReadOnlyModule.calls == []
-
-
-@pytest.mark.parametrize("marker", ["journal_path", "pending_path", "decrypt_pending_path"])
-def test_readonly_open_refuses_a_pending_conversion_in_either_direction(readonly_home: Path, marker: str) -> None:
-    from mordred_hermes.dbcrypt import _migrate
-
-    bound_store(readonly_home)
-    path = getattr(_migrate, marker)(readonly_home)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{}")
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "conversion_pending"
-
-
-def test_readonly_open_keeps_every_gate_step(readonly_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    bound_store(readonly_home)
-    monkeypatch.setattr(_shim, "is_installed", lambda: False)
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "unprotected_process"
-    dbcrypt.marker_path(readonly_home).unlink()
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "not_armed"
-    monkeypatch.setattr(sys, "platform", "linux")
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "unsupported_platform"
-
-
-def test_readonly_open_keeps_the_binding_and_the_schema_bound(
-    readonly_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    other = readonly_home / "elsewhere"
-    other.mkdir()
-    ImportStore(store_path(readonly_home), sqlite3.connect).initialize(other)
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "profile_mismatch"
-    with sqlite3.connect(store_path(readonly_home)) as conn:
-        conn.execute("UPDATE import_meta SET value = '99' WHERE key = 'schema_version'")
-    conn.close()
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "schema_newer"
-    monkeypatch.setattr(_monitor, "is_plaintext", lambda _path: True)
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "plaintext_store"
-
-
-def test_an_older_schema_is_read_without_upgrading(readonly_home: Path) -> None:
-    store = bound_store(readonly_home)
-    with sqlite3.connect(store.path) as conn:
-        conn.execute("UPDATE import_meta SET value = '1' WHERE key = 'schema_version'")
-    conn.close()
-    assert open_import_store_readonly(readonly_home).status()["schema_version"] == 1
-    assert store.get_meta("schema_version") == "1"  # never upgraded by a status read
-
-
-def test_readonly_open_refuses_a_planted_data_directory(readonly_home: Path, tmp_path_factory: Any) -> None:
-    (readonly_home / "plugin-data").mkdir()
-    (readonly_home / "plugin-data" / "mordred").symlink_to(tmp_path_factory.mktemp("elsewhere"))
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "store_unavailable"
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        sqlite3.OperationalError("unable to open database file"),
-        sqlite3.OperationalError("database is locked"),
-        OSError(),
-    ],
-)
-def test_a_failed_read_only_open_is_store_unavailable(
-    readonly_home: Path, error: BaseException, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bound_store(readonly_home)
-
-    class Failing:
-        @staticmethod
-        def connect(_database: str, **_kwargs: Any) -> sqlite3.Connection:
-            raise error
-
-    monkeypatch.setattr(store_module, "_sqlcipher", lambda: Failing)
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "store_unavailable"
-
-
-def test_a_wrong_key_reads_as_store_unavailable(readonly_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    bound_store(readonly_home)
-
-    class WrongKey(_ReadOnlyModule):
-        @classmethod
-        def connect(cls, database: str, **kwargs: Any) -> sqlite3.Connection:
-            conn = sqlite3.connect(database, **kwargs)
-            conn.execute("PRAGMA query_only = 1")
-            conn.close()
-            raise sqlite3.DatabaseError("file is not a database")
-
-    monkeypatch.setattr(store_module, "_sqlcipher", lambda: WrongKey)
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "store_unavailable"
-
-
-# --- rollback-journal stores only, and URI-special paths --------------------------------------------
-
-
-def wal_store(home: Path) -> Path:
-    """An initialised store in WAL mode with its sidecars removed (every connection closed)."""
-    path = store_path(home)
-    with contextlib.closing(sqlite3.connect(path)) as conn:
-        conn.execute("PRAGMA journal_mode = WAL")
-    commit(bound_store(home), tg_conv(), [authored(1, text="SECRET one")])
-    for suffix in ("-wal", "-shm"):
-        Path(f"{path}{suffix}").unlink(missing_ok=True)
-    assert path.read_bytes()[18:20] == b"\x02\x02"
-    return path
-
-
-@pytest.mark.parametrize("sidecars", [(), ("-shm", "-wal"), ("-shm",), ("-wal",)])
-def test_a_wal_store_is_refused_before_any_connection_whatever_sidecars_exist(
-    readonly_home: Path, sidecars: tuple[str, ...]
-) -> None:
-    path = wal_store(readonly_home)
-    for suffix in sidecars:
-        Path(f"{path}{suffix}").write_bytes(b"")
-    before = sorted(item.name for item in path.parent.iterdir())
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
-    assert sorted(item.name for item in path.parent.iterdir()) == before
-
-
-def test_a_wal_store_with_a_writer_is_refused_too(readonly_home: Path) -> None:
-    path = wal_store(readonly_home)
-    holder = sqlite3.connect(path, isolation_level=None)  # a writer: its connection keeps -wal and -shm
-    holder.execute("BEGIN IMMEDIATE")
-    try:
-        before = sorted(item.name for item in path.parent.iterdir())
-        assert before == ["mordred.db", "mordred.db-shm", "mordred.db-wal"]
-        with pytest.raises(ImportRefused) as caught:
-            open_import_store_readonly(readonly_home)
-        assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
-        assert sorted(item.name for item in path.parent.iterdir()) == before
-    finally:
-        holder.rollback()
-        holder.close()
-
-
-@pytest.mark.parametrize("offset", [18, 19])
-def test_either_wal_format_byte_refuses(readonly_home: Path, offset: int) -> None:
-    commit(bound_store(readonly_home), tg_conv(), [authored(1, text="SECRET one")])
-    path = store_path(readonly_home)
-    header = bytearray(path.read_bytes())
-    assert header[18:20] == b"\x01\x01"  # a rollback-journal store
-    header[offset] = 2
-    path.write_bytes(bytes(header))
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
-
-
-@pytest.mark.parametrize("sidecar", ["-journal", "-wal", "-shm"])
-def test_an_orphan_journal_or_sidecar_is_refused_before_any_connection(readonly_home: Path, sidecar: str) -> None:
-    commit(bound_store(readonly_home), tg_conv(), [authored(1, text="SECRET one")])
-    path = store_path(readonly_home)
-    assert path.read_bytes()[18:20] == b"\x01\x01"  # a rollback-journal header
-    Path(f"{path}{sidecar}").write_bytes(b"left by a crashed writer")
-    before = {item.name: item.read_bytes() for item in path.parent.iterdir()}
-    with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(readonly_home)
-    assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
-    assert {item.name: item.read_bytes() for item in path.parent.iterdir()} == before  # nothing rolled back or deleted
-
-
-def test_a_rollback_store_with_a_write_in_flight_is_refused(readonly_home: Path) -> None:
-    commit(bound_store(readonly_home), tg_conv(), [authored(1, text="SECRET one")])
-    path = store_path(readonly_home)
-    holder = sqlite3.connect(path, isolation_level=None)  # a fetch writing a batch: its -journal exists
-    holder.execute("BEGIN IMMEDIATE")
-    holder.execute("INSERT INTO import_meta (key, value) VALUES ('mail_imap.x.last', '{}')")
-    try:
-        assert Path(f"{path}-journal").exists()
-        with pytest.raises(ImportRefused) as caught:
-            open_import_store_readonly(readonly_home)
-        assert caught.value.code == "store_unavailable" and _ReadOnlyModule.calls == []
-    finally:
-        holder.rollback()
-        holder.close()
-    with open_import_store_readonly(readonly_home) as store:  # at rest again: counts
-        assert store.status()["sources"]["telegram"]["messages"] == 1
-
-
-def test_the_read_only_store_keeps_one_connection_for_its_life(readonly_home: Path) -> None:
-    commit(bound_store(readonly_home), tg_conv(), [authored(1, text="SECRET one")])
-    with open_import_store_readonly(readonly_home) as store:
-        for _ in range(3):
-            assert store.status()["sources"]["telegram"]["messages"] == 1
-        assert store.get_meta("schema_version") == "3" and store.meta_items("mail_imap.") == {}
-        seen: list[int] = []
-        reader = threading.Thread(target=lambda: seen.append(store.status()["sources"]["telegram"]["messages"]))
-        reader.start()
-        reader.join(5)
-        assert seen == [1]  # another thread reads on the same connection
-    assert len(_ReadOnlyModule.calls) == 1  # opened once, at admission; never reopened
-    with pytest.raises(ImportRefused) as caught:
-        store.status()
-    assert caught.value.code == "store_unavailable"  # closed by the with block
-
-
-def special_home(tmp_path: Path) -> Path:
-    home = tmp_path / "we#ird?ho%me"
-    home.mkdir()
-    return home
-
-
-def test_is_plaintext_probes_the_named_file_even_with_uri_characters(tmp_path: Path) -> None:
-    from mordred_hermes.dbcrypt import _monitor as monitor
-
-    home = special_home(tmp_path)
-    target = home / "store.db"
-    target.write_bytes(b"MMC1" + bytes(4092))  # not SQLite: an encrypted store reads like this
-    before = sorted(str(item) for item in tmp_path.rglob("*"))
-    assert monitor.is_plaintext(target) is False
-    with contextlib.closing(sqlite3.connect(home / "plain.db")) as conn:
-        conn.execute("CREATE TABLE t (x INTEGER)")
-    assert monitor.is_plaintext(home / "plain.db") is True
-    after = sorted(str(item) for item in tmp_path.rglob("*"))
-    assert [item for item in after if item not in before] == [str(home / "plain.db")]  # nothing else created
-
-
-def test_readonly_open_of_a_home_with_uri_characters_reads_the_right_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    home = special_home(tmp_path)
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(_shim, "is_installed", lambda: True)
-    # The plain test store is probed through the process library, here the stdlib.
-    monkeypatch.setattr(_monitor, "_own_sqlite", lambda: (sqlite3, False))
-    monkeypatch.setenv("HERMES_MEMORY_KEY", MEMORY_KEY)
-    monkeypatch.setattr(store_module, "_sqlcipher", lambda: _ReadOnlyModule)
-    _ReadOnlyModule.calls = []
-    dbcrypt.arm(home)
-    commit(bound_store(home), tg_conv(), [authored(1, text="SECRET one")])
-    before = sorted(str(item) for item in tmp_path.rglob("*"))
-    with pytest.raises(ImportRefused) as caught:  # the real probe reads this plain test store, not another file
-        open_import_store_readonly(home)
-    assert caught.value.code == "plaintext_store" and _ReadOnlyModule.calls == []
-    monkeypatch.setattr(_monitor, "is_plaintext", lambda _path: False)  # as for an encrypted store
-    status = open_import_store_readonly(home).status()
-    assert status["sources"]["telegram"]["messages"] == 1
-    assert sorted(str(item) for item in tmp_path.rglob("*")) == before  # no stray file at the cut-off path
-    assert _ReadOnlyModule.calls
-    assert all("%23" in database and "%3F" in database for database, _kwargs in _ReadOnlyModule.calls)
-
-
-# --- the real SQLCipher shim -----------------------------------------------------------------------
-
-
-@pytest.fixture
-def real_shim(protected: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """An encrypted store written through a working shim, then the process shim swapped for one whose
-    key provider fails the test if it is ever consulted (it would inject the vault)."""
-    pytest.importorskip("sqlcipher3")
-    from mordred_hermes.dbcrypt import _key
-    from mordred_hermes.keyvault.memory_crypto import decode_key
-
-    key = _key.derive(decode_key(MEMORY_KEY))
-    writer = _shim.build_module(key=lambda: key, home=lambda: protected, has_key=lambda: True)
-    ImportStore(store_path(protected), writer.connect).initialize(protected)
-    commit(ImportStore(store_path(protected), writer.connect), tg_conv(), [authored(1, text="SECRET one")])
-
-    def forbidden() -> object:
-        raise AssertionError("the shim's key provider was consulted")
-
-    process = _shim.build_module(key=forbidden, home=lambda: protected, has_key=lambda: True)
-    monkeypatch.setitem(sys.modules, "sqlite3", process)
-    monkeypatch.setitem(sys.modules, "sqlite3.dbapi2", process)
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", forbidden)
-    monkeypatch.setenv("HERMES_MEMORY_KEY", MEMORY_KEY)
-    assert _shim.is_installed()
-    return protected
-
-
-def test_the_real_shim_s_provider_is_never_consulted(real_shim: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    store = open_import_store_readonly(real_shim)
-    monkeypatch.delenv("HERMES_MEMORY_KEY")  # gone after admission: later reads keep the derived key
-    assert store.status()["sources"]["telegram"]["messages"] == 1
-    assert _monitor.is_plaintext(store_path(real_shim)) is False
-
-
-def real_wal_store(home: Path) -> Path:
-    """``home``'s encrypted store switched to WAL by a writer of its own (every connection closed)."""
-    from mordred_hermes.dbcrypt import _key
-    from mordred_hermes.keyvault.memory_crypto import decode_key
-
-    key = _key.derive(decode_key(MEMORY_KEY))
-    path = store_path(home)
-    writer = _shim.build_module(key=lambda: key, home=lambda: home, has_key=lambda: True)
-    with contextlib.closing(writer.connect(str(path))) as conn:
-        conn.execute("PRAGMA journal_mode = WAL").fetchone()
-    return path
-
-
-def test_a_real_wal_store_with_a_running_writer_is_refused_and_left_alone(real_shim: Path) -> None:
-    import os
-
-    from mordred_hermes.dbcrypt import _key
-    from mordred_hermes.keyvault.memory_crypto import decode_key
-
-    path = real_wal_store(real_shim)
-    key = _key.derive(decode_key(MEMORY_KEY))
-    writer = _shim.build_module(key=lambda: key, home=lambda: real_shim, has_key=lambda: True)
-    holder = writer.connect(str(path))  # a fetch running: both sidecars exist
-    holder.execute("SELECT count(*) FROM import_meta").fetchone()
-    try:
-        inodes = {suffix: os.stat(f"{path}{suffix}").st_ino for suffix in ("-shm", "-wal")}
-        with pytest.raises(ImportRefused) as caught:
-            open_import_store_readonly(real_shim)
+            call()
         assert caught.value.code == "store_unavailable"
-        assert {suffix: os.stat(f"{path}{suffix}").st_ino for suffix in ("-shm", "-wal")} == inodes
-    finally:
-        holder.close()
+        assert caught.value.__cause__ is None and caught.value.__suppress_context__
+        assert str(tmp_path) not in str(caught.value) + caught.value.refusal.detail
+    assert store.get_meta(TELEGRAM_RETIRED_ACCOUNT) is None
 
 
-def test_an_idle_real_wal_store_is_refused_before_any_sidecar_exists(real_shim: Path) -> None:
-    path = real_wal_store(real_shim)
+def test_a_pending_keyvault_reset_refuses_before_creating_a_store(tmp_path: Path) -> None:
+    _pend_reset(tmp_path)
+
     with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(real_shim)
+        ImportStore(tmp_path / "mordred.db", plain_opener).initialize(tmp_path)
     assert caught.value.code == "store_unavailable"
-    assert sorted(item.name for item in path.parent.iterdir()) == ["mordred.db"]
+    assert not (tmp_path / "mordred.db").exists()
 
 
-def test_a_real_rollback_store_creates_no_sidecar(real_shim: Path) -> None:
-    path = store_path(real_shim)
-    assert path.read_bytes()[18:20] == b"\x01\x01"  # mordred.db is created in rollback mode
-    with open_import_store_readonly(real_shim) as store:
-        assert store.status()["sources"]["telegram"]["messages"] == 1
-    assert sorted(item.name for item in path.parent.iterdir()) == ["mordred.db"]
+# --- shared runtime protection (fake custody, real SQLCipher) -------------------------------------
 
 
-def test_a_key_removed_right_after_the_gate_is_no_key(real_shim: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    real_gate = store_module._readonly_gate
+def test_missing_authority_refuses_both_paths_without_creating(protected_runtime, monkeypatch):
+    home, _, _ = protected_runtime
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", None)
+    monkeypatch.setenv("HERMES_MEMORY_KEY", "hex:" + "11" * 32)
+    for opening in (open_import_store, open_import_store_readonly):
+        with pytest.raises(ImportRefused) as caught:
+            opening(home)
+        assert caught.value.code == "no_key"
+    assert not (home / "plugin-data").exists()
 
-    def gate_then_remove(home: Path) -> str | None:
-        found = real_gate(home)
-        monkeypatch.delenv("HERMES_MEMORY_KEY")
-        return found
 
-    monkeypatch.setattr(store_module, "_readonly_gate", gate_then_remove)
+def test_shared_writing_and_record_reading_reuse_runtime(protected_runtime, monkeypatch):
+    home, provider, backend = protected_runtime
+    authority = provider.authority
+    calls = list(backend.calls)
+    monkeypatch.delenv("HERMES_MEMORY_KEY", raising=False)
+    store = open_import_store(home)
+    commit(store, tg_conv(), [authored(1, text="今日は東京で日本語を勉強します")])
+    with open_import_store_readonly(home) as reader:
+        assert reader.status()["sources"]["telegram"]["messages"] == 1
+        assert [hit.source_uid for hit in reader.search("日本語")] == [tg_uid(1)]
+    assert provider.current_authority is authority
+    assert backend.calls == calls
+    tables = {name for (name,) in rows(store, "SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "activity_meta" not in tables
+
+
+def test_readonly_uninitialised_refuses_without_creating(protected_runtime):
+    home, provider, _ = protected_runtime
+    assert provider.authority.root == home  # an authenticated runtime, but no store yet
     with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(real_shim)
-    assert caught.value.code == "no_key"
+        open_import_store_readonly(home)
+    assert caught.value.code == "store_uninitialised"
+    assert not (home / "plugin-data").exists()
 
 
-def test_a_wrong_environment_key_never_reaches_the_provider(real_shim: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HERMES_MEMORY_KEY", "hex:" + "22" * 32)  # valid shape, another key
+def test_readonly_never_raw_probes_database(protected_runtime, monkeypatch):
+    home, _, _ = protected_runtime
+    store = open_import_store(home)
+    commit(store, tg_conv(), [authored(1)])
+    from mordred_hermes.dbcrypt import _monitor
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("record reads cannot use raw DB probes")
+
+    monkeypatch.setattr(_monitor, "is_plaintext", forbidden)
+    monkeypatch.setattr(Path, "open", forbidden)
+    with open_import_store_readonly(home) as reader:
+        assert reader.status()["sources"]["telegram"]["messages"] == 1
+
+
+def test_readonly_writes_and_closed_reads_refuse(protected_runtime):
+    home, _, _ = protected_runtime
+    open_import_store(home)
+    reader = open_import_store_readonly(home)
+    with pytest.raises(ImportRefused):
+        reader.set_meta("test.marker", "value")
+    reader.close()
+    with pytest.raises(ImportRefused):
+        reader.status()
+
+
+@pytest.mark.parametrize("suffix", ["-journal", "-wal", "-shm"])
+def test_readonly_sidecars_refuse_without_open(protected_runtime, suffix):
+    home, _, _ = protected_runtime
+    store = open_import_store(home)
+    Path(f"{store.path}{suffix}").write_bytes(b"pending")
     with pytest.raises(ImportRefused) as caught:
-        open_import_store_readonly(real_shim)
+        open_import_store_readonly(home)
     assert caught.value.code == "store_unavailable"
 
 
-def test_refusal_codes_are_closed() -> None:
-    assert {"disk_full", "busy", "store_unavailable", "store_uninitialised", "no_key"} <= store_module.REFUSAL_CODES
+def test_readonly_wal_is_refused_through_guarded_sql(protected_runtime):
+    home, _, _ = protected_runtime
+    store = open_import_store(home)
+    with store.connection() as conn:
+        assert conn.execute("PRAGMA journal_mode = WAL").fetchone() == ("wal",)
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(home)
+    assert caught.value.code == "store_unavailable"
+
+
+def test_readonly_profile_and_newer_schema_refused(protected_runtime):
+    home, _, _ = protected_runtime
+    store = open_import_store(home)
+    with store.connection() as conn:
+        conn.execute("UPDATE import_meta SET value = ? WHERE key = 'profile_home'", (str(home / "foreign"),))
+        conn.commit()
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(home)
+    assert caught.value.code == "profile_mismatch"
+    with store.connection() as conn:
+        conn.execute("UPDATE import_meta SET value = ? WHERE key = 'profile_home'", (str(home),))
+        conn.execute("UPDATE import_meta SET value = '9999' WHERE key = 'schema_version'")
+        conn.commit()
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(home)
+    assert caught.value.code == "schema_newer"
+
+
+def test_terminal_runtime_refuses_held_record_reader(protected_runtime):
+    home, provider, backend = protected_runtime
+    open_import_store(home)
+    reader = open_import_store_readonly(home)
+    calls = list(backend.calls)
+    provider.close()
+    with pytest.raises(ImportRefused):
+        reader.status()
+    reader.close()
+    assert backend.calls == calls
+
+
+def test_refusal_codes_are_closed():
     assert store_module.refusal_code(ImportRefused("disk_full")) == "disk_full"
     assert store_module.refusal_code(ImportRefused("something new")) == "store_unavailable"
     assert store_module.refusal_code(RuntimeError("free text")) == "store_unavailable"
-    assert ImportRefused("store_uninitialised").refusal.detail == "the import store has not been created yet"
 
 
-def test_the_writing_opener_still_resolves_the_key_through_the_provider(
-    protected: Path, monkeypatch: pytest.MonkeyPatch
+def test_readonly_worker_threads_reuse_authority_and_revoke_on_metadata_change(protected_runtime):
+    import threading
+
+    home, provider, backend = protected_runtime
+    store = open_import_store(home)
+    commit(store, tg_conv(), [authored(1, text="日本語の記録")])
+    reader = open_import_store_readonly(home)
+    calls = list(backend.calls)
+    seen = []
+    failures = []
+
+    def read():
+        try:
+            seen.append(reader.status()["sources"]["telegram"]["messages"])
+        except BaseException as error:
+            failures.append(error)
+
+    for _ in range(2):
+        worker = threading.Thread(target=read)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+    assert failures == []
+    assert seen == [1, 1]
+    assert backend.calls == calls
+    (home / "mordred/db-encryption.marker").unlink()
+    worker = threading.Thread(target=read)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert len(failures) == 1 and isinstance(failures[0], ImportRefused)
+    assert provider.current_authority.terminal
+    assert backend.calls == calls
+    reader.close()
+
+
+def test_existing_import_store_never_retargets_replaced_provider(protected_runtime, monkeypatch):
+    from mordred_hermes.dbcrypt._key import KeyProvider
+
+    home, provider, _ = protected_runtime
+    store = open_import_store(home)
+    provider.close()
+    fresh = KeyProvider(home=home)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", fresh)
+    try:
+        with pytest.raises(ImportRefused):
+            store.status()
+        assert fresh.current_authority is None
+    finally:
+        fresh.close()
+
+
+def test_cold_readonly_status_never_acquires_native_authority(protected_runtime, monkeypatch):
+    from mordred_hermes.dbcrypt._key import KeyProvider
+
+    home, provider, backend = protected_runtime
+    open_import_store(home)
+    provider.close()
+    fresh = KeyProvider(home=home)
+    monkeypatch.setattr(dbcrypt._runtime, "_PROVIDER", fresh)
+    calls = list(backend.calls)
+    try:
+        with pytest.raises(ImportRefused) as caught:
+            open_import_store_readonly(home)
+        assert caught.value.code == "no_key"
+        assert fresh.current_authority is None
+        assert backend.calls == calls
+    finally:
+        fresh.close()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "writable"])
+def test_readonly_unsafe_destination_refuses_without_repair(protected_runtime, kind):
+    import os
+
+    home, _, _ = protected_runtime
+    store = open_import_store(home)
+    if kind == "symlink":
+        original = home / "original.db"
+        store.path.rename(original)
+        store.path.symlink_to(original)
+    elif kind == "hardlink":
+        os.link(store.path, home / "alias.db")
+    else:
+        store.path.chmod(0o666)
+    with pytest.raises(ImportRefused) as caught:
+        open_import_store_readonly(home)
+    assert caught.value.code == "store_unavailable"
+    if kind == "writable":
+        assert store.path.stat().st_mode & 0o777 == 0o666
+
+
+def test_readonly_older_schema_remains_unmodified(protected_runtime):
+    home, _, _ = protected_runtime
+    store = open_import_store(home)
+    with store.connection() as conn:
+        conn.execute("UPDATE import_meta SET value = '1' WHERE key = 'schema_version'")
+        conn.commit()
+    before = store.path.stat().st_mtime_ns
+    with open_import_store_readonly(home) as reader:
+        assert reader.status()["schema_version"] == 1
+    assert store.path.stat().st_mtime_ns == before
+    assert store.meta().schema_version == 1
+
+
+def test_readonly_replacement_after_admission_revokes_held_reader(protected_runtime):
+    home, provider, _ = protected_runtime
+    store = open_import_store(home)
+    reader = open_import_store_readonly(home)
+    store.path.rename(home / "previous.db")
+    store.path.write_bytes(b"replacement")
+    with pytest.raises(ImportRefused):
+        reader.status()
+    assert provider.current_authority.terminal
+    reader.close()
+
+
+@pytest.mark.parametrize("marker", [None, "other-account"])
+def test_delete_source_retirement_guard_refuses_before_deletion(tmp_path: Path, marker: str | None) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(1, text="guarded history")])
+    if marker is not None:
+        store.set_meta(store_module.TELEGRAM_RETIRED_ACCOUNT, marker)
+    with pytest.raises(ImportRefused):
+        store.delete_source("telegram", OWNER_ID, expected_retired_account=OWNER_ID)
+    assert store.contains([tg_uid(1)]) == {tg_uid(1)}
+    assert store.get_meta(store_module.TELEGRAM_RETIRED_ACCOUNT) == marker
+
+
+def test_delete_source_checks_retirement_marker_inside_transaction(tmp_path: Path, monkeypatch) -> None:
+    from contextlib import contextmanager
+
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(1)])
+    store.set_meta(store_module.TELEGRAM_RETIRED_ACCOUNT, OWNER_ID)
+    original_transaction = store._transaction
+
+    @contextmanager
+    def replacement(**kwargs):
+        # A different writer wins after the caller's observation, before BEGIN.
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE import_meta SET value = 'new-account' WHERE key = ?", (store_module.TELEGRAM_RETIRED_ACCOUNT,)
+            )
+        with original_transaction(**kwargs) as conn:
+            yield conn
+
+    monkeypatch.setattr(store, "_transaction", replacement)
+    with pytest.raises(ImportRefused):
+        store.delete_source("telegram", OWNER_ID, expected_retired_account=OWNER_ID)
+    monkeypatch.setattr(store, "_transaction", original_transaction)
+    assert store.contains([tg_uid(1)]) == {tg_uid(1)}
+    assert store.get_meta(store_module.TELEGRAM_RETIRED_ACCOUNT) == "new-account"
+
+
+def test_delete_source_marker_failure_rolls_back_rows_and_marker(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(1, text="retained history")])
+    store.set_meta(store_module.TELEGRAM_RETIRED_ACCOUNT, OWNER_ID)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TRIGGER refuse_retirement_delete BEFORE DELETE ON import_meta "
+            "BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END"
+        )
+    with pytest.raises(ImportRefused):
+        store.delete_source("telegram", OWNER_ID, expected_retired_account=OWNER_ID)
+    assert store.contains([tg_uid(1)]) == {tg_uid(1)}
+    assert store.get_meta(store_module.TELEGRAM_RETIRED_ACCOUNT) == OWNER_ID
+
+
+def test_delete_source_removes_retirement_binding_with_rows(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(1)])
+    commit(store, mail_conv(), [mail_message("m1@example.com", "mail stays")])
+    store.set_meta(store_module.TELEGRAM_RETIRED_ACCOUNT, OWNER_ID)
+    assert store.delete_source("telegram", OWNER_ID, expected_retired_account=OWNER_ID) == 1
+    assert store.get_meta(store_module.TELEGRAM_RETIRED_ACCOUNT) is None
+    assert store.contains([mail_uid("m1@example.com")]) == {mail_uid("m1@example.com")}
+
+
+@pytest.mark.parametrize(("source", "account"), [("mail", OWNER_ID), ("telegram", "different")])
+def test_delete_source_retirement_guard_cannot_target_another_source_or_account(
+    tmp_path: Path, source: str, account: str
 ) -> None:
-    calls: list[int] = []
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(1)])
+    store.set_meta(store_module.TELEGRAM_RETIRED_ACCOUNT, OWNER_ID)
+    with pytest.raises(ImportRefused):
+        store.delete_source(source, account, expected_retired_account=OWNER_ID)
+    assert store.contains([tg_uid(1)]) == {tg_uid(1)}
 
-    def provider() -> object:
-        calls.append(1)
-        return object()
 
-    monkeypatch.setattr(dbcrypt, "_PROVIDER", provider)
-    monkeypatch.delenv("HERMES_MEMORY_KEY", raising=False)
-    monkeypatch.setattr(_gate, "_process_sqlite", lambda: _ClaimsKeyModule)
-    monkeypatch.setattr(_monitor, "is_plaintext", lambda _path: False)
-    assert open_import_store(protected).status()["sources"] == {}
-    assert calls == [1]
+def test_search_with_parts_protected_opens_each_run_full_integrity(protected_runtime, monkeypatch):
+    from mordred_hermes.dbcrypt import _connection
+
+    home, provider, backend = protected_runtime
+    store = open_import_store(home)
+    commit(store, tg_conv(), [authored(1, text="budget original")])
+    verify = _connection._verify_database
+    verified = []
+    native_calls = list(backend.calls)
+
+    def verify_database(connection):
+        verify(connection)  # real SQLCipher full-page integrity path on every actual open
+        verified.append(connection)
+
+    monkeypatch.setattr(_connection, "_verify_database", verify_database)
+    for count in (1, 2):
+        hits, hydrated = store.search_with_parts("budget")
+        assert uids(hits) == [tg_uid(1)]
+        assert [found.part.text for found in hydrated.values()] == ["budget original"]
+        assert len(verified) == count
+    assert verified[0] is not verified[1]
+    assert not provider.current_authority.terminal
+    assert backend.calls == native_calls
+
+
+@pytest.mark.parametrize("damage", ["marker", "path", "authority"])
+def test_search_with_parts_protected_hydration_rechecks_authority(protected_runtime, monkeypatch, damage):
+    home, provider, _ = protected_runtime
+    store = open_import_store(home)
+    commit(store, tg_conv(), [authored(1, text="budget original")])
+    hydrate_parts = store._parts_for
+
+    def revoke_after_selection(conn, uids):
+        assert conn.in_transaction
+        if damage == "marker":
+            (home / "mordred/db-encryption.marker").unlink()
+        elif damage == "path":
+            store.path.rename(store.path.with_suffix(".replaced"))
+        else:
+            provider.close()
+        return hydrate_parts(conn, uids)
+
+    monkeypatch.setattr(store, "_parts_for", revoke_after_selection)
+    with pytest.raises(ImportRefused):
+        store.search_with_parts("budget")
+    assert provider.current_authority.terminal

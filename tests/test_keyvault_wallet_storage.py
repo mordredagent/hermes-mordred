@@ -193,9 +193,11 @@ def test_native_save_failure_preserves_complete_selection(
 
     def fail_flush(handle):
         nonlocal count
-        count += 1
-        if count == fail_after:
-            raise PrivateFSError("io", "flush", native_code=1117)
+        # Count file flushes only: directory namespace barriers share api.flush.
+        if not api.metadata(handle).directory:
+            count += 1
+            if count == fail_after:
+                raise PrivateFSError("io", "flush", native_code=1117)
         flush(handle)
 
     monkeypatch.setattr(api, "flush", fail_flush)

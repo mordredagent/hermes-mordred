@@ -24,7 +24,7 @@ import sys
 from collections.abc import Callable
 from typing import NamedTuple
 
-from ..._policy_types import PolicyMode
+from ..._core._policy_types import PolicyMode
 from .._exceptions import BringupFailed, UnknownVpnProvider
 from .._windows_exec import ExecutableRefused, ResolvedExecutable
 from ..guidance import MACOS_MULLVAD_APP_CLI

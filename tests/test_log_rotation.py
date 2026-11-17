@@ -1,6 +1,6 @@
 """Unit tests for the shared audit-log rotation/timestamp/retention helpers.
 
-Covers :mod:`mordred_hermes._log_rotation` -- the pure-stdlib module that
+Covers :mod:`mordred_hermes._core._log_rotation` -- the pure-stdlib module that
 single-sources what used to be near-verbatim duplicated across
 ``privacy_check.audit``, ``keyvault.log_encryption``, and
 ``wizard.openclaw_migration``:
@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from mordred_hermes._log_rotation import (
+from mordred_hermes._core._log_rotation import (
     next_rotation_target,
     rotate_and_compress,
     sweep_retention,
@@ -259,7 +259,7 @@ def test_rotate_and_compress_keeps_the_raw_file_and_warns_on_the_callers_logger(
     (``mordred.privacy_check.audit`` vs ``mordred.keyvault.log_encryption``), so
     it must stay caller-supplied rather than becoming this module's own.
     """
-    from mordred_hermes import _log_rotation
+    from mordred_hermes._core import _log_rotation
 
     def failing_gzip(source: Path, target: Path) -> None:
         raise OSError("gzip exploded")
