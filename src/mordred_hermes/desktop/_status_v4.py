@@ -113,19 +113,61 @@ def _mail_flags() -> tuple[Any, bool]:
         return None, residue
 
 
+def _key_held(home: Path) -> bool:
+    """Whether this process holds a live database key for ``home``'s root (observed, never checked)."""
+    from .. import dbcrypt
+
+    try:
+        return _databases._runtime_protected(dbcrypt.root_home(home))
+    except Exception:
+        return False
+
+
 def imports_sections(home: Path, platform: str) -> dict[str, Any]:
-    """Flags only; record counts and cursors remain unknown without foreground SQL authority."""
+    """``imports``, ``mail`` and ``telegram_archive``: read-only store, flags only, nothing unlocked.
+
+    Counts come from the read-only store only while this process already holds
+    the database key (:func:`_databases._runtime_protected`). Without it a poll
+    stays metadata-only: no authority, no SQL, the store left ``store_unavailable``.
+    """
     if platform not in {"darwin", "linux", "win32"}:
         return {
             "imports": _projections.imports_refused("unsupported_platform"),
             "mail": {"configured": False},
             "telegram_archive": dict(_TELEGRAM_ARCHIVE),
         }
-    # Counts and cursors require SQL authority. A passive poll never acquires
-    # that authority, including when a runtime provider happens to exist.
+    if not _key_held(home):
+        flags, residue = _mail_flags()
+        return {
+            "imports": _projections.imports_refused("store_unavailable"),
+            "mail": _projections.mail_projection(flags, None, residue=residue),
+            "telegram_archive": dict(_TELEGRAM_ARCHIVE),
+        }
+    store: Any = None
+    opened: Any = None
+    try:
+        store = opened = _seams.open_store_readonly(home)
+        imports = _projections.imports_projection(store.status())
+    except Exception as exc:  # a gate or store refusal is a state (ImportRefused carries the code)
+        imports = _projections.imports_refused(_seams.store_refusal(exc))
+    if not imports["available"]:
+        store = None
     flags, residue = _mail_flags()
+    mail_status: Any = None
+    try:
+        if store is not None and flags:
+            try:
+                mail_status = _seams.imap_status(store, flags)
+            except Exception as exc:
+                _log.warning("mordred desktop mail status unreadable (%s)", type(exc).__name__)
+    finally:
+        # The read-only store keeps one SQLCipher connection for its life: close it here,
+        # not in a finaliser, so a status poll never leaves a reader open.
+        closer = getattr(opened, "close", None)
+        if callable(closer):
+            closer()
     return {
-        "imports": _projections.imports_refused("store_unavailable"),
-        "mail": _projections.mail_projection(flags, None, residue=residue),
+        "imports": imports,
+        "mail": _projections.mail_projection(flags, mail_status, residue=residue),
         "telegram_archive": dict(_TELEGRAM_ARCHIVE),
     }

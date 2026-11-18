@@ -14,6 +14,7 @@ import contextlib
 import os
 import stat
 import threading
+import time
 import weakref
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -22,6 +23,7 @@ from urllib.parse import quote
 
 from .._core._database_contracts import DatabaseRefused
 from ..keyvault._database_authority import resolve_database_domain
+from . import _authority
 from ._authority import Authority
 from ._policy import in_scope, refuse_windows_remote_path
 
@@ -380,6 +382,7 @@ class ProtectedConnection:
     _active: int
     _denied: bool
     _row_factory: Any
+    _bound_at: float | None
     _io_lock: threading.RLock
     _state_lock: threading.Lock
     _cursors: weakref.WeakSet[ProtectedCursor]
@@ -397,11 +400,16 @@ class ProtectedConnection:
             import sqlcipher3.dbapi2 as sc
 
             raise sc.ProgrammingError("SQLite objects created in a thread can only be used in that same thread")
+        # The path identity is re-observed on the authority's recheck window, not on every callback.
+        now = time.monotonic()
+        if self._bound_at is not None and now - self._bound_at < _authority.recheck_seconds():
+            return
         try:
             self._binding.check()
         except (OSError, DatabaseRefused):
             self._authority.invalidate("database path changed")
             raise DatabaseRefused("database path authority changed") from None
+        self._bound_at = now
 
     @contextlib.contextmanager
     def _operation(self) -> Iterator[None]:
@@ -712,8 +720,13 @@ def _verify_database(connection: ProtectedConnection) -> None:
     if not raw.execute("PRAGMA cipher_version").fetchone():
         raise DatabaseRefused("SQLCipher is unavailable")
     raw.execute("SELECT count(*) FROM sqlite_master").fetchone()
-    if raw.execute("PRAGMA cipher_integrity_check").fetchall():
-        raise DatabaseRefused("database authentication check failed")
+    leaf = connection._binding.leaf
+    verified = None if leaf is None else (str(connection._binding.path), tuple(leaf))
+    if verified is None or verified not in connection._authority.verified_files:
+        if raw.execute("PRAGMA cipher_integrity_check").fetchall():
+            raise DatabaseRefused("database authentication check failed")
+        if verified is not None:
+            connection._authority.verified_files.add(verified)
     if connection._binding.path.name == "state.db":
         present = raw.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
         if present:
@@ -865,6 +878,7 @@ def _open_bound(
     result._closed = result._revoked = result._denied = False
     result._active = 1
     result._row_factory, result._raw = None, None
+    result._bound_at = None
     # Thread policy is enforced at the facade; raw calls serialize on the
     # per-handle lock, and revocation closes only a claimed idle handle.
     result._io_lock, result._state_lock = threading.RLock(), threading.Lock()

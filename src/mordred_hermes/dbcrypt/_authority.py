@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -19,6 +20,27 @@ from ..keyvault._database_authority import (
 )
 from ._key import DatabaseKey, derive
 from ._marker import Marker, read_marker
+
+#: While the key is held, the full metadata observation (lease, home, marker,
+#: native source) runs at most once per this many seconds; checks in between
+#: only refuse a forked or terminal authority. Reads are frequent (every SQL
+#: callback), so a change of custody is noticed within this window instead of
+#: on the next callback.
+RECHECK_SECONDS = 30.0
+#: Shortens (never lengthens) the window; ``0`` observes on every check.
+RECHECK_ENV = "MORDRED_DB_RECHECK_SECONDS"
+
+
+def recheck_seconds() -> float:
+    """The recheck window: :data:`RECHECK_SECONDS`, or a shorter one from :data:`RECHECK_ENV`."""
+    raw = os.environ.get(RECHECK_ENV)
+    if raw is None:
+        return RECHECK_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return RECHECK_SECONDS
+    return value if 0 <= value < RECHECK_SECONDS else RECHECK_SECONDS
 
 
 class Authority:
@@ -42,6 +64,11 @@ class Authority:
         self._operations = 0
         self._connections: list[GuardedConnection] = []
         self._lock = threading.RLock()
+        self._observed_at: float | None = None
+        #: Files whose every page passed ``cipher_integrity_check`` under this key,
+        #: by path and identity. Later opens skip the whole-file pass; SQLCipher
+        #: still authenticates each page as it is read.
+        self.verified_files: set[tuple[str, tuple[int, ...]]] = set()
 
     @classmethod
     def acquire(cls, home: Path) -> Authority:
@@ -100,11 +127,16 @@ class Authority:
             raise DatabaseRefused("database runtime authority cannot survive fork")
 
     def check(self) -> None:
-        """Metadata-only checks never reauthenticate hardware or change generation."""
+        """Metadata-only checks never reauthenticate hardware or change generation.
+
+        The full observation is repeated only after :func:`recheck_seconds`.
+        """
         self._check_pid()
         with self._lock:
             if self._terminal:
                 raise DatabaseRefused("database runtime authority is terminal")
+            if self._observed_at is not None and time.monotonic() - self._observed_at < recheck_seconds():
+                return
             try:
                 self._lease.check()
                 if resolve_database_domain(self._domain.home) != self._domain:
@@ -114,6 +146,7 @@ class Authority:
                 if observe_database_source(root=self.root) != self._snapshot:
                     raise DatabaseRefused("database runtime native source changed")
                 self._lease.check()
+                self._observed_at = time.monotonic()
             except Exception:
                 self.invalidate("authority metadata unavailable or changed")
                 raise DatabaseRefused("database runtime authority is no longer valid") from None

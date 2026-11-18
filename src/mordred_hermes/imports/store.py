@@ -705,7 +705,7 @@ class ImportStore:
         exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'import_meta'").fetchone()
         if exists is None:
             return None
-        return {str(key): str(value) for key, value in conn.execute("SELECT key, value FROM import_meta")}
+        return {str(key): str(value) for key, value in conn.execute("SELECT key, value FROM import_meta").fetchall()}
 
     def initialize(self, profile_home: Path) -> ImportMeta:
         """Create the ``import_*`` schema bound to ``profile_home``, or verify an existing one.
@@ -1277,7 +1277,7 @@ class ImportStore:
                     f"SELECT m.conv_uid, count(*), max(m.sent_at) FROM {_COMMITTED_MESSAGES} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                     f"WHERE m.conv_uid IN ({_marks(len(chunk))}) GROUP BY m.conv_uid",
                     chunk,
-                ):
+                ).fetchall():
                     stats[str(conv_uid)] = (int(count), None if last is None else int(last))
         return stats
 
@@ -1305,7 +1305,7 @@ class ImportStore:
                     "JOIN import_parts p ON p.source_uid = m.source_uid "
                     f"WHERE m.conv_uid IN ({_marks(len(chunk))}){clauses}"
                 )
-                source_uids.extend(str(row[0]) for row in conn.execute(sql, [*chunk, *values]))
+                source_uids.extend(str(row[0]) for row in conn.execute(sql, [*chunk, *values]).fetchall())
             hydrated = self._hydrate(conn, source_uids)
             for msg in sorted((msg for _conv, msg in hydrated.values()), key=_reading_order):
                 by_conv.setdefault(msg.conv_uid, []).append(msg)
@@ -1356,7 +1356,7 @@ class ImportStore:
             uids: set[str] = set()
             for chunk in chunks:
                 clause = f" AND m.message_id IN ({_marks(len(chunk))})" if chunk else ""
-                uids.update(str(row[0]) for row in conn.execute(sql + clause, [*params, *chunk]))
+                uids.update(str(row[0]) for row in conn.execute(sql + clause, [*params, *chunk]).fetchall())
             hydrated = self._hydrate(conn, sorted(uids))
         found = sorted(
             hydrated.values(),
@@ -1489,7 +1489,7 @@ class ImportStore:
             ).fetchone()
             if anchor is None:
                 return []
-            order = [str(row[0]) for row in conn.execute(_NEIGHBOR_SQL, (anchor[0], anchor[1], span, span))]
+            order = [str(row[0]) for row in conn.execute(_NEIGHBOR_SQL, (anchor[0], anchor[1], span, span)).fetchall()]
             hydrated = self._hydrate(conn, order)
         found = [hydrated[uid] for uid in order if uid in hydrated]
         return [StoredPart(conv, msg, part) for conv, msg in found for part in msg.parts]
@@ -1543,20 +1543,24 @@ class ImportStore:
                 empty = {"conversations": 0, "messages": 0, "parts": 0, "uncommitted_messages": 0}
                 sources.setdefault(source, empty)[key] += count
 
-            for source, count in conn.execute("SELECT source, count(*) FROM import_conversations GROUP BY source"):
+            for source, count in conn.execute(
+                "SELECT source, count(*) FROM import_conversations GROUP BY source"
+            ).fetchall():
                 add(str(source), "conversations", int(count))
             for source, committed, count in conn.execute(
                 "SELECT c.source, coalesce(r.state = 'committed', 0), count(*) FROM import_messages m "
                 "JOIN import_conversations c ON c.conv_uid = m.conv_uid "
                 "LEFT JOIN import_runs r ON r.run_id = m.run_id GROUP BY 1, 2"
-            ):
+            ).fetchall():
                 add(str(source), "messages" if committed else "uncommitted_messages", int(count))
             for source, count in conn.execute(
                 f"SELECT c.source, count(*) FROM {_COMMITTED_PARTS} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 "JOIN import_conversations c ON c.conv_uid = m.conv_uid GROUP BY 1"
-            ):
+            ).fetchall():
                 add(str(source), "parts", int(count))
-            runs = dict(conn.execute("SELECT state, count(*) FROM import_runs GROUP BY state ORDER BY state"))
+            runs = dict(
+                conn.execute("SELECT state, count(*) FROM import_runs GROUP BY state ORDER BY state").fetchall()
+            )
             last = conn.execute(
                 "SELECT run_id, source, state, started_at, finished_at, counts_json FROM import_runs "
                 "ORDER BY started_at DESC, rowid DESC LIMIT 1"

@@ -605,7 +605,10 @@ def _stored_lines(store: Any) -> dict[str, str]:
     with store.connection() as conn:
         if not _has_schema(conn):
             return {}
-        return {str(d): str(t) for d, t in conn.execute("SELECT digest, text FROM recall_lines WHERE text IS NOT NULL")}
+        return {
+            str(d): str(t)
+            for d, t in conn.execute("SELECT digest, text FROM recall_lines WHERE text IS NOT NULL").fetchall()
+        }
 
 
 def _write(
@@ -979,7 +982,7 @@ class TopicIndex:
                     for row in conn.execute(
                         f"SELECT episode_id FROM recall_episodes WHERE event_id IN ({marks})",  # noqa: S608 - only placeholders and fixed identifiers are interpolated; values are bound
                         list(kept),
-                    )
+                    ).fetchall()
                 }
                 part_hits = [hit for hit in part_hits if hit[0] in inside]
             else:
@@ -1028,7 +1031,7 @@ class TopicIndex:
                     JOIN recall_part_episode pe ON pe.part_id = p.id WHERE p.part_uid IN ({marks})
                     """,  # noqa: S608 - only placeholders and fixed identifiers are interpolated; values are bound
                     chunk,
-                )
+                ).fetchall()
             ]
         return out
 
@@ -1058,10 +1061,11 @@ class TopicIndex:
                 for row in conn.execute(
                     f"SELECT DISTINCT event_id FROM recall_episodes WHERE episode_id IN ({marks})",  # noqa: S608 - only placeholders and fixed identifiers are interpolated; values are bound
                     list(hits_by_episode),
-                )
+                ).fetchall()
             }
         lines = {
-            str(d): str(t) for d, t in conn.execute("SELECT digest, text FROM recall_lines WHERE text IS NOT NULL")
+            str(d): str(t)
+            for d, t in conn.execute("SELECT digest, text FROM recall_lines WHERE text IS NOT NULL").fetchall()
         }
         events: list[Event] = []
         for event_id in candidates:

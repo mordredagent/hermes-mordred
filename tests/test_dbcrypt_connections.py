@@ -231,7 +231,7 @@ def test_plaintext_under_marker_no_replacement(native_root, authority):
     assert not list(path.parent.glob("*.corrupt*"))
 
 
-def test_same_inode_unread_page_corruption_refused_on_second_open(native_root, authority):
+def test_same_inode_unread_page_corruption_refused_on_read_and_on_a_fresh_key(native_root, authority):
     path = native_root[0] / "state.db"
     conn = opener()(path, authority=authority)
     conn.execute("CREATE TABLE records(value)")
@@ -265,8 +265,20 @@ def test_same_inode_unread_page_corruption_refused_on_second_open(native_root, a
         assert raw.execute("SELECT count(*) FROM sqlite_master").fetchone() == (1,)
     finally:
         raw.close()
-    with pytest.raises(DatabaseRefused):
-        opener()(path, authority=authority)
+    # The whole-file pass already ran for this file under this key, so the
+    # reopen is admitted; the same pass, run on demand, still finds the page.
+    reopened = opener()(path, authority=authority)
+    try:
+        assert reopened.execute("PRAGMA cipher_integrity_check").fetchall()
+    finally:
+        reopened.close()
+    # A freshly loaded key verifies the whole file again before admission.
+    fresh = Authority.acquire(native_root[0])
+    try:
+        with pytest.raises(DatabaseRefused):
+            opener()(path, authority=fresh)
+    finally:
+        fresh.close()
 
 
 @pytest.mark.parametrize("journal_mode", ["delete", "wal"])
@@ -1409,3 +1421,69 @@ def test_invalid_thread_policy_refuses_before_creating(authority, invalid):
     with pytest.raises(DatabaseRefused):
         opener()(path, authority=authority, check_same_thread=invalid)
     assert not path.exists()
+
+
+def _count_observations(monkeypatch):
+    from mordred_hermes.dbcrypt import _authority
+
+    calls = []
+    observe = _authority.observe_database_source
+
+    def counted(*, root):
+        calls.append(root)
+        return observe(root=root)
+
+    monkeypatch.setattr(_authority, "observe_database_source", counted)
+    return calls
+
+
+def test_recheck_window_skips_repeated_observation_while_key_is_held(native_root, authority, monkeypatch):
+    from mordred_hermes.dbcrypt import _authority
+
+    monkeypatch.delenv(_authority.RECHECK_ENV, raising=False)
+    assert _authority.recheck_seconds() == _authority.RECHECK_SECONDS
+    conn = opener()(native_root[0] / "state.db", authority=authority)
+    try:
+        calls = _count_observations(monkeypatch)
+        rows = conn.execute(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<3000) SELECT sum(x) FROM n"
+        ).fetchall()
+        assert rows == [(4501500,)]
+        assert calls == []  # every callback ran inside the window
+        now = _authority.time.monotonic()
+        monkeypatch.setattr(_authority.time, "monotonic", lambda: now + _authority.RECHECK_SECONDS + 1)
+        conn.execute("SELECT 1").fetchall()
+        assert len(calls) == 1  # one full observation once the window has passed
+    finally:
+        conn.close()
+
+
+def test_recheck_window_still_refuses_a_terminal_authority_at_once(native_root, authority, monkeypatch):
+    from mordred_hermes.dbcrypt import _authority
+
+    monkeypatch.delenv(_authority.RECHECK_ENV, raising=False)
+    conn = opener()(native_root[0] / "state.db", authority=authority)
+    authority.invalidate("test")
+    with pytest.raises(DatabaseRefused):
+        conn.execute("SELECT 1")
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("0", 0.0), ("5", 5.0), ("600", None), ("-1", None), ("x", None)])
+def test_recheck_environment_only_shortens_the_window(monkeypatch, raw, expected):
+    from mordred_hermes.dbcrypt import _authority
+
+    monkeypatch.setenv(_authority.RECHECK_ENV, raw)
+    assert _authority.recheck_seconds() == (_authority.RECHECK_SECONDS if expected is None else expected)
+
+
+def test_whole_file_check_runs_once_per_file_under_one_key(native_root, authority):
+    path = native_root[0] / "state.db"
+    conn = opener()(path, authority=authority)
+    conn.execute("CREATE TABLE records(value)")
+    conn.commit()
+    conn.close()
+    verified = set(authority.verified_files)
+    assert any(name == str(path) for name, _ in verified)
+    again = opener()(path, authority=authority)
+    again.close()
+    assert authority.verified_files == verified

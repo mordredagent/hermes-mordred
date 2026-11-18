@@ -265,7 +265,7 @@ class ActivityStore:
         exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'activity_meta'").fetchone()
         if exists is None:
             return None
-        return {str(key): str(value) for key, value in conn.execute("SELECT key, value FROM activity_meta")}
+        return {str(key): str(value) for key, value in conn.execute("SELECT key, value FROM activity_meta").fetchall()}
 
     def initialize(self, profile_home: Path) -> StoreMeta:
         """Create the schema bound to ``profile_home``, or verify an existing store's version and binding.

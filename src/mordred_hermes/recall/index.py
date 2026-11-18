@@ -366,7 +366,7 @@ class RecallIndex:
             ).fetchone()
             if exists is None:
                 return set()
-            return {str(row[0]) for row in conn.execute(_SUPPRESSED_SQL, (int(now),))}
+            return {str(row[0]) for row in conn.execute(_SUPPRESSED_SQL, (int(now),)).fetchall()}
 
     # -- hydration --------------------------------------------------------
 

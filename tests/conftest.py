@@ -42,6 +42,10 @@ import pytest
 if TYPE_CHECKING:
     from tests._keyvault_receipts import RegisterFakeBackend
 
+# Guarded database checks observe custody on every call, as before the recheck
+# window existed; tests of the window itself unset this. Children inherit it.
+os.environ.setdefault("MORDRED_DB_RECHECK_SECONDS", "0")
+
 if "HERMES_HOME" not in os.environ:
     _home = tempfile.mkdtemp(prefix="mordred-tests-home-")
     os.environ["HERMES_HOME"] = _home
