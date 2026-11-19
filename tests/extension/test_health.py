@@ -12,9 +12,12 @@ from typing import Any
 
 import pytest
 
-from mordred_hermes.desktop import _status_v4
 from mordred_hermes.extension import health, pairing
 from mordred_hermes.extension.telegram import hermes_tools
+
+# The search check reads the Desktop plugin's status sections, which need the
+# desktop extra (fastapi); the dependency-floor job installs without it.
+_status_v4 = pytest.importorskip("mordred_hermes.desktop._status_v4")
 
 
 @pytest.fixture

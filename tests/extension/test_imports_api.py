@@ -243,6 +243,7 @@ def test_non_darwin_refuses_mail_and_local_imports(tmp_path: Path, monkeypatch: 
 
 
 def test_status_merges_the_desktop_sections_with_local_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("fastapi")  # the Desktop status sections need the desktop extra
     from mordred_hermes.desktop import _status_v4
     from mordred_hermes.extension import imports_api
     from mordred_hermes.imports import local

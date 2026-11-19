@@ -535,6 +535,14 @@ ignore_imports = [
   "mordred_hermes.imports.mail.imap_sync -> mordred_hermes.extension.telegram.hardening",
   "mordred_hermes.imports.legacy_enc -> mordred_hermes.extension.telegram.store",
   "mordred_hermes.imports.mail.imap -> mordred_hermes.extension.egress",
+  "mordred_hermes.imports.mail.oauth -> mordred_hermes.extension.egress",
+  # --- extension -> desktop: the browser extension serves the Desktop ---
+  # plugin's import status, jobs and mail setup flows (lazy imports) ---
+  "mordred_hermes.extension.health -> mordred_hermes.desktop._status_v4",
+  "mordred_hermes.extension.imports_api -> mordred_hermes.desktop.api",
+  "mordred_hermes.extension.imports_api -> mordred_hermes.desktop._projections",
+  "mordred_hermes.extension.imports_api -> mordred_hermes.desktop._jobs",
+  "mordred_hermes.extension.imports_api -> mordred_hermes.desktop._status_v4",
   # --- baseline: extension -> wizard, wizard -> desktop / plugin -----------
   "mordred_hermes.extension.telegram.memory_guard -> mordred_hermes.wizard._windows_status",
   "mordred_hermes.extension.telegram.memory_guard -> mordred_hermes.wizard._windows_memory",
