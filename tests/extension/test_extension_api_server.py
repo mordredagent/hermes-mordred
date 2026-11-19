@@ -190,7 +190,6 @@ def test_full_server_flow():
     assert r["origin_rejected"] is True
     assert r["auth_type"] == "auth2_ok"
     assert r["auth_capabilities"] == [
-        "discord_channel_resolve_v1",
         "telegram_import_v1",
         "activity_batch_v1",
         "recall_v1",
@@ -431,38 +430,13 @@ def test_page_session_cannot_touch_credentials(tmp_path):
                     json.dumps({"id": "s1", "type": "slack_setup", "bot_token": "xoxb-a", "app_token": "xapp-b"})
                 )
                 out["slack"] = await _recv(ws)
-                await ws.send_str(
-                    json.dumps(
-                        {
-                            "id": "k1",
-                            "type": "channel_key_set",
-                            "channel_id": "C1",
-                            "key_ct": xc.b64u_encode(b"\x01" * 32),
-                        }
-                    )
-                )
-                out["channel"] = await _recv(ws)
-                await ws.send_str(
-                    json.dumps(
-                        {
-                            "id": "dc1",
-                            "type": "discord_channel_resolve",
-                            "guild_id": "123",
-                            "channel_id": "456",
-                        }
-                    )
-                )
-                out["discord"] = await _recv(ws)
                 return out
         finally:
             await server.stop()
 
     out = asyncio.run(_flow(_free_port()))
     assert out["slack"] == {"id": "s1", "type": "error", "reason": "page_session_forbidden"}
-    assert out["channel"] == {"id": "k1", "type": "error", "reason": "page_session_forbidden"}
-    assert out["discord"] == {"id": "dc1", "type": "error", "reason": "page_session_forbidden"}
     assert not (tmp_path / ".env").exists()  # no Slack tokens written
-    assert pairing.load_channel_keys() == {}
 
 
 def test_page_session_allowlist_blocks_crypto_and_wallet_but_allows_chat_and_accounts(monkeypatch):
@@ -822,47 +796,21 @@ def _authed_conn() -> extension_api._Connection:
     return conn
 
 
-def test_authed_extension_resolves_discord_channel_metadata():
-    from mordred_hermes.extension.discord_context import DiscordChannelContext
-
-    async def resolver(guild_id: str, channel_id: str) -> DiscordChannelContext:
-        assert (guild_id, channel_id) == ("123", "999")
-        return DiscordChannelContext(
-            guild_id="123",
-            channel_id="999",
-            channel_type=11,
-            channel_name="release thread",
-            parent_channel_id="456",
-            parent_channel_name="secure-ops",
-        )
-
+@pytest.mark.parametrize(
+    "frame",
+    [
+        {"id": "k1", "type": "channel_key_set", "channel_id": "C1", "key_ct": "AQ"},
+        {"id": "dc1", "type": "discord_channel_resolve", "guild_id": "123", "channel_id": "999"},
+    ],
+)
+def test_removed_channel_encryption_requests_are_ignored(frame):
+    """The Slack/Discord transport is gone: its requests run nothing and store nothing."""
     conn = _authed_conn()
-    conn.discord_resolver = resolver
-    asyncio.run(
-        conn.dispatch(
-            json.dumps(
-                {
-                    "id": "dc1",
-                    "type": "discord_channel_resolve",
-                    "guild_id": "123",
-                    "channel_id": "999",
-                }
-            )
-        )
-    )
-    assert conn.ws.sent == [
-        {
-            "id": "dc1",
-            "type": "discord_channel_resolve_result",
-            "ok": True,
-            "guild_id": "123",
-            "channel_id": "999",
-            "channel_type": 11,
-            "channel_name": "release thread",
-            "parent_channel_id": "456",
-            "parent_channel_name": "secure-ops",
-        }
-    ]
+    before = json.loads(pairing._state_path().read_text())
+    asyncio.run(conn.dispatch(json.dumps(frame)))
+    assert conn.ws.sent == []
+    assert json.loads(pairing._state_path().read_text()) == before
+    assert "channel_keys" not in before
 
 
 def test_on_encrypt_not_paired_replies_encrypt_fail(monkeypatch):

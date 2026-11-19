@@ -55,18 +55,17 @@ def test_pairing_store_refuses_symlinked_extension_directory(tmp_path):
 def test_missing_json_stores_keep_first_run_api_behaviour():
     """Genuine absence remains the compatible empty first-run state."""
     assert pairing.load_pairing() is None
-    assert pairing.load_channel_keys() == {}
 
 
 @pytest.mark.parametrize("payload", [b"{not-json", b"[]"])
-def test_channel_key_rmw_does_not_replace_corrupt_state_store(tmp_path, payload):
+def test_master_creation_does_not_replace_corrupt_state_store(tmp_path, payload):
     extension = tmp_path / "extension"
     extension.mkdir(mode=0o700)
     state_path = extension / "state.json"
     pairing._write_private(state_path, payload)
 
     with pytest.raises(RuntimeError, match=r"state\.json.*unreadable or corrupt"):
-        pairing.save_channel_key("C-corrupt", b"\x44" * 32)
+        pairing.ensure_master()
 
     assert state_path.read_bytes() == payload
 
@@ -157,20 +156,9 @@ def test_load_pairing_parses_state_once_per_generation(monkeypatch):
     assert counter[0] == 1
 
 
-def test_load_channel_keys_parses_state_once_per_generation(monkeypatch):
-    pairing.save_channel_key("C1", b"\x09" * 32)
-
-    counter = _count_state_json_parses(monkeypatch)
-
-    for _ in range(4):
-        assert pairing.load_channel_keys()["C1"] == b"\x09" * 32
-
-    assert counter[0] == 1
-
-
 def test_pairing_state_cache_invalidates_on_each_owned_write_path():
-    """Every write path this module owns (master creation, channel-key push,
-    replay claim, clear) must be visible on the very next read — never a stale
+    """Every write path this module owns (master creation, clear) must be
+    visible on the very next read — never a stale
     generation, and this must not depend on the filesystem's mtime
     resolution advancing between two writes in the same test tick."""
     created = pairing.ensure_master()
@@ -178,18 +166,24 @@ def test_pairing_state_cache_invalidates_on_each_owned_write_path():
     # A second call keeps the master: it never leaves Hermes and is never rotated here.
     assert pairing.ensure_master() == created
 
-    pairing.save_channel_key("C-live", b"\x03" * 32)
-    assert pairing.load_channel_keys()["C-live"] == b"\x03" * 32
-
-    identity_a = "a" * 64
-    assert pairing.claim_e2e_replay_identities((identity_a,)) is True
-    # A second claim of the same identity must see the just-committed entry,
-    # not a cached pre-claim snapshot.
-    assert pairing.claim_e2e_replay_identities((identity_a,)) is False
-
     pairing.clear_pairing()
     assert pairing.load_pairing() is None
-    assert pairing.load_channel_keys() == {}
+
+
+def test_fields_left_by_the_removed_channel_transport_are_kept_unread():
+    """``channel_keys`` / ``e2e_replay_v3`` from older releases survive a master write."""
+    created = pairing.ensure_master()
+    state = json.loads(pairing._state_path().read_text())
+    state["channel_keys"] = {"C1": "AQ"}
+    state["e2e_replay_v3"] = [{"id": "a" * 64, "accepted_at": 1.0}]
+    pairing._write_private(pairing._state_path(), json.dumps(state).encode())
+    pairing._invalidate_state_cache()
+
+    assert pairing.load_pairing() == created
+    pairing._save_pairing(created)
+    after = json.loads(pairing._state_path().read_text())
+    assert after["channel_keys"] == {"C1": "AQ"}
+    assert after["e2e_replay_v3"] == [{"id": "a" * 64, "accepted_at": 1.0}]
 
 
 def test_state_cache_reloads_after_a_write_outside_this_modules_helpers():

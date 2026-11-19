@@ -132,10 +132,10 @@ and provider messages) is written to the Hermes log instead of the reply.
 
 ## Supported messages
 
-`auth_ok.capabilities` currently advertises `discord_channel_resolve_v1`,
+`auth_ok.capabilities` currently advertises
 `telegram_import_v1`, `activity_batch_v1`, `recall_v1`, `recall_words_v1`,
 `recall_events_v1`, `recall_events_selection_v1` and `imports_v1`. These names describe protocol support; they do not prove
-that Discord credentials, Telegram extras/login/private LLM, memory custody,
+that Telegram extras/login/private LLM, memory custody,
 or a particular platform's native/live acceptance gates are ready.
 
 | Message | Behavior |
@@ -146,9 +146,7 @@ or a particular platform's native/live acceptance gates are ready.
 | `auth` | Validates the bundled localhost page's process token. |
 | `chat` | Streams a Hermes agent turn as `chat_chunk*` plus `chat_end`. |
 | `encrypt` / `decrypt` | Encrypts or decrypts extension message payloads. |
-| `channel_key_set` | Stores an encrypted per-channel gateway key from the paired extension. |
 | `slack_setup` | Validates and stores Slack bot/app tokens for the next Hermes restart. |
-| `discord_channel_resolve` | Resolves channel/thread metadata with the configured bot token; returns `discord_channel_resolve_result`. |
 | `telegram_status` / `telegram_sync` / `telegram_dialogs` | Read-only importer status, synchronization and dialog listing; return the matching `*_result` messages. Account labels and dialog titles are sealed to the extension key. |
 | `telegram_ask` / `telegram_ask_cancel` | Private-model answer stream (`telegram_ask_meta`, `telegram_ask_chunk`, `telegram_ask_end` or `telegram_ask_error`) and cancellation. |
 | `accounts_request` | Returns the selected wallet address and chain ID, resolved at most once per minute (repeat requests are served from that snapshot, so a burst cannot drive repeated Touch ID prompts). |
@@ -166,36 +164,15 @@ list in every case. Unreadable history is not preserved: the next chat turn
 saves over it, because the key that sealed it is gone and no surface can ever
 decrypt it again.
 
-## Gateway message encryption
+## Slack and Discord
 
-Slack and Discord gateway commands use the context-bound `ENC:v3` wire. The
-authenticated data binds direction, platform, channel, and thread, preventing a
-reply from being replayed as a command or moved to another conversation.
-
-On mandatory-E2E platforms, plaintext, malformed tokens, mixed plaintext and
-ciphertext, and legacy v1/v2 gateway commands are rejected before reaching the
-agent. Encrypted commands receive encrypted replies with the same channel key.
-Deploy a v3-capable browser extension and Mordred server together.
-
-With Mordred enabled, `send_message` and standalone cron delivery (including
-fallback after a failed live-adapter send) encrypt text for bound Slack/Discord
-channels and remembered encrypted conversations. Discord threads may inherit
-their parent's key without changing the destination. Missing/conflicting keys,
-unknown destinations and send failures return an error; they do not retry in
-plaintext. A partial send can leave encrypted chunks already posted, and Hermes
-may retry delivery using its existing policy.
-
-These protected standalone requests reject attachments before posting any text.
-New protected Discord forum posts are also refused; send to an existing thread.
-Other destinations keep Hermes's ordinary behavior. E2E startup refuses an
-unsupported Hermes standalone-sender interface; restart with a supported Hermes
-version rather than running without the guard.
-
-Protection of other live-adapter methods, including edits, streaming edits,
-attachments and interactive prompts, is still pending. Use the protected text
-send paths for confidential output.
-
-The complete wire contract is in [`SLACK_E2E.md`](../dev/SLACK_E2E.md).
+Mordred no longer encrypts Slack or Discord gateway traffic. The browser
+extension stopped setting channel keys, so the Hermes side of that transport
+(`ENC:v3` command decryption, reply re-encryption and the guard around Hermes's
+standalone sender) was removed too. Slack and Discord messages now reach the
+agent, and its replies leave, exactly as stock Hermes handles them. Older
+`state.json` files may still hold `channel_keys` and `e2e_replay_v3`; they are
+kept as they are and no longer read.
 
 ## Standalone behavior
 
@@ -360,6 +337,5 @@ plugins:
 ## Related references
 
 - [`USAGE.md` — extension command](./USAGE.md#extension--browser-extension-approval-and-server-preview)
-- [`SLACK_E2E.md`](../dev/SLACK_E2E.md)
 - [`ROADMAP.md` — lifecycle integration](../dev/ROADMAP.md#remaining-browser-extension-gateway-integration)
 - Server entry point: `src/mordred_hermes/extension/api.py`

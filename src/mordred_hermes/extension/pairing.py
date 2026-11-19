@@ -1,13 +1,14 @@
-"""Mordred Extension state on the Hermes side: the master key, channel keys, replay cache.
+"""Mordred Extension state on the Hermes side: the master key.
 
 Browsers no longer pair with codes: they are approved with a signature by the
 vault approval key (:mod:`.trust`). What stays here is Hermes' own state under
 ``~/.hermes/extension/`` with ``0600`` permissions:
 
-- ``state.json`` — Hermes' master key (``aes_key``: chat history, the legacy
-  Slack key and the encrypt/decrypt oracle), the Slack channel keys and the E2E
-  replay cache. The master is created at the first browser approval
-  (:func:`ensure_master`) and never leaves Hermes.
+- ``state.json`` — Hermes' master key (``aes_key``: chat history and the
+  encrypt/decrypt oracle). The master is created at the first browser approval
+  (:func:`ensure_master`) and never leaves Hermes. Fields left by the removed
+  Slack/Discord transport (``channel_keys``, ``e2e_replay_v3``) are kept as they
+  are and no longer read.
 
 On Windows these files live in a checked private directory instead
 (:mod:`._windows_storage`): the ``.mordred-fs.lock`` transaction replaces the
@@ -20,7 +21,6 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import math
 import os
 import secrets
 import stat
@@ -28,9 +28,8 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, NoReturn, TypeGuard
+from typing import Any, NoReturn
 
 from .._core._file_lock import private_flock
 from .._private_fs import FileIdentity
@@ -38,15 +37,6 @@ from ..keyvault._storage import atomic_write, safe_read
 from . import _windows_storage as _storage
 from .crypto import b64u_decode, b64u_encode
 
-_E2E_REPLAY_FIELD = "e2e_replay_v3"
-# Raw K_chan length. AES-256-GCM throughout (crypto.derive_shared_key /
-# derive_subkey both emit 32 bytes), so any other length is a malformed push.
-_CHANNEL_KEY_LEN = 32
-_E2E_REPLAY_TTL_SECONDS = 30 * 24 * 3600
-_E2E_REPLAY_MAX_IDENTITIES = 32_768
-# Warn while there is still room to act. Exhaustion refuses every authenticated
-# command, so it must not be the first thing the operator learns about.
-_E2E_REPLAY_WARN_THRESHOLD = (_E2E_REPLAY_MAX_IDENTITIES * 9) // 10
 _LOG = logging.getLogger("mordred.extension.pairing")
 _STATE_THREAD_LOCK = threading.RLock()
 
@@ -271,8 +261,7 @@ def _state_path() -> Path:
 #
 # Only READ-ONLY consumers of the parsed dict may use _read_state_cached(): it
 # can hand back the very same dict object to multiple callers, so a read-modify
-# -write cycle (_write_pairing_locked / save_channel_key /
-# claim_e2e_replay_identities) must keep reading via the uncached _read_json /
+# -write cycle (_write_pairing_locked) must keep reading via the uncached _read_json /
 # _read_json_strict — mutating the cached dict in place would let a concurrent
 # reader observe an uncommitted write before it reaches disk.
 _STATE_CACHE_LOCK = threading.Lock()
@@ -369,7 +358,7 @@ def load_pairing() -> Pairing | None:
 
 def _write_pairing_locked(p: Pairing) -> None:
     """Persist *p* while the caller holds :func:`_state_lock`."""
-    # Preserve any v2 keyring fields (channel_keys) already in state.
+    # Preserve any other fields already in state.
     data = _read_json(_state_path()) or {}
     data.update(
         {
@@ -404,169 +393,6 @@ def ensure_master() -> Pairing:
         )
         _write_pairing_locked(created)
         return created
-
-
-# --- v2 key ring (SPEC-v2 §1.3): per-channel Slack keys + extension-chat key ---
-
-
-def load_channel_keys() -> dict[str, bytes]:
-    """channelId → raw K_chan for every stored Slack channel key."""
-    data = _read_state_cached() or {}
-    out: dict[str, bytes] = {}
-    for cid, kb in (data.get("channel_keys") or {}).items():
-        try:
-            out[cid] = b64u_decode(kb)
-        except Exception:  # noqa: S112 - undecodable channel keys are skipped by design
-            continue
-    return out
-
-
-def save_channel_key(channel_id: str, raw_key: bytes) -> None:
-    """Persist a raw 32-byte channel key, rejecting anything else.
-
-    Validating the length here rather than at the caller makes a truncated or
-    mis-encoded push fail loudly *at push time*. Stored unchecked, it would
-    instead surface later as ``authentication_failed`` on every command in the
-    channel — indistinguishable from a genuinely wrong key, and diagnosable
-    only by hand-minting a token (the #83 experience).
-    """
-    if len(raw_key) != _CHANNEL_KEY_LEN:
-        raise ValueError(f"channel key must be exactly {_CHANNEL_KEY_LEN} bytes, got {len(raw_key)}")
-    with _state_lock():
-        data = _read_json(_state_path()) or {}
-        ck = dict(data.get("channel_keys") or {})
-        ck[channel_id] = b64u_encode(raw_key)
-        data["channel_keys"] = ck
-        _write_private(_state_path(), json.dumps(data).encode("utf-8"))
-        _invalidate_state_cache()
-
-
-def _is_replay_identity(value: Any) -> TypeGuard[str]:
-    return isinstance(value, str) and len(value) == 64 and all(ch in "0123456789abcdef" for ch in value)
-
-
-def _replay_timestamp(value: Any) -> float | None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    parsed = float(value)
-    return parsed if math.isfinite(parsed) else None
-
-
-def _require_active_replay_state(data: dict[str, Any]) -> None:
-    aes_key_encoded = data.get("aes_key")
-    try:
-        active_key_valid = (
-            isinstance(aes_key_encoded, str)
-            and len(b64u_decode(aes_key_encoded)) == 32
-            and b64u_encode(b64u_decode(aes_key_encoded)) == aes_key_encoded
-        )
-    except Exception:
-        active_key_valid = False
-    if not active_key_valid:
-        raise RuntimeError("Hermes' master key required for E2E replay protection")
-
-
-def _replay_relief_description(kept: list[dict[str, Any]], now: float) -> str:
-    """Describe when TTL pruning will next free replay-cache capacity."""
-    timestamps = [entry["accepted_at"] for entry in kept if isinstance(entry.get("accepted_at"), (int, float))]
-    if not timestamps:
-        return "the next TTL sweep"
-    expires_at = min(timestamps) + _E2E_REPLAY_TTL_SECONDS
-    stamp = datetime.fromtimestamp(expires_at, tz=UTC).strftime("%Y-%m-%d %H:%M:%SZ")
-    hours_left = max(0.0, (expires_at - now) / 3600.0)
-    return f"{stamp} (~{hours_left:.0f}h)"
-
-
-def _warn_if_replay_cache_filling(used: int) -> None:
-    """Log before the cache wedges, so exhaustion is not the first signal."""
-    if used >= _E2E_REPLAY_WARN_THRESHOLD:
-        _LOG.warning(
-            "E2E replay cache is %d/%d full; once full, authenticated commands are "
-            "refused until 30-day-old entries expire.",
-            used,
-            _E2E_REPLAY_MAX_IDENTITIES,
-        )
-
-
-def _retained_replay_entries(
-    raw_entries: Any,
-    *,
-    accepted_at: float,
-) -> tuple[list[dict[str, Any]], set[str]]:
-    if raw_entries is None:
-        return [], set()
-    if not isinstance(raw_entries, list):
-        raise RuntimeError("invalid E2E replay state")
-
-    cutoff = accepted_at - _E2E_REPLAY_TTL_SECONDS
-    kept: list[dict[str, Any]] = []
-    known: set[str] = set()
-    for raw in raw_entries:
-        if not isinstance(raw, dict):
-            raise RuntimeError("invalid E2E replay entry")
-        identity = raw.get("id")
-        timestamp = _replay_timestamp(raw.get("accepted_at"))
-        if not _is_replay_identity(identity) or timestamp is None:
-            raise RuntimeError("invalid E2E replay entry")
-        # Future timestamps are retained: a backwards clock jump must not
-        # erase replay evidence.
-        if timestamp >= cutoff or timestamp > accepted_at:
-            kept.append({"id": identity, "accepted_at": timestamp})
-            known.add(identity)
-    return kept, known
-
-
-def claim_e2e_replay_identities(
-    identities: tuple[str, ...],
-    *,
-    now: float | None = None,
-) -> bool:
-    """Atomically persist authenticated E2E-v3 replay identities.
-
-    Returns ``False`` if any identity was already accepted, otherwise records
-    all of them and returns ``True``. The 30-day TTL-bounded cache lives in the
-    private pairing state so a gateway restart cannot make captured commands
-    fresh again. Unexpired evidence is never evicted merely to meet its size
-    cap: capacity exhaustion raises and therefore fails the command closed
-    until TTL pruning frees space. Callers provide only domain-separated
-    SHA-256 hex digests; raw message IDs and nonces are never persisted.
-    """
-    if not identities or any(not _is_replay_identity(identity) for identity in identities):
-        raise ValueError("invalid E2E replay identity")
-    if len(set(identities)) != len(identities):
-        raise ValueError("duplicate E2E replay identity")
-
-    accepted_at = time.time() if now is None else now
-    with _state_lock():
-        data = _read_json_strict(_state_path(), "E2E replay state store")
-        _require_active_replay_state(data)
-        kept, known = _retained_replay_entries(
-            data.get(_E2E_REPLAY_FIELD),
-            accepted_at=accepted_at,
-        )
-
-        if any(identity in known for identity in identities):
-            return False
-        if len(kept) + len(identities) > _E2E_REPLAY_MAX_IDENTITIES:
-            # Never make room by evicting unexpired evidence: that would
-            # reopen replay of an older authenticated command. Refuse new
-            # commands until normal TTL pruning frees bounded state instead.
-            #
-            # Say *when* capacity returns: the operator's only lever is waiting
-            # for the oldest entry's TTL, so an opaque "exhausted" leaves them
-            # with a dead channel and no idea whether it is permanent.
-            raise RuntimeError(
-                "E2E replay cache capacity exhausted "
-                f"({len(kept)}/{_E2E_REPLAY_MAX_IDENTITIES} unexpired identities). "
-                "Commands are refused rather than evicting replay evidence. "
-                f"Capacity frees up from {_replay_relief_description(kept, accepted_at)}."
-            )
-        _warn_if_replay_cache_filling(len(kept) + len(identities))
-        kept.extend({"id": identity, "accepted_at": accepted_at} for identity in identities)
-        data[_E2E_REPLAY_FIELD] = kept
-        _write_private(_state_path(), json.dumps(data, separators=(",", ":")).encode("utf-8"))
-        _invalidate_state_cache()
-        return True
 
 
 # NOTE: there is deliberately no load/save_extchat_key here. K_extchat is always

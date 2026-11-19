@@ -15,7 +15,6 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
 - ``auth``             → the localhost page's process token, reply ``auth_ok``
 - ``chat``             → injected ``chat_handler`` streamed as ``chat_chunk*`` + ``chat_end``
 - ``encrypt``/``decrypt`` → :mod:`mordred_hermes.extension.crypto` with Hermes' master key
-- ``discord_channel_resolve`` → Discord channel/thread metadata via the configured bot token
 - ``accounts_request`` → keyvault address (``accounts_result``)
 - ``sign_request`` → analyze + ``sign_prompt``; ``sign_approve`` → keyvault sign → ``sign_result``
 - ``telegram_status`` / ``telegram_sync`` / ``telegram_dialogs`` → read-only Telegram importer
@@ -56,7 +55,7 @@ import os
 import re
 import secrets
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -74,11 +73,6 @@ from .crypto import (
     encrypt_message_v2,
     is_encrypted,
     key_id,
-)
-from .discord_context import (
-    DiscordChannelContext,
-    DiscordContextError,
-    resolve_discord_channel,
 )
 from .errors import wire_error_code
 from .health import HEALTH_CAPABILITY
@@ -110,7 +104,6 @@ _SLACK_APP_TOKEN_RE = re.compile(r"xapp-[A-Za-z0-9-]+")
 # entry to a call site in the shipped bundle.
 _PAGE_ALLOWED = frozenset({"chat", "accounts_request", "history_get", "history_clear"})
 _EXTENSION_CAPABILITIES = [
-    "discord_channel_resolve_v1",
     "telegram_import_v1",
     activity_api.ACTIVITY_CAPABILITY,
     "recall_v1",
@@ -159,7 +152,6 @@ DEFAULT_KEEPALIVE_INTERVAL = 20.0
 
 # A chat handler streams response chunks for a user message.
 ChatHandler = Callable[[str, dict[str, Any]], AsyncIterator[str]]
-DiscordResolver = Callable[[str, str], Awaitable[DiscordChannelContext]]
 
 # Telegram requests carry at most this many selected dialog ids.
 _MAX_TELEGRAM_DIALOG_IDS = 50
@@ -295,7 +287,6 @@ class ExtensionAPIServer:
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
         chat_handler: ChatHandler | None = None,
-        discord_resolver: DiscordResolver | None = None,
         telegram_service: Any = None,
         recall_service: Any = None,
         imports_api: Any = None,
@@ -309,7 +300,6 @@ class ExtensionAPIServer:
         self.host = host
         self.port = port
         self.chat_handler: ChatHandler = chat_handler or _default_chat_handler
-        self.discord_resolver: DiscordResolver = discord_resolver or resolve_discord_channel
         # One importer per server process (it owns the single running sync).
         # Built lazily so a server without the Telegram extra never imports it.
         self._telegram_service = telegram_service
@@ -455,7 +445,6 @@ class ExtensionAPIServer:
         conn = _Connection(
             ws,
             self.chat_handler,
-            discord_resolver=self.discord_resolver,
             telegram_service=self.telegram_service,
             recall_service=self.recall_service,
             imports_api=self.imports_api,
@@ -487,7 +476,6 @@ class _Connection:
         ws: web.WebSocketResponse,
         chat_handler: ChatHandler,
         *,
-        discord_resolver: DiscordResolver = resolve_discord_channel,
         telegram_service: Any = None,
         recall_service: Any = None,
         imports_api: Any = None,
@@ -500,7 +488,6 @@ class _Connection:
         self.ws = ws
         self.vault_gate = vault_gate if vault_gate is not None else always_open()
         self.chat_handler = chat_handler
-        self.discord_resolver = discord_resolver
         self.telegram_service = telegram_service
         self.recall_service = recall_service
         self.imports_api = imports_api
@@ -607,9 +594,7 @@ class _Connection:
             "chat": self._on_chat,
             "encrypt": self._on_encrypt,
             "decrypt": self._on_decrypt,
-            "channel_key_set": self._on_channel_key_set,
             "slack_setup": self._on_slack_setup,
-            "discord_channel_resolve": self._on_discord_channel_resolve,
             "accounts_request": self._on_accounts,
             "sign_request": self._on_sign_request,
             "sign_approve": self._on_sign_approve,
@@ -967,41 +952,6 @@ class _Connection:
             if aclose is not None:
                 await aclose()
 
-    async def _on_channel_key_set(self, msg: dict[str, Any]) -> None:
-        """Store a per-channel Slack key pushed by the extension (SPEC-v2 §4.4).
-        key_ct is the raw K_chan (base64url), itself encrypted with K_extchat.
-
-        Auth (and the page-session refusal) is enforced in ``dispatch``."""
-        channel_id = msg.get("channel_id")
-        key_ct = msg.get("key_ct", "")
-        if not channel_id or not key_ct:
-            return
-        raw_b64 = key_ct
-        ek = self._extchat_key()
-        if ek is not None and is_encrypted(key_ct):
-            try:
-                raw_b64 = decrypt_message(ek, key_ct)
-            except DecryptError:
-                _log.warning("mordred extension: channel_key_set unwrap failed (wrong K_extchat?)")
-                return  # can't unwrap the pushed key — ignore
-        try:
-            from .crypto import b64u_decode
-
-            # Executor: the save is flock-guarded file I/O.
-            await asyncio.get_event_loop().run_in_executor(
-                None, pairing.save_channel_key, channel_id, b64u_decode(raw_b64)
-            )
-        except Exception as exc:
-            # Never silent: save_channel_key fails closed on a corrupt/unreadable
-            # state.json, and an unstored key makes every later v3 command fail as
-            # `key_not_bound_to_channel` while the extension believes the channel
-            # is configured. That is the write-side twin of the #83 incident, which
-            # took a hand-minted token to diagnose precisely because this path left
-            # no trace. The exception carries no key material (b64u_decode and the
-            # storage layer report shape/IO errors only).
-            _log.warning("mordred extension: channel_key_set persist failed: %s", exc)
-            return
-
     async def _on_slack_setup(self, msg: dict[str, Any]) -> None:
         """Write Slack tokens the extension collected into ~/.hermes/.env so a
         new user doesn't have to hand-edit files (SPEC-v2 §6). We only persist
@@ -1049,50 +999,6 @@ class _Connection:
         except Exception as exc:
             # Typically an OSError naming ~/.hermes/.env — logged, not returned.
             await _reply(False, error=wire_error_code(exc, fallback="slack_setup_failed", context="slack_setup"))
-
-    async def _on_discord_channel_resolve(self, msg: dict[str, Any]) -> None:
-        """Resolve a Discord route without exposing the configured bot token."""
-
-        mid = msg.get("id")
-        guild_id = msg.get("guild_id")
-        channel_id = msg.get("channel_id")
-        if not isinstance(mid, str) or not mid or not isinstance(guild_id, str) or not isinstance(channel_id, str):
-            await self._send(
-                {
-                    "id": mid,
-                    "type": "discord_channel_resolve_result",
-                    "ok": False,
-                    "error": "invalid_request",
-                }
-            )
-            return
-        try:
-            context = await self.discord_resolver(guild_id, channel_id)
-        except DiscordContextError as exc:
-            response: dict[str, Any] = {
-                "id": mid,
-                "type": "discord_channel_resolve_result",
-                "ok": False,
-                "error": exc.code,
-            }
-            if exc.retry_after_ms is not None:
-                response["retry_after_ms"] = exc.retry_after_ms
-            await self._send(response)
-            return
-
-        await self._send(
-            {
-                "id": mid,
-                "type": "discord_channel_resolve_result",
-                "ok": True,
-                "guild_id": context.guild_id,
-                "channel_id": context.channel_id,
-                "channel_type": context.channel_type,
-                "channel_name": context.channel_name,
-                "parent_channel_id": context.parent_channel_id,
-                "parent_channel_name": context.parent_channel_name,
-            }
-        )
 
     # -- Slack crypto (fallback path) --------------------------------------
 

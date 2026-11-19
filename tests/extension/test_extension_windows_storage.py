@@ -1,6 +1,6 @@
 """Checked Windows extension storage, exercised through real ``_private_fs`` on each host.
 
-Hermes' master key, channel keys, the replay cache, history and the wallet
+Hermes' master key, history and the wallet
 snapshot fingerprint run their Windows branch here. On POSIX the descriptor-relative private backend
 stands in for NTFS admission (mode/owner/link checks instead of DACLs); the
 real Windows backend runs the same module in the scoped Windows CI job.
@@ -38,7 +38,10 @@ from tests.extension._trust_helpers import authenticate
 from tests.extension._windows_storage_support import REPO_ROOT, enable_checked_storage
 
 ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
-REPLAY_ID = "a" * 64
+# A master that differs from the fixture's, for the write paths.
+REPLACEMENT = pairing.Pairing(
+    aes_key=b"\x01" * 32, ext_token="", ext_pubkey_b64="", hermes_pubkey_b64="", paired_at=1.0
+)
 
 
 @pytest.fixture
@@ -113,8 +116,7 @@ def operations() -> dict[str, Callable[[], object]]:
     return {
         "ensure_master": pairing.ensure_master,
         "load_pairing": pairing.load_pairing,
-        "channel_key": lambda: pairing.save_channel_key("C1", b"\x01" * 32),
-        "replay": lambda: pairing.claim_e2e_replay_identities(("b" * 64,)),
+        "save_pairing": lambda: pairing._save_pairing(REPLACEMENT),
         "history_load": history.load_history,
         "history_save": lambda: history.save_messages([{"role": "user", "content": "again"}]),
         "history_clear": history.clear,
@@ -136,10 +138,8 @@ def test_master_state_and_history_use_the_checked_directory(paired: pairing.Pair
         assert stat.S_IMODE(os.lstat(ext(home)).st_mode) == 0o700
         assert {stat.S_IMODE(os.lstat(ext(home) / name).st_mode) for name in names} == {0o600}
 
-    pairing.save_channel_key("C1", b"\x01" * 32)
-    assert pairing.load_channel_keys() == {"C1": b"\x01" * 32}
-    assert pairing.claim_e2e_replay_identities((REPLAY_ID,)) is True
-    assert pairing.claim_e2e_replay_identities((REPLAY_ID,)) is False
+    pairing._save_pairing(REPLACEMENT)
+    assert pairing.load_pairing() == REPLACEMENT
     history.clear()
     assert history.load_history().status == history.STATUS_EMPTY
     pairing.clear_pairing()
@@ -149,7 +149,6 @@ def test_master_state_and_history_use_the_checked_directory(paired: pairing.Pair
 
 def test_checked_absence_reads_create_nothing(home: Path) -> None:
     assert pairing.load_pairing() is None
-    assert pairing.load_channel_keys() == {}
     assert history.load_history().status == history.STATUS_UNAVAILABLE
     pairing.clear_pairing()
     history.clear()
@@ -236,9 +235,8 @@ def test_posix_tolerant_storage_is_unreachable_on_windows(home: Path, monkeypatc
 def _exercise_every_storage_operation() -> None:
     master = pairing.ensure_master()
     assert pairing.load_pairing() == master
-    pairing.save_channel_key("C1", b"\x01" * 32)
-    assert pairing.load_channel_keys() == {"C1": b"\x01" * 32}
-    assert pairing.claim_e2e_replay_identities((REPLAY_ID,)) is True
+    pairing._save_pairing(master)
+    assert pairing.load_pairing() == master
     history.save_messages([{"role": "user", "content": "hello"}])
     assert history.projected_history().turns == [{"role": "user", "content": "hello"}]
     history.clear()
@@ -269,7 +267,7 @@ def test_unsafe_directory_refuses_every_operation_without_repair(paired: pairing
 @pytest.mark.parametrize(
     ("name", "names"),
     [
-        ("state.json", ["ensure_master", "load_pairing", "channel_key", "replay", "history_load"]),
+        ("state.json", ["ensure_master", "load_pairing", "save_pairing", "history_load"]),
         ("history.enc", ["history_load", "history_save", "history_clear"]),
     ],
 )
@@ -300,7 +298,7 @@ def test_broadened_file_refuses_without_repair(paired: pairing.Pairing, home: Pa
 def test_oversized_state_refuses_without_replacement(paired: pairing.Pairing, home: Path) -> None:
     huge = b"{" + b" " * storage.MAX_BYTES["state.json"] + b"}"
     put(ext(home), "state.json", huge)
-    for operation in (pairing.load_pairing, lambda: pairing.save_channel_key("C1", b"\x01" * 32)):
+    for operation in (pairing.load_pairing, lambda: pairing._save_pairing(paired)):
         with pytest.raises(storage.ExtensionStorageError):
             operation()
     stored, expected = file_sha(ext(home) / "state.json"), sha(huge)
@@ -318,8 +316,8 @@ def test_oversized_write_refuses_before_touching_storage(home: Path) -> None:
     ("name", "payload", "operation"),
     [
         ("state.json", b'{"aes_key": "', "load_pairing"),
-        ("state.json", b"[]", "replay"),
-        ("state.json", b"\xff", "channel_key"),
+        ("state.json", b"[]", "save_pairing"),
+        ("state.json", b"\xff", "save_pairing"),
         ("state.json", b"{", "ensure_master"),
     ],
 )
@@ -450,13 +448,13 @@ def test_uncertain_publication_is_classified_and_never_retried(
     real = storage.open_private_directory
     published = _fail_publication_of(monkeypatch, "state.json")
     with pytest.raises(storage.ExtensionStorageUncertain, match="inspect") as error:
-        pairing.save_channel_key("C1", b"\x01" * 32)
+        pairing._save_pairing(REPLACEMENT)
     assert error.value.commit_state == "uncertain"
     assert error.value.wire_reason == "storage_uncertain"
     assert error.value.native_code == 1117
     assert published == ["state.json"]
     monkeypatch.setattr(storage, "open_private_directory", real)
-    assert pairing.load_channel_keys() == {"C1": b"\x01" * 32}
+    assert pairing.load_pairing() == REPLACEMENT
 
 
 @pytest.mark.parametrize("reason", ["io", "missing"])
@@ -510,7 +508,7 @@ def test_missing_lock_or_cleanup_error_is_not_absence(
             raise PrivateFSError("missing", "close")
 
     monkeypatch.setattr(storage, "open_optional_private_directory", failing)
-    for operation in (pairing.load_pairing, pairing.load_channel_keys, history.load_history):
+    for operation in (pairing.load_pairing, history.load_history):
         with pytest.raises(storage.ExtensionStorageError) as error:
             operation()
         assert error.value.reason == "missing"
@@ -628,9 +626,6 @@ print("ready", flush=True)
 """
 
 _CHILDREN = {
-    "replay": """
-print(json.dumps(pairing.claim_e2e_replay_identities((sys.argv[1],))), flush=True)
-""",
     "commit": """
 pairing.ensure_master()
 print("committed", flush=True)
@@ -695,12 +690,6 @@ def _race(home: Path, children: list[tuple[str, list[str]]]) -> list[list[str]]:
             collected.append(output.get())
         results.append(collected)
     return results
-
-
-def test_replay_identity_race_accepts_exactly_once(paired: pairing.Pairing, home: Path) -> None:
-    results = _race(home, [("replay", [REPLAY_ID]), ("replay", [REPLAY_ID])])
-    assert sorted(result[-1] for result in results) == ["false", "true"]
-    assert pairing.claim_e2e_replay_identities((REPLAY_ID,)) is False
 
 
 def test_commit_and_reader_race_never_observes_partial_state(home: Path) -> None:

@@ -550,7 +550,7 @@ hermes-mordred extension devices --remove ID  # remove one; its connections clos
 > standalone. Install the `extension` extra to guarantee its dependencies.
 > Approval, crypto, history, keyvault signing, and agent chat all work: the chat
 > handler binds the
-> Hermes runtime shipped with `hermes-agent`, so E2E-encrypted messages get
+> Hermes runtime shipped with `hermes-agent`, so chat messages get
 > real agent replies (a stub reply appears only if that runtime is missing);
 > see [`EXTENSION.md`](./EXTENSION.md) for the security model and deployment
 > options.

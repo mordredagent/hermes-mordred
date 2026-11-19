@@ -10,7 +10,7 @@
     "type": "auth_ok",
     "hermes_version": "0.1.0a12",
     "se_available": true,
-    "capabilities": ["discord_channel_resolve_v1", "telegram_import_v1"]
+    "capabilities": ["telegram_import_v1"]
   },
   {"type": "auth_fail", "reason": "invalid_token"},
   {
@@ -64,17 +64,6 @@
     "type": "slack_setup_result",
     "ok": false,
     "error": "bad_token_format"
-  },
-  {
-    "id": "discord-context",
-    "type": "discord_channel_resolve_result",
-    "ok": true,
-    "guild_id": "123",
-    "channel_id": "999",
-    "channel_type": 11,
-    "channel_name": "release thread",
-    "parent_channel_id": "456",
-    "parent_channel_name": "secure-ops"
   },
   {
     "id": "sign-prompt",

@@ -47,6 +47,12 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     pairing._invalidate_state_cache()
 
 
+# A master that differs from the fixture's, for the write paths.
+REPLACEMENT = pairing.Pairing(
+    aes_key=b"\x01" * 32, ext_token="", ext_pubkey_b64="", hermes_pubkey_b64="", paired_at=1.0
+)
+
+
 @pytest.fixture
 def paired(home: Path) -> pairing.Pairing:
     master = pairing.ensure_master()
@@ -58,8 +64,7 @@ def refused_operations() -> list[Callable[[], object]]:
     return [
         pairing.ensure_master,
         pairing.load_pairing,
-        pairing.load_channel_keys,
-        lambda: pairing.claim_e2e_replay_identities(("c" * 64,)),
+        lambda: pairing._save_pairing(REPLACEMENT),
         history.load_history,
         history.clear,
         pairing.clear_pairing,
@@ -109,7 +114,7 @@ def test_native_hardlinked_state_refuses_without_change(paired: pairing.Pairing,
     directory = home / "extension"
     os.link(directory / "state.json", directory / "alias")
     before = contents(directory)
-    for operation in (pairing.load_pairing, lambda: pairing.save_channel_key("C1", b"\x01" * 32)):
+    for operation in (pairing.load_pairing, lambda: pairing._save_pairing(REPLACEMENT)):
         with pytest.raises(storage.ExtensionStorageError):
             operation()
     assert contents(directory) == before
@@ -155,7 +160,7 @@ def test_native_lock_held_by_another_process_serializes_mutation(paired: pairing
 
         def mutate() -> None:
             try:
-                done.put(pairing.save_channel_key("C1", b"\x01" * 32))
+                done.put(pairing._save_pairing(REPLACEMENT))
             except BaseException as exc:  # pragma: no cover - reported through the queue
                 done.put(exc)
 
@@ -168,5 +173,5 @@ def test_native_lock_held_by_another_process_serializes_mutation(paired: pairing
             holder.communicate("release\n", timeout=20)
     outcome: Any = done.get(timeout=20)
     assert not isinstance(outcome, BaseException)
-    assert pairing.load_channel_keys() == {"C1": b"\x01" * 32}
+    assert pairing.load_pairing() == REPLACEMENT
     assert holder.returncode == 0

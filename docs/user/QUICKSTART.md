@@ -501,6 +501,6 @@ for provider authentication, interactive use, and gateway operation.
 ## Next steps
 
 - [`USAGE.md`](./USAGE.md) — complete command reference and ceremonies.
-- [`EXTENSION.md`](./EXTENSION.md) — browser extension and E2E messaging.
+- [`EXTENSION.md`](./EXTENSION.md) — browser extension.
 - [`setup.md`](../dev/setup.md) — development checkout and safe test isolation.
 - [`USAGE.md` troubleshooting](./USAGE.md#8-troubleshooting) — common failures and recovery.

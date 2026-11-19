@@ -12,8 +12,8 @@ module's :func:`register` wires every component in a fixed order:
 3. ``network``       — the process-wide Tor / VPN / clearnet route and hooks.
 4. ``privacy_check`` — tool-call policy and the session-start integrity gate.
 5. ``dbcrypt``       — the database-encryption monitor and status line.
-6. ``e2e``           — encrypted gateway dispatch, outbound re-encryption and
-                        the read-only Telegram tools.
+6. ``e2e``           — the read-only Telegram tools (the Slack/Discord
+                        end-to-end transport that gave it its name is gone).
 7. ``activity``      — browser activity history: capture runs in the
                         extension server's receiver; ``register`` adds the
                         history hooks (``transform_tool_result``,
@@ -91,7 +91,7 @@ COMPONENT_REQUIRED_HOOKS: Final[dict[str, frozenset[str]]] = {
     "network": frozenset({"on_session_start", "on_session_end", "pre_api_request", "pre_tool_call"}),
     "privacy_check": frozenset({"on_session_start", "pre_tool_call"}),
     "dbcrypt": frozenset({"on_session_start", "pre_llm_call"}),
-    "e2e": frozenset({"on_session_start", "pre_gateway_dispatch"}),
+    "e2e": frozenset({"on_session_start"}),
     "activity": frozenset(),
     "recall": frozenset(),
     "wizard": frozenset(),

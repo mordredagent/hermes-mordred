@@ -2,6 +2,11 @@
 
 # Hermes ⇄ gateway E2E encryption
 
+> **Removed.** Hermes no longer implements this transport: the browser
+> extension stopped setting channel keys, and the gateway hook, reply
+> re-encryption and standalone-sender guard were deleted. This document is kept
+> as the record of the former wire contract.
+
 This document defines how Hermes receives and replies to agent commands when
 the Mordred browser extension uses Slack or Discord only as a ciphertext
 transport. Gateway agent commands accept `ENC:v3` only. The WebSocket API,
