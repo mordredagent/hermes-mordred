@@ -198,6 +198,7 @@ def test_full_server_flow():
         "recall_events_selection_v1",
         "recall_restore_v1",
         "recall_recommend_v1",
+        "recall_translate_v1",
         "recall_conversation_v1",
         "imports_v1",
         "health_v1",

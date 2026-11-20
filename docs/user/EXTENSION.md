@@ -134,7 +134,8 @@ and provider messages) is written to the Hermes log instead of the reply.
 
 `auth_ok.capabilities` currently advertises
 `telegram_import_v1`, `activity_batch_v1`, `recall_v1`, `recall_words_v1`,
-`recall_events_v1`, `recall_events_selection_v1` and `imports_v1`. These names describe protocol support; they do not prove
+`recall_events_v1`, `recall_events_selection_v1`, `recall_restore_v1`, `recall_recommend_v1`,
+`recall_translate_v1`, `recall_conversation_v1`, `imports_v1` and `health_v1`. These names describe protocol support; they do not prove
 that Telegram extras/login/private LLM, memory custody,
 or a particular platform's native/live acceptance gates are ready.
 
@@ -155,6 +156,7 @@ or a particular platform's native/live acceptance gates are ready.
 | `history_get` / `history_clear` | Reads or clears encrypted-at-rest conversation history. |
 | `recall_query` / `recall_open` / `recall_dismiss` | Finds the user's own stored messages (`mordred.db` import tables) that match a page selection, opens a part with its neighbours, or hides a conversation from recall for seven days. Return `recall_result` / `recall_opened` / `recall_dismissed`. The selection must arrive sealed to the extension key and cards and context leave sealed; there is no model in the path, and excerpts are substrings of stored text. A store held by another connection past the busy timeout (for example while the topics are being rebuilt) answers `store_busy`, which the extension retries; any other refused store is `import_store_unavailable`. Page sessions are refused. |
 | `recall_events` | The stored events and topics holding the typed words (`mode: "words"`, the default), or a page selection (`mode: "selection"`): searched as typed when short, otherwise by the events that share enough of its nouns (weighted by rarity), so a selection about something never discussed finds nothing. Returns `recall_events_result`, sealed both ways like `recall_query`. Reads the prebuilt topic store; no model runs per search. Page sessions are refused. |
+| `recall_translate` / `recall_translate_cancel` | A page selection (sealed) translated into `language` (a browser language tag such as `ja` or `en-US`) by the small local model (`MORDRED_RECALL_AGENT_*`). The translation streams as sealed `recall_translate_piece` frames (`{"text": ...}`, to be joined in order) and ends with one `recall_translate_end`; `recall_agent_unavailable` when no local model is configured. The selection is at most 1000 characters. Cancelling sends no reply. Page sessions are refused. |
 
 Large history reads return the newest complete suffix with `truncated: true`;
 stored history is not modified. `history_result` also carries `status`
@@ -234,7 +236,7 @@ counting. Two local, OpenAI-compatible servers (loopback only) add to it:
 
 | Settings | Used for | When it runs |
 |---|---|---|
-| `MORDRED_RECALL_AGENT_ENDPOINT`, `MORDRED_RECALL_AGENT_MODEL` | recommendations under a search (a small model) | always: a search waits for it |
+| `MORDRED_RECALL_AGENT_ENDPOINT`, `MORDRED_RECALL_AGENT_MODEL` | recommendations under a search, and translating a long selection written in another language (a small model) | always: a search waits for it |
 | `MORDRED_RECALL_LLM_ENDPOINT`, `MORDRED_RECALL_LLM_MODEL` | stored headlines and the topic splits, in the background (a large model) | see below |
 
 The large model never answers a search directly; it only writes lines that are

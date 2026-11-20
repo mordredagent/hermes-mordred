@@ -29,6 +29,10 @@ Message protocol: ``Mordred-Extension/SPEC.ja.md`` §6 and the extension's
   explained by a loopback local model (:mod:`mordred_hermes.recall.recommend`), streamed as
   sealed ``recall_recommend_item`` frames and one ``recall_recommend_end``;
   ``recall_recommend_cancel`` stops it (no reply)
+- ``recall_translate`` (``recall_translate_v1``) → a page selection translated into the
+  user's language by the same loopback local model (:mod:`mordred_hermes.recall.translate`),
+  streamed as sealed ``recall_translate_piece`` frames and one ``recall_translate_end``;
+  ``recall_translate_cancel`` stops it (no reply)
 - ``recall_restore`` / ``recall_hidden`` → show a hidden conversation again, or list the
   hidden ones (sealed, with their source and title): ``recall_restored`` /
   ``recall_hidden_result`` (``recall_restore_v1``)
@@ -117,6 +121,8 @@ _EXTENSION_CAPABILITIES = [
     "recall_restore_v1",
     # ``recall_recommend``: memories for a search, picked and explained by a local model, streamed.
     "recall_recommend_v1",
+    # ``recall_translate``: a selection translated into the user's language by a local model, streamed.
+    "recall_translate_v1",
     # ``recall_conversation``: the whole conversation around a part, to read through.
     "recall_conversation_v1",
     IMPORTS_CAPABILITY,
@@ -160,6 +166,8 @@ _MAX_TELEGRAM_DIALOG_IDS = 50
 _MAX_TELEGRAM_ASKS_PER_SOCKET = 2
 # One panel and one popup may each be recommending at once.
 _MAX_RECALL_RECOMMENDS_PER_SOCKET = 2
+# Likewise one translation each.
+_MAX_RECALL_TRANSLATES_PER_SOCKET = 2
 _TELEGRAM_DIALOG_ID_RE = re.compile(r"-?[0-9]{1,20}")
 
 
@@ -512,6 +520,7 @@ class _Connection:
         self._pending_sign: dict[str, dict[str, Any]] = {}
         self._telegram_asks: dict[str, asyncio.Task[None]] = {}
         self._recall_recommends: dict[str, tuple[asyncio.Task[None], threading.Event]] = {}
+        self._recall_translates: dict[str, tuple[asyncio.Task[None], threading.Event]] = {}
 
     def cancel_background_tasks(self) -> None:
         """Stop work that would otherwise outlive this socket (and keep billing)."""
@@ -521,10 +530,11 @@ class _Connection:
         for task in list(self._telegram_asks.values()):
             task.cancel()
         self._telegram_asks.clear()
-        for task, stop in list(self._recall_recommends.values()):
-            stop.set()
-            task.cancel()
-        self._recall_recommends.clear()
+        for running in (self._recall_recommends, self._recall_translates):
+            for task, stop in list(running.values()):
+                stop.set()
+                task.cancel()
+            running.clear()
 
     async def _send(self, payload: dict[str, Any]) -> bool:
         # A client that disconnected mid-turn (e.g. during a slow local-LLM
@@ -616,6 +626,8 @@ class _Connection:
             "recall_hidden": self._on_recall_hidden,
             "recall_recommend": self._on_recall_recommend,
             "recall_recommend_cancel": self._on_recall_recommend_cancel,
+            "recall_translate": self._on_recall_translate,
+            "recall_translate_cancel": self._on_recall_translate_cancel,
             "imports_status": self._on_imports_status,
             "imports_call": self._on_imports_call,
             "health": self._on_health,
@@ -1282,6 +1294,89 @@ class _Connection:
                 else:
                     await self._send({"id": mid, "type": "recall_recommend_end", "ok": True})
                 return
+        except asyncio.CancelledError:
+            stop.set()
+            raise
+
+    async def _on_recall_translate(self, msg: dict[str, Any]) -> None:
+        from ..recall.translate import valid_language
+
+        mid = msg.get("id")
+        ek = self._telegram_key()
+        if ek is None:
+            await self._send(
+                {"id": mid, "type": "recall_translate_end", "ok": False, "error": "encryption_key_unavailable"}
+            )
+            return
+        sealed = msg.get("text")
+        language = msg.get("language")
+        if (
+            not isinstance(mid, str)
+            or not mid
+            or mid in self._recall_translates
+            or not isinstance(sealed, str)
+            or not is_encrypted(sealed)
+            or not valid_language(language)
+        ):
+            await self._send({"id": mid, "type": "recall_translate_end", "ok": False, "error": "invalid_request"})
+            return
+        if len(self._recall_translates) >= _MAX_RECALL_TRANSLATES_PER_SOCKET:
+            await self._send({"id": mid, "type": "recall_translate_end", "ok": False, "error": "too_many_requests"})
+            return
+        try:
+            text = decrypt_message(ek, sealed)
+        except DecryptError:
+            await self._send({"id": mid, "type": "recall_translate_end", "ok": False, "error": "undecryptable"})
+            return
+        stop = threading.Event()
+        task = asyncio.create_task(self._run_recall_translate(mid, text, str(language), ek, stop))
+        self._recall_translates[mid] = (task, stop)
+        task.add_done_callback(lambda _t: self._recall_translates.pop(mid, None))
+
+    async def _on_recall_translate_cancel(self, msg: dict[str, Any]) -> None:
+        """Stop a running translation (the panel closed or the selection changed). No reply."""
+        mid = msg.get("id")
+        running = self._recall_translates.get(mid) if isinstance(mid, str) else None
+        if running is not None:
+            running[1].set()
+            running[0].cancel()
+
+    async def _run_recall_translate(self, mid: str, text: str, language: str, ek: bytes, stop: threading.Event) -> None:
+        loop = asyncio.get_running_loop()
+        pieces: asyncio.Queue[str] = asyncio.Queue()
+
+        def on_piece(piece: str) -> None:
+            loop.call_soon_threadsafe(pieces.put_nowait, piece)
+
+        def run() -> str | None:
+            from ..recall.translate import translate_selection
+
+            try:
+                return translate_selection(text, language, on_piece=on_piece, cancelled=stop.is_set)
+            except Exception:
+                _log.exception("recall translate failed")
+                return "recall_unavailable"
+
+        # The worker's pieces are queued before its result lands (both go through the loop in order).
+        work: asyncio.Future[str | None] = loop.run_in_executor(None, run)
+        try:
+            while not work.done() or not pieces.empty():
+                getter: asyncio.Future[Any] = asyncio.ensure_future(pieces.get())
+                await asyncio.wait({getter, work}, return_when=asyncio.FIRST_COMPLETED)
+                if not getter.done():
+                    getter.cancel()
+                    continue
+                # Pieces that arrived together leave as one frame.
+                piece = str(getter.result())
+                while not pieces.empty():
+                    piece += pieces.get_nowait()
+                sealed = self._telegram_seal(ek, json.dumps({"text": piece}, ensure_ascii=False))
+                if not await self._send({"id": mid, "type": "recall_translate_piece", "content": sealed}):
+                    stop.set()
+                    return
+            error = work.result()
+            end: dict[str, Any] = {"id": mid, "type": "recall_translate_end", "ok": error is None}
+            await self._send(end if error is None else {**end, "error": error})
         except asyncio.CancelledError:
             stop.set()
             raise

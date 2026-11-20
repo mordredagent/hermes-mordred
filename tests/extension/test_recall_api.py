@@ -297,3 +297,104 @@ def test_page_sessions_cannot_ask_for_recommendations() -> None:
     [frame] = _dispatch(_conn(svc, page=True), {"id": "m", "type": "recall_recommend", "text": _sealed("x")})
     assert frame == {"id": "m", "type": "error", "reason": "page_session_forbidden"}
     assert svc.calls == []
+
+
+def _translating(conn: Any, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Dispatch, then wait for the translation the frame started."""
+
+    async def run() -> None:
+        await conn.dispatch(json.dumps(payload))
+        await asyncio.gather(*(task for task, _stop in list(conn._recall_translates.values())))
+
+    asyncio.run(run())
+    return list(conn.ws.sent)
+
+
+def test_translation_streams_sealed_pieces_and_ends(monkeypatch: Any) -> None:
+    from mordred_hermes.recall import translate as translate_mod
+
+    seen: list[tuple[str, str]] = []
+
+    def fake(text: str, language: str, *, on_piece: Any, cancelled: Any) -> str | None:
+        seen.append((text, language))
+        for piece in ("会議は", "木曜日です。"):
+            on_piece(piece)
+        return None
+
+    monkeypatch.setattr(translate_mod, "translate_selection", fake)
+    payload = {"id": "t", "type": "recall_translate", "text": _sealed("The meeting is on Thursday."), "language": "ja"}
+    *pieces, end = _translating(_conn(_FakeRecall()), payload)
+    assert seen == [("The meeting is on Thursday.", "ja")]
+    assert pieces and {frame["type"] for frame in pieces} == {"recall_translate_piece"}
+    wire = json.dumps(pieces, ensure_ascii=False)
+    assert "会議" not in wire and "Thursday" not in wire
+    text = "".join(json.loads(decrypt_message(_EK, frame["content"]))["text"] for frame in pieces)
+    assert text == "会議は木曜日です。"
+    assert end == {"id": "t", "type": "recall_translate_end", "ok": True}
+
+
+def test_translation_reports_its_code_and_refuses_bad_requests(monkeypatch: Any) -> None:
+    from mordred_hermes.recall import translate as translate_mod
+
+    monkeypatch.setattr(translate_mod, "translate_selection", lambda *_a, **_k: "recall_agent_unavailable")
+    [end] = _translating(
+        _conn(_FakeRecall()), {"id": "t", "type": "recall_translate", "text": _sealed("x"), "language": "ja"}
+    )
+    assert end == {"id": "t", "type": "recall_translate_end", "ok": False, "error": "recall_agent_unavailable"}
+    for bad in (
+        {"id": "t", "type": "recall_translate", "text": "plaintext", "language": "ja"},
+        {"id": "t", "type": "recall_translate", "text": _sealed("x"), "language": "日本語"},
+        {"id": "t", "type": "recall_translate", "text": _sealed("x")},
+    ):
+        [frame] = _translating(_conn(_FakeRecall()), bad)
+        assert frame == {"id": "t", "type": "recall_translate_end", "ok": False, "error": "invalid_request"}
+
+
+def test_a_failing_translation_is_a_content_free_code(monkeypatch: Any) -> None:
+    from mordred_hermes.recall import translate as translate_mod
+
+    def boom(*_a: Any, **_k: Any) -> str | None:
+        raise RuntimeError("secret page text")
+
+    monkeypatch.setattr(translate_mod, "translate_selection", boom)
+    [end] = _translating(
+        _conn(_FakeRecall()), {"id": "t", "type": "recall_translate", "text": _sealed("x"), "language": "ja"}
+    )
+    assert end == {"id": "t", "type": "recall_translate_end", "ok": False, "error": "recall_unavailable"}
+
+
+def test_cancel_stops_a_running_translation(monkeypatch: Any) -> None:
+    import threading
+
+    from mordred_hermes.recall import translate as translate_mod
+
+    started = threading.Event()
+    stopped: list[bool] = []
+
+    def slow(_text: str, _language: str, *, on_piece: Any, cancelled: Any) -> str | None:
+        started.set()
+        while not cancelled():
+            threading.Event().wait(0.01)
+        stopped.append(True)
+        return None
+
+    monkeypatch.setattr(translate_mod, "translate_selection", slow)
+    conn = _conn(_FakeRecall())
+
+    async def run() -> None:
+        await conn.dispatch(json.dumps({"id": "t", "type": "recall_translate", "text": _sealed("x"), "language": "ja"}))
+        await asyncio.get_running_loop().run_in_executor(None, started.wait, 5)
+        await conn.dispatch(json.dumps({"id": "t", "type": "recall_translate_cancel"}))
+        await asyncio.sleep(0.2)
+
+    asyncio.run(run())
+    assert stopped == [True]
+    assert conn._recall_translates == {}
+
+
+def test_page_sessions_cannot_ask_for_translations() -> None:
+    [frame] = _dispatch(
+        _conn(_FakeRecall(), page=True),
+        {"id": "t", "type": "recall_translate", "text": _sealed("x"), "language": "ja"},
+    )
+    assert frame == {"id": "t", "type": "error", "reason": "page_session_forbidden"}
