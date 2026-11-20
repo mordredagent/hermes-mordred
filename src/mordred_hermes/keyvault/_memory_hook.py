@@ -7,17 +7,24 @@ defensive posture as :mod:`._env_write_guard`: upstream ships no API stability
 guarantee, so the seam is *classified by signature* before anything is wrapped
 and an unrecognised shape is refused rather than guessed at.
 
-Three shapes exist in the wild; wrapping the wrong one is a data-loss bug, not a
+Four shapes exist in the wild; wrapping the wrong one is a data-loss bug, not a
 cosmetic one — a sealed file that a read seam reports as "empty" is overwritten
 by the next write:
 
-============  ==================================  ================================
-Shape         Read chokepoint                     Drift detection
-============  ==================================  ================================
-A (0.20+)     ``_read_raw_checked(path)``         ``_detect_external_drift(self, target, raw)``
-B (0.16-19)   ``_read_file(path)``                ``_detect_external_drift(self, target)``
-C (0.13-15)   ``_read_file(path)``                none
-============  ==================================  ================================
+==============  ==================================  ================================
+Shape           Read chokepoint                     Drift detection
+==============  ==================================  ================================
+D (0.22.6+)     ``_read_raw_checked(path)``         ``_has_oversized_entry(self, target, raw)``
+                                                    + ``_drift_backup(self, target, raw)``
+A (0.20-22.5)   ``_read_raw_checked(path)``         ``_detect_external_drift(self, target, raw)``
+B (0.16-19)     ``_read_file(path)``                ``_detect_external_drift(self, target)``
+C (0.13-15)     ``_read_file(path)``                none
+==============  ==================================  ================================
+
+Shape D split shape A's drift check in two: a pure size test on the snapshot,
+which already runs on plaintext once the read seam is wrapped, and a backup
+writer, which would publish that decrypted snapshot in the clear. Only the
+backup writer is wrapped.
 
 Arming is evaluated **per call**, never cached: the operator can pause the
 feature (opt-out marker) mid-session, and the key arrives in the process-private
@@ -66,8 +73,10 @@ never imports ``tools.memory_tool`` itself: that import has upstream side effect
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import functools
 import inspect
+import itertools
 import logging
 import os
 import sys
@@ -181,6 +190,8 @@ class _HookConfig:
     environ: Mapping[str, str]
     delimiter: str
     home_factory: Callable[[], Path] = field(default=_live_home)
+    #: Shape D's failed-backup suffix (upstream's ``_BACKUP_FAILED``); empty for the other shapes.
+    backup_failed: str = ""
 
     @property
     def home(self) -> Path:
@@ -450,6 +461,30 @@ def _check_drift_dependencies(store: Any) -> str:
     return ""
 
 
+def _backup_failed_marker(memory_tool_module: Any, store: Any) -> str | None:
+    """Shape D's failed-backup suffix (``_BACKUP_FAILED``), or ``None`` when absent.
+
+    Upstream's ``_mutate`` tells a failed backup apart by ``endswith`` on its own
+    module constant, so the wrapper must return exactly that string. It lives
+    beside ``MemoryStore`` (``tools.memory_tool_store`` in 0.22.6+), which
+    ``tools.memory_tool`` does not re-export; the memory tool module is the
+    fallback for a store defined there.
+    """
+    owners = (sys.modules.get(getattr(store, "__module__", "") or ""), memory_tool_module)
+    for owner in owners:
+        value = getattr(owner, "_BACKUP_FAILED", None)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _check_backup_failed(memory_tool_module: Any, store: Any) -> str:
+    """``""`` when shape D's failed-backup suffix is a usable string, else why not."""
+    if _backup_failed_marker(memory_tool_module, store) is None:
+        return "MemoryStore's module has no usable _BACKUP_FAILED marker"
+    return ""
+
+
 def classify_seam(memory_tool_module: Any) -> tuple[str, str]:
     """Classify the upstream seam by signature: ``("A"|"B"|"C", "")`` or ``("", reason)``.
 
@@ -477,8 +512,17 @@ def classify_seam(memory_tool_module: Any) -> tuple[str, str]:
             return "", reason
 
     if getattr(store, "_read_raw_checked", None) is not None:
+        reason = _check_params(store, "_read_raw_checked", ("path",))
+        if not reason and getattr(store, "_detect_external_drift", None) is None:
+            reason = (
+                _check_params(store, "_drift_backup", ("self", "target", "raw"))
+                or _check_params(store, "_has_oversized_entry", ("self", "target", "raw"))
+                or _check_params(store, "_path_for", ("target",))
+                or _check_backup_failed(memory_tool_module, store)
+            )
+            return ("", reason) if reason else ("D", "")
         reason = (
-            _check_params(store, "_read_raw_checked", ("path",))
+            reason
             or _check_params(store, "_detect_external_drift", ("self", "target", "raw"))
             or _check_drift_dependencies(store)
         )
@@ -545,7 +589,7 @@ def seam_check(memory_tool_module: Any | None = None) -> tuple[bool, str]:
 
 
 def memory_seam_shape(memory_tool_module: Any | None = None) -> str:
-    """``"A"`` / ``"B"`` / ``"C"``, or ``""`` when unsupported — for diagnostics."""
+    """``"A"`` / ``"B"`` / ``"C"`` / ``"D"``, or ``""`` when unsupported — for diagnostics."""
     module = memory_tool_module if memory_tool_module is not None else _load_memory_tool()[0]
     return "" if module is None else classify_seam(module)[0]
 
@@ -602,7 +646,7 @@ def _profile_operation(cfg: _HookConfig, path: Path, *, reading: bool = False) -
     home = cfg.home
     if path.is_symlink() or path.parent.resolve() != (home / "memories").resolve():
         raise MemoryEncryptionUnavailable("memory path does not belong to the active profile")
-    bound = _HookConfig(environ=cfg.environ, delimiter=cfg.delimiter, home_factory=lambda: home)
+    bound = dataclasses.replace(cfg, home_factory=lambda: home)
     # Reading an unmanaged profile needs no filesystem mutations. If enable
     # races this read, the reader still validates any seal it observes; it
     # never publishes data. Every writer continues to take the lifecycle lock.
@@ -845,6 +889,104 @@ def _drift_on_plaintext(
     return str(bak_path)
 
 
+def _wrap_drift_backup(store: Any, cfg: _HookConfig) -> None:
+    """Shape D: upstream writes ``raw`` to its ``.bak`` with a bare exclusive ``open``.
+
+    ``raw`` is the snapshot the wrapped read seam returned, so for a sealed file
+    it is already the decrypted memory, and delegating would publish it in the
+    clear. While armed, or whenever the file is sealed on disk, the backup is
+    sealed before it is created instead. Upstream's contract is kept: the
+    ``.bak.<ts>[.<n>]`` name, exclusive creation (two snapshots in one second
+    never overwrite each other), and ``path + _BACKUP_FAILED`` on failure, which
+    ``_mutate`` turns into a drift refusal with the file unchanged. Disarmed
+    plaintext at rest delegates to upstream untouched.
+    """
+    original = store._drift_backup
+
+    @functools.wraps(original)
+    def _drift_backup(self: Any, target: str, raw: str) -> Any:
+        path = Path(self._path_for(target))
+        if sys.platform == "win32":
+            return _windows_drift_backup(cfg, path, raw)
+        with _profile_operation(cfg, path) as bound:
+            if not (bound.armed or _sealed_on_disk(path)):
+                return original(self, target, raw)  # plaintext at rest and disarmed: upstream logic intact
+            key = _require_key(bound, path, writing=True)
+            return _sealed_drift_backup(path, raw, key=key, failed=bound.backup_failed)
+
+    _publish(store, "_drift_backup", _drift_backup, static=False)
+
+
+def _backup_candidates(path: Path) -> Iterator[Path]:
+    """Upstream's shape-D backup names: ``<name>.bak.<ts>``, then ``.1``, ``.2``, ..."""
+    stem = path.suffix + f".bak.{int(time.time())}"
+    for n in itertools.count():
+        yield path.with_suffix(stem + (f".{n}" if n else ""))
+
+
+def _sealed_drift_backup(path: Path, plaintext: str, *, key: bytes, failed: str) -> str:
+    """Create the first free backup name holding ``plaintext`` sealed to that name."""
+    for bak_path in _backup_candidates(path):
+        try:
+            _create_private(bak_path, seal(plaintext.encode("utf-8"), key=key, name=bak_path.name))
+        except FileExistsError:
+            continue
+        except OSError:
+            return str(bak_path) + failed
+        return str(bak_path)
+    raise AssertionError("unreachable: backup candidates are unbounded")  # pragma: no cover
+
+
+def _create_private(path: Path, data: bytes) -> None:
+    """Create ``path`` exclusively at ``0o600`` and write ``data``; never replaces anything.
+
+    ``FileExistsError`` (an existing name, a symlink included) is left to the caller,
+    which moves on to the next name. Only already-sealed bytes reach this function,
+    so a crash mid-write leaves a broken seal, never plaintext; any other failure
+    removes the file this call created.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise
+    _fsync_dir(path.parent)
+
+
+def _windows_drift_backup(cfg: _HookConfig, path: Path, raw: str) -> str:
+    """Shape D on Windows: the checked adapter seals the backup before publication.
+
+    Same policy as :func:`_windows_drift`: the snapshot must still be what is on
+    disk, and a keyless (fresh unmanaged) profile reports a failed backup rather
+    than writing a plaintext copy or creating a key.
+    """
+    from .._private_fs import PrivateFSError
+
+    candidates = _backup_candidates(path)
+    first = next(candidates)
+    with _windows_operation(cfg, path) as session:
+        plaintext = session.read_plaintext(path.name, encoding="utf-8-sig")
+        if (plaintext or "") != raw:
+            raise MemoryEncryptionUnavailable("Windows memory drift snapshot changed; reload before mutation")
+        if not session.sealing_available:
+            return str(first) + cfg.backup_failed
+        for backup in itertools.chain((first,), candidates):
+            try:
+                session.create_backup(backup.name, raw)
+            except PrivateFSError as exc:
+                if exc.reason == "exists" and exc.commit_state == "not_committed":
+                    continue
+                raise
+            return str(backup)
+    raise AssertionError("unreachable: backup candidates are unbounded")  # pragma: no cover
+
+
 # ---------------------------------------------------------------------------
 # Installation
 # ---------------------------------------------------------------------------
@@ -853,6 +995,11 @@ def _drift_on_plaintext(
 #: Every seam of each shape and the wrapper that owns it — the single source of
 #: truth for both installing and reporting installation.
 _SEAM_WRAPPERS: Final[dict[str, tuple[tuple[str, Callable[[Any, _HookConfig], None]], ...]]] = {
+    "D": (
+        ("_write_file", _wrap_write_file),
+        ("_read_raw_checked", _wrap_read_raw_checked),
+        ("_drift_backup", _wrap_drift_backup),
+    ),
     "A": (
         ("_write_file", _wrap_write_file),
         ("_read_raw_checked", _wrap_read_raw_checked),
@@ -928,7 +1075,12 @@ def install_memory_hook(
         _refuse_or_ignore(reason, home=factory, environ=environ)
         return False
 
-    cfg = _HookConfig(environ=environ, delimiter=module.ENTRY_DELIMITER, home_factory=factory)
+    cfg = _HookConfig(
+        environ=environ,
+        delimiter=module.ENTRY_DELIMITER,
+        home_factory=factory,
+        backup_failed=(_backup_failed_marker(module, module.MemoryStore) or "") if shape == "D" else "",
+    )
     try:
         _wrap_seam(module.MemoryStore, shape, cfg)
     except Exception as exc:

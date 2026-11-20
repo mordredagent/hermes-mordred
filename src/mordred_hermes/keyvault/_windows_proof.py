@@ -60,7 +60,7 @@ _STDERR_LIMIT: Final = 2048
 _DRAIN_SECONDS: Final = 5.0
 _SCRIPT_NAME: Final = "hermes"  # engages the runtime .pth bootstrap exactly like a Hermes start
 _REPORT_KEYS: Final = frozenset({"module", "helper", "seam", "generation", "wrapped_sha256", "challenge_sha256"})
-_SEAMS: Final = frozenset({"A", "B", "C"})
+_SEAMS: Final = frozenset({"A", "B", "C", "D"})
 
 # The child never prints key bytes. Stray stdout writes (including fd-level
 # writes from native code) go to stderr; only the final report reaches the

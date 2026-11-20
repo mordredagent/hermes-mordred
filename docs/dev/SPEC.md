@@ -948,8 +948,13 @@ a decryption or recovery key.
 
 Seam coverage depends on which shape of the upstream memory tool is
 installed. Mordred wraps three call sites per seam shape shipped by
-hermes-agent 0.13–0.15, 0.16–0.19, and current main: the read chokepoint, the
-write chokepoint, and the drift-backup write. An unrecognised seam is
+hermes-agent 0.13–0.15, 0.16–0.19, 0.20–0.22.5, and 0.22.6 onward: the read
+chokepoint, the write chokepoint, and the drift-backup write (0.13–0.15 has
+no drift backup). From 0.22.6 upstream splits drift detection into a pure size
+test on the already-decrypted snapshot and a separate `_drift_backup` writer;
+only the writer is wrapped, and it creates the backup sealed under upstream's
+exclusive `.bak.<ts>[.<n>]` naming and `_BACKUP_FAILED` contract. An
+unrecognised seam is
 unsupported: when armed, the process refuses to start (`sys.stderr` plus exit
 1, recoverable with `HERMES_SAFE_MODE=1`); when not armed, nothing is wrapped
 and memory stays plaintext.

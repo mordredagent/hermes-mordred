@@ -1,6 +1,6 @@
 """Canary: the memory hook against the real release or selected upstream source.
 
-The unit tests run against faithful copies of the three upstream seam shapes;
+The unit tests run against faithful copies of the four upstream seam shapes;
 this file runs against installed Hermes or a strictly selected main checkout. It is the tripwire
 for an upstream refactor — if ``MemoryStore`` grows a new read chokepoint or
 renames a parameter, ``seam_check`` stops recognising it and this fails in CI
@@ -36,7 +36,7 @@ from mordred_hermes.keyvault._runtime_probe import runtime_memory_encryption_ava
 from mordred_hermes.keyvault.memory_crypto import MAGIC, seal, unseal
 from tests._upstream_canary import CanaryUnavailable, SeamDrift, import_target, verify_selected_source
 
-_SEAM_NAMES = ("_write_file", "_read_file", "_read_raw_checked", "_detect_external_drift")
+_SEAM_NAMES = ("_write_file", "_read_file", "_read_raw_checked", "_detect_external_drift", "_drift_backup")
 _ABSENT = object()
 
 
@@ -93,7 +93,7 @@ def test_memory_round_trips_through_upstream_code(
     assert upstream.get_memory_dir() == tmp_path / "memories"
     ok, reason = seam_check()
     assert ok, reason
-    assert memory_seam_shape() in {"A", "B", "C"}
+    assert memory_seam_shape() in {"A", "B", "C", "D"}
     _arm(tmp_path, monkeypatch)
     assert install_memory_hook(home=tmp_path) is True
 
@@ -111,7 +111,7 @@ def test_memory_round_trips_through_upstream_code(
     assert reloaded.memory_entries == ["the cat is on the mat"]
 
     # replace / remove go through _reload_target -> the wrapped read seam and,
-    # on shapes A/B, the wrapped drift check.
+    # on shapes A/B/D, the wrapped drift check.
     assert store.replace("memory", "cat is on", "the dog is on the mat")["success"] is True
     after_replace = upstream.MemoryStore()
     after_replace.load_from_disk()
@@ -211,7 +211,7 @@ def test_probe_entry_point_rejects_other_arguments(capsys: pytest.CaptureFixture
     import_target("tools.memory_tool")
     capsys.readouterr()
     assert _memory_hook._main(["--probe"]) == 0
-    assert capsys.readouterr().out.strip() in {"A", "B", "C"}
+    assert capsys.readouterr().out.strip() in {"A", "B", "C", "D"}
     assert _memory_hook._main([]) == 2
     assert "--probe" in capsys.readouterr().err
 
@@ -231,7 +231,7 @@ def test_probe_entry_point_exits_zero(tmp_path: Path) -> None:
         },
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() in {"A", "B", "C"}
+    assert proc.stdout.strip() in {"A", "B", "C", "D"}
 
 
 @pytest.fixture(autouse=True)
@@ -287,15 +287,51 @@ def test_drift_backup_is_sealed_and_preserves_external_content(
         # The declared floor has no drift-backup seam; mutations still ran.
         assert backups == []
         return
-    assert result["success"] is False
-    assert path.read_bytes() == before
     assert len(backups) == 1
     backup = backups[0]
     assert backup.read_bytes().startswith(MAGIC)
     assert unseal(backup.read_bytes(), key=key, name=backup.name).decode() == raw
+    if memory_seam_shape() == "D":
+        # 0.22.6+: a write that only prunes the oversized entry proceeds once the
+        # snapshot is backed up, and the rewrite stays sealed.
+        assert result["success"] is True
+        assert result.get("drift_backup") == str(backup)
+        assert path.read_bytes().startswith(MAGIC)
+        pruned = upstream.MemoryStore()
+        pruned.load_from_disk()
+        assert pruned.memory_entries == []
+    else:
+        assert result["success"] is False
+        assert path.read_bytes() == before
     path.write_text("repaired entry", encoding="utf-8")
     assert store.add("memory", "another fact")["success"]
     assert path.read_bytes().startswith(MAGIC)
+
+
+def test_shape_d_refused_write_backs_up_sealed_and_leaves_the_file(
+    upstream: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shape D's other drift path: a replace that rewrites the oversized entry is
+    refused with a drift error, after the decrypted snapshot was backed up sealed."""
+    if memory_seam_shape() != "D":
+        pytest.skip("shape D (hermes-agent 0.22.6+) only")
+    _arm(tmp_path, monkeypatch)
+    assert install_memory_hook(home=tmp_path)
+    store = upstream.MemoryStore()
+    store.load_from_disk()
+    path = tmp_path / "memories" / "MEMORY.md"
+    raw = "external writer " + "x" * (store.memory_char_limit + 100)
+    key = base64.urlsafe_b64decode(os.environ["HERMES_MEMORY_KEY"])
+    before = seal(raw.encode(), key=key, name=path.name)
+    path.write_bytes(before)
+
+    result = store.replace("memory", "external writer", "a short entry")
+
+    assert result["success"] is False
+    assert path.read_bytes() == before
+    backups = list(path.parent.glob("MEMORY.md.bak.*"))
+    assert len(backups) == 1
+    assert unseal(backups[0].read_bytes(), key=key, name=backups[0].name).decode() == raw
 
 
 @pytest.mark.parametrize("missing_key", [None, "invalid-key"])

@@ -49,7 +49,7 @@ def module_for(home, shape):
         raise AssertionError("upstream raw read called")
 
     store._write_file = staticmethod(_write_file)
-    if shape == "A":
+    if shape in {"A", "D"}:
         store._read_raw_checked = staticmethod(_read_raw_checked)
     else:
         store._read_file = staticmethod(_read_file)
@@ -57,7 +57,7 @@ def module_for(home, shape):
     return module
 
 
-@pytest.mark.parametrize("shape", ["A", "B", "C"])
+@pytest.mark.parametrize("shape", ["A", "B", "C", "D"])
 def test_checked_unmanaged_read_write_each_seam(windows, shape):
     _, home, backend = windows
     module = module_for(home, shape)
@@ -69,7 +69,7 @@ def test_checked_unmanaged_read_write_each_seam(windows, shape):
     assert not backend.calls
 
 
-@pytest.mark.parametrize("shape", ["A", "B", "C"])
+@pytest.mark.parametrize("shape", ["A", "B", "C", "D"])
 def test_managed_read_write_and_optout_each_seam(windows, shape):
     _, home, _ = windows
     key, _ = enroll(windows)
@@ -85,7 +85,7 @@ def test_managed_read_write_and_optout_each_seam(windows, shape):
     assert opened, "opt-out write did not stay sealed"
 
 
-@pytest.mark.parametrize("shape", ["A", "B", "C"])
+@pytest.mark.parametrize("shape", ["A", "B", "C", "D"])
 def test_unsafe_raw_read_refuses_instead_of_missing(windows, shape):
     _, home, _ = windows
     put(home, "MEMORY.md", b"data")
@@ -116,6 +116,48 @@ def test_drift_backup_authenticates_and_collision_cannot_overwrite(windows, shap
     before = path.read_bytes()
     assert "BACKUP FAILED" in store._detect_external_drift(*args)
     assert path.read_bytes() == before
+
+
+def test_shape_d_drift_backup_authenticates_and_collision_takes_the_next_name(windows, monkeypatch):
+    _, home, _ = windows
+    key, _ = enroll(windows)
+    mark(home)
+    raw = "abcdef"
+    put(home, "MEMORY.md", seal(raw.encode(), key=key, name="MEMORY.md"))
+    module = module_for(home, "D")
+    store = module.MemoryStore(memory_char_limit=1)
+    monkeypatch.setattr(hook.time, "time", lambda: 42)
+    first = home / "memories" / "MEMORY.md.bak.42"
+    assert store._drift_backup("memory", raw) == str(first)
+    assert unseal(first.read_bytes(), key=key, name=first.name) == b"abcdef", "drift backup does not authenticate"
+    before = first.read_bytes()
+    second = home / "memories" / "MEMORY.md.bak.42.1"
+    assert store._drift_backup("memory", raw) == str(second)
+    assert first.read_bytes() == before
+    assert unseal(second.read_bytes(), key=key, name=second.name) == b"abcdef"
+
+
+def test_shape_d_stale_snapshot_refuses(windows):
+    _, home, _ = windows
+    key, _ = enroll(windows)
+    put(home, "MEMORY.md", seal(b"new", key=key, name="MEMORY.md"))
+    module = module_for(home, "D")
+    with pytest.raises(hook.MemoryEncryptionUnavailable):
+        module.MemoryStore()._drift_backup("memory", "old")
+    assert not list((home / "memories").glob("*.bak.*"))
+
+
+def test_shape_d_keyless_unmanaged_drift_reports_backup_failed(windows, monkeypatch):
+    _, home, backend = windows
+    put(home, "MEMORY.md", b"abcdef")
+    module = module_for(home, "D")
+    store = module.MemoryStore(memory_char_limit=1)
+    monkeypatch.setattr(hook.time, "time", lambda: 42)
+    backup = home / "memories" / "MEMORY.md.bak.42"
+    assert store._drift_backup("memory", "abcdef") == f"{backup} (BACKUP FAILED — file unchanged on disk)"
+    assert not list((home / "memories").glob("*.bak.*"))
+    assert (home / "memories" / "MEMORY.md").read_bytes() == b"abcdef"
+    assert not backend.calls
 
 
 def test_shape_a_stale_snapshot_refuses(windows):
@@ -216,7 +258,7 @@ def test_checked_session_diagnosis_reports_value_error(windows, capsys):
     assert "Windows memory" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("shape", ["A", "B", "C"])
+@pytest.mark.parametrize("shape", ["A", "B", "C", "D"])
 def test_armed_plaintext_read_warns_once(windows, shape, monkeypatch, caplog):
     _, home, _ = windows
     enroll(windows)

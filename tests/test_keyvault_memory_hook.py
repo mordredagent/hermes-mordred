@@ -1,12 +1,13 @@
 """Unit tests for the agent-memory encryption hook (:mod:`keyvault._memory_hook`).
 
-Upstream ``tools/memory_tool.py`` exposes three different seam shapes across the
+Upstream ``tools/memory_tool.py`` exposes four different seam shapes across the
 Hermes releases we support, and wrapping the *wrong* one silently destroys memory
 (a sealed file read as "empty" is overwritten by the next write). So the fakes
 below re-implement each shape's ``_read_file`` / ``_read_raw_checked`` /
 ``_write_file`` / ``_detect_external_drift`` with the upstream bodies:
 
-* **A** — hermes-agent main / 0.20+ (checked raw read, drift takes ``raw``)
+* **D** — 0.22.6+ (checked raw read, a pure size test and an exclusive backup writer)
+* **A** — 0.20-0.22.5 (checked raw read, drift takes ``raw``)
 * **B** — 0.16-0.19 (``_read_file`` reads raw itself, drift re-reads the file)
 * **C** — 0.13-0.15 (no drift detection at all)
 
@@ -21,6 +22,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import importlib
+import itertools
 import os
 import sys
 import threading
@@ -53,7 +55,10 @@ KEY = bytes(range(32))
 KEY_ENV = base64.urlsafe_b64encode(KEY).decode("ascii")
 OTHER_KEY_ENV = base64.urlsafe_b64encode(bytes(range(32, 64))).decode("ascii")
 
-SHAPES = ["A", "B", "C"]
+SHAPES = ["A", "B", "C", "D"]
+
+#: Upstream's shape-D failed-backup suffix (``tools.memory_tool_store._BACKUP_FAILED``).
+BACKUP_FAILED = " (BACKUP FAILED — file unchanged on disk)"
 
 
 # --------------------------------------------------------------------------
@@ -211,7 +216,61 @@ class _FakeStoreA(_FakeStoreCommon):
         return bak
 
 
-_BASES: dict[str, type[_FakeStoreCommon]] = {"A": _FakeStoreA, "B": _FakeStoreB, "C": _FakeStoreC}
+class _FakeStoreD(_FakeStoreCommon):
+    """Shape D (0.22.6+): checked raw read; drift is a pure size test plus a backup writer.
+
+    ``_has_oversized_entry`` / ``_drift_backup`` and the reload are upstream's
+    ``memory_tool_store`` bodies (``_reload_target`` stands in for ``_mutate``).
+    """
+
+    @staticmethod
+    def _read_raw_checked(path: Path) -> tuple[str, bool]:
+        if not path.exists():
+            return "", True
+        try:
+            return path.read_text(encoding="utf-8-sig"), True
+        except (OSError, UnicodeDecodeError):
+            return "", False
+
+    @staticmethod
+    def _parse_entries(raw: str) -> list[str]:
+        return [e for e in (x.strip() for x in raw.split(ENTRY_DELIMITER)) if e]
+
+    @classmethod
+    def _read_file(cls, path: Path) -> list[str]:
+        return cls._parse_entries(cls._read_raw_checked(path)[0])
+
+    def _has_oversized_entry(self, target: str, raw: str) -> bool:
+        return max(map(len, self._parse_entries(raw)), default=0) > self._char_limit(target)
+
+    def _drift_backup(self, target: str, raw: str) -> str:
+        path = self._path_for(target)
+        stem = path.suffix + f".bak.{int(time.time())}"
+        for n in itertools.count():
+            bak_path = path.with_suffix(stem + (f".{n}" if n else ""))
+            try:
+                with open(bak_path, "x", encoding="utf-8") as fh:
+                    fh.write(raw)
+                return str(bak_path)
+            except FileExistsError:
+                continue
+            except OSError:
+                return str(bak_path) + BACKUP_FAILED
+        raise AssertionError("unreachable")
+
+    def _reload_target(self, target: str, *, skip_drift: bool = False) -> str | None:
+        path = self._path_for(target)
+        raw, read_ok = self._read_raw_checked(path)
+        if not read_ok:
+            return "READ FAILED"
+        bak = None
+        if not skip_drift and self._has_oversized_entry(target, raw):
+            bak = self._drift_backup(target, raw)
+        self._set_entries(target, list(dict.fromkeys(self._parse_entries(raw))))
+        return bak
+
+
+_BASES: dict[str, type[_FakeStoreCommon]] = {"A": _FakeStoreA, "B": _FakeStoreB, "C": _FakeStoreC, "D": _FakeStoreD}
 
 
 def _fake_module(shape: str, mem_dir: Path) -> ModuleType:
@@ -219,6 +278,8 @@ def _fake_module(shape: str, mem_dir: Path) -> ModuleType:
     module = ModuleType(f"fake_memory_tool_{shape.lower()}")
     module.ENTRY_DELIMITER = ENTRY_DELIMITER  # type: ignore[attr-defined]
     module.MemoryStore = type("MemoryStore", (_BASES[shape],), {"mem_dir": mem_dir})  # type: ignore[attr-defined]
+    if shape == "D":
+        module._BACKUP_FAILED = BACKUP_FAILED  # type: ignore[attr-defined]
     return module
 
 
@@ -1040,6 +1101,234 @@ def test_shape_b_drift_raises_for_an_undecryptable_file(mem_dir: Path, tmp_path:
 def test_shape_c_has_no_drift_wrapper(mem_dir: Path, tmp_path: Path) -> None:
     module, _ = _hooked("C", mem_dir, tmp_path)
     assert not hasattr(module.MemoryStore, "_detect_external_drift")
+
+
+# --------------------------------------------------------------------------
+# Shape D (0.22.6+): the backup writer is the only drift seam
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value", "named_in_reason"),
+    [
+        pytest.param("_drift_backup", None, "_drift_backup", id="missing-backup-writer"),
+        pytest.param("_drift_backup", lambda self, which, raw: "", "_drift_backup", id="renamed-backup-parameter"),
+        pytest.param("_has_oversized_entry", None, "_has_oversized_entry", id="missing-size-test"),
+        pytest.param("_path_for", None, "_path_for", id="missing-path-for"),
+    ],
+)
+def test_classify_seam_rejects_a_damaged_shape_d(
+    mem_dir: Path, attribute: str, value: object, named_in_reason: str
+) -> None:
+    module = _fake_module("D", mem_dir)
+    setattr(module.MemoryStore, attribute, value)
+
+    shape, reason = classify_seam(module)
+
+    assert shape == ""
+    assert named_in_reason in reason
+
+
+@pytest.mark.parametrize("marker", [None, "", 42])
+def test_classify_seam_requires_shape_ds_failed_backup_marker(mem_dir: Path, marker: object) -> None:
+    """``_mutate`` recognises a failed backup by ``endswith(_BACKUP_FAILED)``; a
+    wrapper that cannot return that exact suffix would turn a failed backup into a
+    "successful" one and let the write proceed."""
+    module = _fake_module("D", mem_dir)
+    if marker is None:
+        del module._BACKUP_FAILED
+    else:
+        module._BACKUP_FAILED = marker
+
+    shape, reason = classify_seam(module)
+
+    assert shape == ""
+    assert "_BACKUP_FAILED" in reason
+
+
+def test_shape_d_wraps_its_three_seams(mem_dir: Path, tmp_path: Path) -> None:
+    module, _ = _hooked("D", mem_dir, tmp_path)
+
+    assert classify_seam(module) == ("D", "")
+    assert memory_hook_installed(module) is True
+    for name in ("_write_file", "_read_raw_checked", "_drift_backup"):
+        assert getattr(getattr(module.MemoryStore, name), "_mordred_memory_hook_wrapped", False), name
+    # The size test runs on the snapshot the wrapped read already decrypted.
+    assert not getattr(module.MemoryStore._has_oversized_entry, "_mordred_memory_hook_wrapped", False)
+
+
+def _seed_oversized_seal(module: ModuleType, plaintext: str) -> Path:
+    path = _memory_path(module)
+    path.write_bytes(seal(plaintext.encode("utf-8"), key=KEY, name=path.name))
+    return path
+
+
+def test_shape_d_drift_on_a_sealed_file_writes_a_sealed_backup(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, _ = _hooked("D", mem_dir, tmp_path)
+    plaintext = "short entry" + ENTRY_DELIMITER + "y" * 120
+    _seed_oversized_seal(module, plaintext)
+    monkeypatch.setattr(_memory_hook.time, "time", lambda: 42)
+    store = module.MemoryStore(memory_char_limit=80)
+
+    bak = store._reload_target("memory")
+
+    assert bak == str(mem_dir / "MEMORY.md.bak.42")
+    data = Path(bak).read_bytes()
+    assert is_sealed(data)
+    assert unseal(data, key=KEY, name="MEMORY.md.bak.42").decode("utf-8") == plaintext
+    assert (Path(bak).stat().st_mode & 0o777) == 0o600
+    assert store._entries_for("memory") == ["short entry", "y" * 120]
+
+
+def test_shape_d_sealed_snapshot_is_never_backed_up_in_the_clear(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upstream's own writer gets the decrypted snapshot; it must never run for a
+    sealed file, even disarmed, and every byte written must already be sealed."""
+    module = _fake_module("D", mem_dir)
+    upstream_calls: list[str] = []
+    original = module.MemoryStore._drift_backup
+
+    def _spy(self: Any, target: str, raw: str) -> str:
+        upstream_calls.append(target)
+        return original(self, target, raw)
+
+    module.MemoryStore._drift_backup = _spy
+    _install(module, tmp_path, armed=False)
+    _seed_oversized_seal(module, "z" * 300)
+
+    written: list[bytes] = []
+    real_create = _memory_hook._create_private
+
+    def _record(target: Path, data: bytes) -> None:
+        written.append(data)
+        real_create(target, data)
+
+    monkeypatch.setattr(_memory_hook, "_create_private", _record)
+
+    bak = module.MemoryStore(memory_char_limit=80)._reload_target("memory")
+
+    assert upstream_calls == []
+    assert written and all(is_sealed(data) for data in written)
+    assert b"zzzz" not in Path(str(bak)).read_bytes()
+
+
+def test_shape_d_backups_in_the_same_second_never_overwrite(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, _ = _hooked("D", mem_dir, tmp_path)
+    monkeypatch.setattr(_memory_hook.time, "time", lambda: 42)
+    store = module.MemoryStore(memory_char_limit=10)
+
+    first = store._drift_backup("memory", "first snapshot")
+    second = store._drift_backup("memory", "second snapshot")
+
+    assert (first, second) == (str(mem_dir / "MEMORY.md.bak.42"), str(mem_dir / "MEMORY.md.bak.42.1"))
+    for bak, text in ((first, "first snapshot"), (second, "second snapshot")):
+        assert unseal(Path(bak).read_bytes(), key=KEY, name=Path(bak).name).decode("utf-8") == text
+
+
+def test_shape_d_backup_never_follows_a_planted_symlink(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, _ = _hooked("D", mem_dir, tmp_path)
+    monkeypatch.setattr(_memory_hook.time, "time", lambda: 42)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("untouched", encoding="utf-8")
+    (mem_dir / "MEMORY.md.bak.42").symlink_to(outside)
+
+    bak = module.MemoryStore(memory_char_limit=10)._drift_backup("memory", "snapshot")
+
+    assert bak == str(mem_dir / "MEMORY.md.bak.42.1")
+    assert outside.read_text(encoding="utf-8") == "untouched"
+
+
+def test_shape_d_failed_backup_returns_upstreams_marker(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, _ = _hooked("D", mem_dir, tmp_path)
+    monkeypatch.setattr(_memory_hook.time, "time", lambda: 42)
+
+    def _boom(path: Path, data: bytes) -> None:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(_memory_hook, "_create_private", _boom)
+
+    result = module.MemoryStore(memory_char_limit=10)._drift_backup("memory", "snapshot")
+
+    assert result == str(mem_dir / "MEMORY.md.bak.42") + BACKUP_FAILED
+    assert list(mem_dir.glob("*.bak.*")) == []
+
+
+def test_shape_d_a_write_failure_removes_the_partial_backup(
+    mem_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, _ = _hooked("D", mem_dir, tmp_path)
+
+    def _fsync_fails(fd: int) -> None:
+        raise OSError("I/O error")
+
+    monkeypatch.setattr(_memory_hook.os, "fsync", _fsync_fails)
+
+    result = module.MemoryStore(memory_char_limit=10)._drift_backup("memory", "snapshot")
+
+    assert str(result).endswith(BACKUP_FAILED)
+    assert list(mem_dir.glob("*.bak.*")) == []
+
+
+def test_shape_d_armed_plaintext_backup_is_sealed(mem_dir: Path, tmp_path: Path) -> None:
+    module, path = _hooked("D", mem_dir, tmp_path)
+    path.write_text("p" * 200, encoding="utf-8")
+
+    bak = module.MemoryStore(memory_char_limit=80)._reload_target("memory")
+
+    data = Path(str(bak)).read_bytes()
+    assert is_sealed(data)
+    assert unseal(data, key=KEY, name=Path(str(bak)).name).decode("utf-8") == "p" * 200
+
+
+def test_shape_d_armed_backup_without_a_key_refuses_and_writes_nothing(mem_dir: Path, tmp_path: Path) -> None:
+    module, path = _hooked("D", mem_dir, tmp_path, key=None)
+    path.write_text("p" * 200, encoding="utf-8")
+
+    with pytest.raises(MemoryEncryptionUnavailable):
+        module.MemoryStore(memory_char_limit=80)._drift_backup("memory", "p" * 200)
+
+    assert list(mem_dir.glob("*.bak.*")) == []
+    assert path.read_text(encoding="utf-8") == "p" * 200
+
+
+def test_shape_d_disarmed_plaintext_delegates_to_upstream(mem_dir: Path, tmp_path: Path) -> None:
+    module = _fake_module("D", mem_dir)
+    calls: list[str] = []
+    original = module.MemoryStore._drift_backup
+
+    def _spy(self: Any, target: str, raw: str) -> str:
+        calls.append(target)
+        return original(self, target, raw)
+
+    module.MemoryStore._drift_backup = _spy
+    _install(module, tmp_path, armed=False)
+    path = _memory_path(module)
+    path.write_text("p" * 200, encoding="utf-8")
+
+    bak = module.MemoryStore(memory_char_limit=80)._reload_target("memory")
+
+    assert calls == ["memory"]
+    assert Path(str(bak)).read_text(encoding="utf-8") == "p" * 200
+
+
+def test_shape_d_clean_sealed_file_creates_no_backup(mem_dir: Path, tmp_path: Path) -> None:
+    """The size test must see the plaintext: the sealed blob alone is far over the limit."""
+    module, path = _hooked("D", mem_dir, tmp_path)
+    _seed_oversized_seal(module, "first entry" + ENTRY_DELIMITER + "second entry")
+    store = module.MemoryStore(memory_char_limit=40)
+    assert len(path.read_text(encoding="utf-8")) > store.memory_char_limit
+
+    assert store._reload_target("memory") is None
+    assert list(mem_dir.glob("*.bak.*")) == []
 
 
 # --------------------------------------------------------------------------

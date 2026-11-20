@@ -335,7 +335,7 @@ CASES = {
     "wrong-digest": ("report['challenge_sha256'] = '0' * 64", "json.dumps(report) + '\\n'", 0, "output-mismatch"),
     "wrong-generation": ("report['generation'] = '1' * 64", "json.dumps(report) + '\\n'", 0, "output-mismatch"),
     "wrong-wrapped": ("report['wrapped_sha256'] = '2' * 64", "json.dumps(report) + '\\n'", 0, "output-mismatch"),
-    "unsupported-seam": ("report['seam'] = 'D'", "json.dumps(report) + '\\n'", 0, "output-mismatch"),
+    "unsupported-seam": ("report['seam'] = 'Z'", "json.dumps(report) + '\\n'", 0, "output-mismatch"),
     "outside-root": (
         "report['module'] = os.path.realpath(sys.argv[0])",
         "json.dumps(report) + '\\n'",
