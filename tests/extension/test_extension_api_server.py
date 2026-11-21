@@ -1663,3 +1663,39 @@ assert path.read_text() == "KEEP=unchanged\nSLACK_BOT_TOKEN=test-token\n"
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_history_is_answered_while_a_chat_reply_is_still_being_written():
+    """A slow model can take minutes over one reply. The popup asks for the
+    history whenever it opens, on the same socket, and reads Hermes as offline
+    until the answer comes, so a running chat must not hold the other requests."""
+
+    async def _flow(port):
+        release = asyncio.Event()
+
+        async def slow_handler(_content, _context):
+            yield "thinking"
+            await release.wait()
+            yield "done"
+
+        server = extension_api.ExtensionAPIServer(port=port, chat_handler=slow_handler)
+        await server.start()
+        try:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
+            ):
+                await _page_auth(ws, server)
+                await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": "x"}))
+                assert (await _recv(ws))["type"] == "chat_chunk"
+                await ws.send_str(json.dumps({"id": "h", "type": "history_get"}))
+                frame = json.loads((await asyncio.wait_for(ws.receive(), timeout=2)).data)
+                release.set()
+                rest = [await _recv(ws) for _ in range(2)]
+                return frame, rest
+        finally:
+            await server.stop()
+
+    frame, rest = asyncio.run(_flow(_free_port()))
+    assert frame["type"] == "history_result"
+    assert [f["type"] for f in rest] == ["chat_chunk", "chat_end"]

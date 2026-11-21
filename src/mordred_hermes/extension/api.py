@@ -519,6 +519,8 @@ class _Connection:
         self._nonce = b""
         self._pending_sign: dict[str, dict[str, Any]] = {}
         self._telegram_asks: dict[str, asyncio.Task[None]] = {}
+        # Chat replies being streamed; held here so a running one is not collected.
+        self._chats: set[asyncio.Task[None]] = set()
         self._recall_recommends: dict[str, tuple[asyncio.Task[None], threading.Event]] = {}
         self._recall_translates: dict[str, tuple[asyncio.Task[None], threading.Event]] = {}
 
@@ -942,6 +944,17 @@ class _Connection:
                 # the client to re-key instead.
                 await self._send({"id": mid, "type": "chat_error", "reason": "undecryptable"})
                 return
+        # The reply streams from its own task: a slow local model can write one
+        # for minutes, and the socket must keep answering in the meantime (the
+        # popup asks for the history whenever it opens and reads Hermes as
+        # offline until it comes). The task is not cancelled with the socket: it
+        # stops at the next chunk it cannot send, which closes the generator so
+        # the turn finishes detached and is kept in the history.
+        task = asyncio.create_task(self._stream_chat(mid, content, context, ek))
+        self._chats.add(task)
+        task.add_done_callback(self._chats.discard)
+
+    async def _stream_chat(self, mid: Any, content: str, context: dict[str, Any], ek: bytes | None) -> None:
         kid = key_id(ek) if ek is not None else ""
 
         gen = self.chat_handler(content, context)
