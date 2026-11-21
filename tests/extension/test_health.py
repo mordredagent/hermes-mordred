@@ -83,7 +83,8 @@ def test_failures_read_as_down_with_their_reason(settings: dict[str, Any], monke
     assert got["search"] == ("down", "no_key")
     assert got["mail"] == ("down", "credentials_left")
     # The recommender falls back to the headline model: both are down together.
-    assert got["headlines"] == got["recommend"] == ("down", "model_unreachable")
+    assert got["headlines"] == ("down", "model_unreachable")
+    assert got["recommend"] == ("down", "uses_headline_model")
     assert got["chat"] == ("down", "model_unreachable")
     assert got["telegram"] == ("down", "telegram_session_expired")
     assert got["signing"] == ("off", "software_keys")
@@ -99,6 +100,20 @@ def test_a_headline_model_started_on_demand_is_fine_while_stopped(
     assert _collect(lambda _url: True)["headlines"] == ("ok", None)
     monkeypatch.setenv("MORDRED_RECALL_LLM_COMMAND", "/nonexistent/serve --model m")
     assert _collect(lambda _url: False)["headlines"] == ("down", "model_command_missing")
+
+
+def test_recommendations_on_the_headline_model_say_the_small_model_is_missing(
+    settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MORDRED_RECALL_LLM_ENDPOINT", "http://127.0.0.1:8081/v1")
+    monkeypatch.setenv("MORDRED_RECALL_LLM_MODEL", "big")
+    assert _collect()["recommend"] == ("ok", "uses_headline_model")
+    monkeypatch.setenv("MORDRED_RECALL_AGENT_ENDPOINT", "http://127.0.0.1:8082/v1")
+    monkeypatch.setenv("MORDRED_RECALL_AGENT_MODEL", "small")
+    probed: list[str] = []
+    assert _collect(lambda url: probed.append(url) or True)["recommend"] == ("ok", None)
+    assert "http://127.0.0.1:8082/v1" in probed
+    assert _collect(lambda url: "8082" not in url)["recommend"] == ("down", "model_unreachable")
 
 
 def test_a_remote_chat_model_is_not_contacted(settings: dict[str, Any]) -> None:

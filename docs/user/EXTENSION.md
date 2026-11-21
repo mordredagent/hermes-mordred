@@ -261,7 +261,11 @@ Without `MORDRED_RECALL_AGENT_*` the recommender falls back to the large
 model, which then has to be running whenever recommendations are wanted; give
 the recommender its own small model before letting Hermes stop the large one.
 The extension's feature list shows the large model as available ("started
-only while there is work") while it is stopped.
+only while there is work") while it is stopped, and reports recommendations
+running on the large model as `uses_headline_model`: the small model is
+missing. The extension's settings show which of the two models are installed
+(Bonsai 27B for headlines and topics, Bonsai 2B for recommendations and
+translation), pointing here for the ones that are not.
 
 ## Gmail: sign in with Google
 

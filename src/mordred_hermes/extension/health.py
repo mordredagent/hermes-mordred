@@ -7,7 +7,10 @@ with a reason instead of an error after a click. Each item is::
     {"id": <feature>, "state": "ok" | "off" | "down", "code": <reason or None>}
 
 - ``ok``: works (``on_demand``: the headline model's server is started by
-  Hermes when there is work, :mod:`..recall.model_server`).
+  Hermes when there is work, :mod:`..recall.model_server`;
+  ``uses_headline_model``: recommendations run on the large headline model
+  because no small model of their own is configured; ``down`` carries it too
+  when that large model does not answer).
 - ``off``: not set up (no model configured, mail not signed in): nothing is
   broken, the feature is simply not there yet.
 - ``down``: set up but failing now (the store cannot open, the model server
@@ -23,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -104,12 +108,17 @@ def _headlines(probe: Probe) -> dict[str, Any]:
 
 def _recommend(probe: Probe) -> dict[str, Any]:
     from ..extension.telegram.llm import LlmConfigError
-    from ..recall.recommend import target_from_environ
+    from ..recall.recommend import ENDPOINT_ENV, MODEL_ENV, target_from_environ
 
     try:
-        return _local_model("recommend", target_from_environ(), probe)
+        item = _local_model("recommend", target_from_environ(), probe)
     except LlmConfigError:
         return _item("recommend", "down", "model_not_local")
+    own = os.environ.get(ENDPOINT_ENV, "").strip() and os.environ.get(MODEL_ENV, "").strip()
+    if item["code"] != "model_not_configured" and not own:
+        # On the large headline model (answering or not): the small one, which also translates, is missing.
+        item["code"] = "uses_headline_model"
+    return item
 
 
 def _chat(chat_is_stub: bool, probe: Probe) -> dict[str, Any]:
