@@ -128,6 +128,8 @@ _EXTENSION_CAPABILITIES = [
     IMPORTS_CAPABILITY,
     # ``health``: each feature's state (ok / off / down) and reason code (:mod:`.health`).
     HEALTH_CAPABILITY,
+    # ``chat_model_call``: which model the chat runs, and upgrading it to a Venice-private model.
+    "chat_model_v1",
 ]
 
 # A sign_request entry leaves _pending_sign only on approve/reject (or when the
@@ -632,6 +634,7 @@ class _Connection:
             "recall_translate_cancel": self._on_recall_translate_cancel,
             "imports_status": self._on_imports_status,
             "imports_call": self._on_imports_call,
+            "chat_model_call": self._on_chat_model_call,
             "health": self._on_health,
         }
         try:
@@ -1494,6 +1497,58 @@ class _Connection:
             del body
         content = self._telegram_seal(ek, json.dumps(result, ensure_ascii=False))
         await self._send({"id": mid, "type": "imports_call_result", "ok": True, "content": content})
+
+    # -- the chat's model ("upgrade the chat AI") -----------------------------
+    #
+    # The request and the reply are sealed with K_extchat like imports_call: the
+    # request may carry a Venice API key, which is never accepted in plaintext.
+    # Page sessions never reach this handler (not in _PAGE_ALLOWED).
+
+    async def _on_chat_model_call(self, msg: dict[str, Any]) -> None:
+        from . import chat_model
+
+        mid = msg.get("id")
+        ek = self._telegram_key()
+        sealed = msg.get("content")
+        if ek is None:
+            await self._send(
+                {"id": mid, "type": "chat_model_result", "ok": False, "error": "encryption_key_unavailable"}
+            )
+            return
+        if not isinstance(sealed, str) or not is_encrypted(sealed):
+            await self._send({"id": mid, "type": "chat_model_result", "ok": False, "error": "invalid_request"})
+            return
+        try:
+            body = json.loads(decrypt_message(ek, sealed))
+        except (DecryptError, ValueError):
+            await self._send({"id": mid, "type": "chat_model_result", "ok": False, "error": "undecryptable"})
+            return
+        op = body.get("op") if isinstance(body, dict) else None
+        try:
+            if op == "status":
+                result: dict[str, Any] = chat_model.status()
+            elif op == "models":
+                result = {"models": await chat_model.private_models()}
+            elif op == "set_venice":
+                await chat_model.set_venice(str(body.get("api_key") or ""), str(body.get("model") or ""))
+                result = chat_model.status()
+            elif op == "clear":
+                await asyncio.to_thread(chat_model.clear)
+                result = chat_model.status()
+            else:
+                await self._send({"id": mid, "type": "chat_model_result", "ok": False, "error": "invalid_request"})
+                return
+        except chat_model.ChatModelError as exc:
+            await self._send({"id": mid, "type": "chat_model_result", "ok": False, "error": exc.code})
+            return
+        except Exception:
+            _log.exception("chat model call failed (op=%s)", op if isinstance(op, str) else "?")
+            await self._send({"id": mid, "type": "chat_model_result", "ok": False, "error": "chat_model_failed"})
+            return
+        finally:
+            del body
+        content = self._telegram_seal(ek, json.dumps(result, ensure_ascii=False))
+        await self._send({"id": mid, "type": "chat_model_result", "ok": True, "content": content})
 
     # -- Telegram import (read-only) -----------------------------------------
     #

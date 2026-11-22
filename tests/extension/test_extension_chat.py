@@ -505,3 +505,46 @@ def test_a_remote_model_answers_general_questions(monkeypatch, _mem_history):
     handler = extension_chat.make_gateway_chat_handler(runner=object())
 
     assert asyncio.run(_collect(handler("インドの首都は？", {}))) == ["インドの首都はニューデリーです。"]
+
+
+def test_a_transient_server_refusal_is_run_once_more(monkeypatch, _mem_history):
+    failed = {
+        "final_response": "HTTP 400: Invalid structured outputs: 'triggers'",
+        "messages": [],
+        "failed": True,
+        "error": "HTTP 400: Invalid structured outputs: 'triggers'",
+    }
+
+    class _Flaky(_Scripted):
+        def run_conversation(self, message, **kwargs):
+            if not self.calls:
+                self.calls.append((message, []))
+                return dict(failed)
+            return super().run_conversation(message, **kwargs)
+
+    agent = _Flaky(["インドの首都はニューデリーです。"])
+    agent.base_url = "https://api.venice.ai/api/v1"
+    monkeypatch.setattr(extension_chat, "_ensure_agent", lambda r, s: agent)
+    handler = extension_chat.make_gateway_chat_handler(runner=object())
+
+    assert asyncio.run(_collect(handler("インドの首都は？", {}))) == ["インドの首都はニューデリーです。"]
+    assert len(agent.calls) == 2
+
+
+def test_a_failed_turn_is_not_checked_or_replaced(monkeypatch, _mem_history):
+    class _Down(_Local):
+        def run_conversation(self, message, **kwargs):
+            self.calls.append((message, []))
+            return {
+                "final_response": "API call failed: connection refused",
+                "messages": [],
+                "failed": True,
+                "error": "x",
+            }
+
+    agent = _Down([])
+    monkeypatch.setattr(extension_chat, "_ensure_agent", lambda r, s: agent)
+    handler = extension_chat.make_gateway_chat_handler(runner=object())
+
+    assert asyncio.run(_collect(handler("インドの首都は？", {}))) == ["API call failed: connection refused"]
+    assert len(agent.calls) == 1

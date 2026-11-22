@@ -28,7 +28,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from itertools import combinations_with_replacement
-from typing import Final
+from typing import Any, Final
 
 from ..recall.turn_context import CHECK_MARK
 from ..text_language import content_units, detect, name
@@ -159,7 +159,7 @@ RECALL_MESSAGES: Final = 8
 RECALL_CHARS: Final = 300
 
 
-def plan_turn(question: str, tool_names: Iterable[str] = (), history: Iterable[dict] = ()) -> TurnPlan:
+def plan_turn(question: str, tool_names: Iterable[str] = (), history: Iterable[dict[str, Any]] = ()) -> TurnPlan:
     """The language, the named languages, an unsupported action and the earlier message ``question`` is about."""
     lower = question.lower()
     named = frozenset(code for code, names in _LANGUAGE_NAMES.items() if any(n in lower for n in names))
@@ -169,7 +169,7 @@ def plan_turn(question: str, tool_names: Iterable[str] = (), history: Iterable[d
     return TurnPlan(language=detect(question), named=named, action=action, recalled=recall(question, history))
 
 
-def recall(question: str, history: Iterable[dict]) -> str | None:
+def recall(question: str, history: Iterable[dict[str, Any]]) -> str | None:
     """The recent message that shares the most with ``question``, when it shares enough.
 
     A small model asked "what was the budget for that trip?" a few turns after the

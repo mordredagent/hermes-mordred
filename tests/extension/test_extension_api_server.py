@@ -202,6 +202,7 @@ def test_full_server_flow():
         "recall_conversation_v1",
         "imports_v1",
         "health_v1",
+        "chat_model_v1",
     ]
     assert r["enc_type"] == "encrypt_result"
     assert r["dec_plaintext"] == "秘密"

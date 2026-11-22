@@ -124,7 +124,17 @@ def _classify_endpoint(base_url: str | None) -> str | None:
 
 
 def _configured_model() -> tuple[str | None, str | None]:
-    """(model, base_url) from Hermes' config.yaml ``model`` section."""
+    """(model, base_url) of this process's model: the extension chat's, else config.yaml's ``model`` section.
+
+    In the ``extension serve`` process the only agent is the extension chat; when the
+    user chose another model for it (:mod:`..chat_model`), that is the model that reads
+    what these tools return, so the checks must judge it and not config.yaml's.
+    """
+    from .. import chat_model
+
+    running = chat_model.active()
+    if running is not None:
+        return running
     try:
         from ruamel.yaml import YAML
 

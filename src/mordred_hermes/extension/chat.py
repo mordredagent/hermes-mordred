@@ -125,6 +125,8 @@ def make_gateway_chat_handler(
                 raise
 
             result = await fut  # propagate any exception from the agent run
+            if _transient_failure(result):
+                result = await _run_again(agent, message + note, message, sent, loop, deadline, result)
             answer = (result.get("final_response") if isinstance(result, dict) else "") or "".join(parts)
             try:
                 checked = await _checked_answer(
@@ -207,6 +209,8 @@ async def _checked_answer(
     the earlier conversation. A correction is kept only when it has fewer problems than
     the answer it replaces.
     """
+    if isinstance(result, dict) and result.get("failed"):
+        return answer  # a failed turn's text is the error, not an answer to check or replace
     turn_msgs = result.get("messages") if isinstance(result, dict) else None
     asked = _turn_user_message(turn_msgs, question)
     api_copy = str(asked.get("api_content") or "")
@@ -253,6 +257,44 @@ async def _checked_answer(
         if len(found) < len(problems):
             answer, problems = text, found
     return answer_guard.last_resort(answer, problems, plan) if problems else answer
+
+
+#: Errors a model's server returns now and accepts on the next try.
+_TRANSIENT_ERRORS = ("Invalid structured outputs",)
+
+
+async def _run_again(
+    agent: Any,
+    message: str,
+    persist: str,
+    sent: list[Any],
+    loop: asyncio.AbstractEventLoop,
+    deadline: float,
+    failed: Any,
+) -> Any:
+    """The turn run once more after a transient refusal; ``failed`` when there is no time for it.
+
+    Venice sometimes refuses a request it accepts the next time ("Invalid structured
+    outputs"), and Hermes does not retry an HTTP 400.
+    """
+    if loop.time() >= deadline:
+        return failed
+    logger.info("extension chat: the model's server refused the turn transiently; running it again")
+    fut, queue, done = _spawn_turn(agent, message, sent, loop, persist=persist)
+    try:
+        while await _next_item(queue, deadline, loop) is not done:
+            pass
+    except TimeoutError:
+        return failed
+    return await fut
+
+
+def _transient_failure(result: Any) -> bool:
+    """Whether the run failed with an error worth one more try."""
+    if not isinstance(result, dict) or not result.get("failed"):
+        return False
+    error = str(result.get("error") or "")
+    return any(marker in error for marker in _TRANSIENT_ERRORS)
 
 
 def answers_from_sources_only(agent: Any) -> bool:
@@ -480,14 +522,40 @@ def _ensure_agent(runner: Any, state: dict[str, Any]) -> Any:
         except Exception:  # noqa: S110 - optional default-model lookup; absence handled below
             pass
 
+    from . import chat_model
+
     toolsets = extension_toolsets()
-    sig = (model, tuple(sorted((k, str(v)) for k, v in runtime.items() if k != "api_key")), tuple(toolsets))
+    choice = chat_model.load()
+    sig = (
+        model,
+        tuple(sorted((k, str(v)) for k, v in runtime.items() if k != "api_key")),
+        tuple(toolsets),
+        (choice.backend, choice.model, choice.sealed_key) if choice else None,
+    )
     if state["agent"] is not None and state["sig"] == sig:
         return state["agent"]
 
+    if choice is not None:
+        # The user upgraded the chat AI: a Venice model Venice labels private (checked when
+        # chosen, and again before each turn's memory and each reader tool), with its key
+        # from the keyvault. Mordred's reader checks see this model, not config.yaml's.
+        endpoint: dict[str, Any] = {
+            "provider": "venice",
+            "base_url": choice.base_url,
+            "api_key": chat_model.api_key(choice),
+            "api_mode": "chat_completions",
+        }
+        if runtime.get("max_tokens"):
+            endpoint["max_tokens"] = runtime["max_tokens"]
+        model = choice.model
+        chat_model.set_active(choice.model, choice.base_url)
+    else:
+        endpoint = runtime
+        chat_model.set_active(None, None)
+
     agent = AIAgent(
         model=model,
-        **runtime,
+        **endpoint,
         enabled_toolsets=toolsets,
         max_iterations=int(getattr(runner, "_max_iterations", 0) or 90),
         quiet_mode=True,
