@@ -462,6 +462,12 @@ module = [
     # guarded imports, without installing this optional, untyped dependency.
     "sqlcipher3",
     "sqlcipher3.*",
+    # PDFKit through pyobjc (the macos extra) reads PDF mail attachments
+    # (imports/mail/attachments.py); untyped, and absent on the Linux runner.
+    "Foundation",
+    "Foundation.*",
+    "Quartz",
+    "Quartz.*",
 ]
 ignore_missing_imports = true
 

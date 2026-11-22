@@ -9,7 +9,8 @@
   container: its attribution or forward banner stays unprefixed so the
   segmenter can attribute it, and its ``blockquote`` supplies the prefix.
 - Attachments are recorded by kind only (``image``, ``document``, ``rfc822``,
-  ``other``), never by file name.
+  ``other``), never by file name; the text of a document attachment (PDF,
+  Office, OpenDocument, RTF, text) is read by :mod:`.attachments`, images are not.
 - A ``message/rfc822`` attachment becomes a forwarded message (attached
   messages nested up to depth 2; deeper ones are counted as attachments only).
 - Body text is bounded before segmentation; part texts are capped later. The
@@ -30,6 +31,7 @@ from typing import Final
 
 from ._charset import decode_bytes
 from ._text import cap_utf8, clean_text
+from .attachments import attachment_text
 from .headers import MailHeaders, parse_headers
 
 __all__ = [
@@ -90,6 +92,8 @@ class BodyResult:
     truncated: bool
     attachments: tuple[str, ...]  # kinds only
     forwarded: tuple[ForwardedMail, ...]
+    #: ``(format, text)`` of each readable document attachment (:mod:`.attachments`); no images.
+    attachment_texts: tuple[tuple[str, str], ...] = ()
 
 
 class HtmlToText(HTMLParser):
@@ -291,15 +295,25 @@ def extract_body(msg: Message, stats: Counter[str], *, depth: int = 0) -> BodyRe
     truncated = truncated or capped
     kinds: list[str] = []
     forwarded: list[ForwardedMail] = []
+    texts: list[tuple[str, str]] = []
     for leaf in _attachment_leaves(msg, body):
         kind = _kind(leaf)
         kinds.append(kind)
         if kind == "rfc822" and depth < MAX_RFC822_DEPTH:
             forwarded.extend(_forwarded(leaf, depth + 1, stats))
+        elif kind in ("document", "other") and depth == 0:
+            read = attachment_text(leaf, stats)
+            if read is not None:
+                texts.append(read)
     if depth == 0:  # walk() already descends into attached messages
         for item in msg.walk():
             for defect in item.defects:
                 stats[f"defect:{type(defect).__name__}"] += 1
     return BodyResult(
-        text=text, html_only=html_only, truncated=truncated, attachments=tuple(kinds), forwarded=tuple(forwarded)
+        text=text,
+        html_only=html_only,
+        truncated=truncated,
+        attachments=tuple(kinds),
+        forwarded=tuple(forwarded),
+        attachment_texts=tuple(texts),
     )
