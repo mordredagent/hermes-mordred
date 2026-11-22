@@ -1,5 +1,7 @@
 """The recall turn block, the memory-search tool and their registration, with the store and gates faked."""
 
+# ruff: noqa: RUF001 - messages as users type them, with full-width punctuation
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -150,3 +152,42 @@ def test_the_component_registers_the_hook_the_tool_and_the_skill() -> None:
     [(name, path)] = ctx.skills
     assert name == "recall" and path.is_file() and "mordred_memory_search" in path.read_text()
     assert "mordred_memory_search" in egress.READER_TOOLS and "mordred_memory_search" in egress.TAINT_SOURCES
+
+
+def test_a_question_the_conversation_answers_better_drops_the_memories(found: list[tuple[str, int, bool]]) -> None:
+    chat = [
+        {"role": "user", "content": "GIF のパレットの色数を 64 に減らしたい"},
+        {"role": "assistant", "content": "パレットを 64 色にすると、グラデーションに縞が出ます。"},
+        {"role": "user", "content": "そのパレットの色数は？"},
+    ]
+    # Shares "パレット" and "色数" with the chat, less with either memory.
+    assert (
+        turn_context.pre_llm_call(
+            user_message="そのパレットの色数は？", session_id="s1", platform="extension", conversation_history=chat
+        )
+        is None
+    )
+    # A question the chat does not touch still gets them.
+    got = turn_context.pre_llm_call(
+        user_message="量子化の結果はどうだった？", session_id="s1", platform="extension", conversation_history=chat
+    )
+    assert got is not None and "FPGA 推論エンジンの精度測定" in got["context"]
+
+
+def test_a_note_set_for_the_session_follows_the_block_once(found: list[tuple[str, int, bool]]) -> None:
+    turn_context.set_note_after_block("s1", "\n\n(Reply in Spanish.)")
+    block = turn_context.pre_llm_call(user_message="量子化で検索して", session_id="s1", platform="extension")
+    assert block is not None
+    assert block["context"].endswith(f"{turn_context.FOOTER}\n(Reply in Spanish.)")
+    assert "s1" not in turn_context._after_block
+
+
+def test_a_correction_request_is_not_searched(found: list[tuple[str, int, bool]]) -> None:
+    message = f"{turn_context.CHECK_MARK} Your answer above needs fixing: 量子化"
+    assert turn_context.pre_llm_call(user_message=message, session_id="s1", platform="extension") is None
+    assert found == []
+
+
+def test_the_header_no_longer_orders_answering_from_the_entries() -> None:
+    assert "Answer from these entries" not in turn_context.HEADER
+    assert "may be unrelated" in turn_context.HEADER
