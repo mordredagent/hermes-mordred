@@ -230,6 +230,7 @@ def test_local_status_reports_folders_only(tmp_path: Path) -> None:
         "codex": {"available": True},
         "claude_code": {"available": False},
         "grok_bot": {"available": False},
+        "antigravity": {"available": False},
     }
 
 

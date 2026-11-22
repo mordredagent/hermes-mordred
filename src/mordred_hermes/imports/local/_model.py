@@ -25,10 +25,15 @@ from ..records import (
     part_uid,
 )
 
-LOCAL_SOURCES: Final = (Source.CODEX, Source.CLAUDE_CODE, Source.GROK_BOT)
+LOCAL_SOURCES: Final = (Source.CODEX, Source.CLAUDE_CODE, Source.GROK_BOT, Source.ANTIGRAVITY)
 
 #: The agent's display name per source (the user is always ``you``).
-AGENT_NAME: Final = {Source.CODEX: "codex", Source.CLAUDE_CODE: "claude", Source.GROK_BOT: "grok"}
+AGENT_NAME: Final = {
+    Source.CODEX: "codex",
+    Source.CLAUDE_CODE: "claude",
+    Source.GROK_BOT: "grok",
+    Source.ANTIGRAVITY: "antigravity",
+}
 
 _MAX_TITLE: Final = 80
 _KEY_UNSAFE: Final = re.compile(r"[^A-Za-z0-9._-]+")

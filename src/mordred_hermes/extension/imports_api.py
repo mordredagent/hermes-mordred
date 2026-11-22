@@ -37,7 +37,7 @@ _log = logging.getLogger(__name__)
 
 IMPORTS_CAPABILITY: Final = "imports_v1"
 
-_LOCAL_SOURCES: Final = ("codex", "claude_code", "grok_bot")
+_LOCAL_SOURCES: Final = ("codex", "claude_code", "grok_bot", "antigravity")
 _FLOW_ID_RE: Final = re.compile(r"[A-Za-z0-9_-]{8,64}")
 _JOB_ID_RE: Final = re.compile(r"[A-Za-z0-9_-]{8,64}")
 _MAX_FIELD: Final = 512
@@ -373,7 +373,14 @@ class ImportsApi:
         self._require_darwin()
         await self._require_memory()
         options = FetchOptions(
-            max_messages=maximum, roles=None, since=day, dry_run=False, budget_s=_MAIL_BUDGET_S, via="extension"
+            max_messages=maximum,
+            roles=None,
+            since=day,
+            dry_run=False,
+            budget_s=_MAIL_BUDGET_S,
+            via="extension",
+            # A refused login's hint, or the failing class and place behind run_failed; never mail text.
+            hint_sink=lambda hint: _log.warning("extension mail fetch hint: %s", hint),
         )
         home = self._home()
 

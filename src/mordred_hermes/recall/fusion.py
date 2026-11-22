@@ -20,6 +20,7 @@ SOURCE_WEIGHT: dict[str, float] = {
     "telegram": 1.0,
     "codex": 0.9,
     "claude_code": 0.9,
+    "antigravity": 0.9,
     "activity": 0.7,
 }
 

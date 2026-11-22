@@ -44,6 +44,7 @@ class Source(StrEnum):
     CODEX = "codex"
     CLAUDE_CODE = "claude_code"
     GROK_BOT = "grok_bot"
+    ANTIGRAVITY = "antigravity"
 
 
 class ConversationKind(StrEnum):
@@ -107,10 +108,15 @@ _PART_SUFFIX_RE: Final = re.compile(r"#(?:a|q[1-9]\d{0,3}|f[1-9]\d{0,3})")
 # Keys come from file names and transcript ids, never from transcript text.
 _LOCAL_KEY_PATTERN: Final = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
 _LOCAL_KEY_RE: Final = re.compile(_LOCAL_KEY_PATTERN)
-LOCAL_PREFIX: Final = {Source.CODEX: "codex", Source.CLAUDE_CODE: "claude", Source.GROK_BOT: "grok"}
-_LOCAL_CONV_RE: Final = re.compile(rf"(?P<prefix>codex|claude|grok):(?P<conv>{_LOCAL_KEY_PATTERN})")
+LOCAL_PREFIX: Final = {
+    Source.CODEX: "codex",
+    Source.CLAUDE_CODE: "claude",
+    Source.GROK_BOT: "grok",
+    Source.ANTIGRAVITY: "agy",
+}
+_LOCAL_CONV_RE: Final = re.compile(rf"(?P<prefix>codex|claude|grok|agy):(?P<conv>{_LOCAL_KEY_PATTERN})")
 _LOCAL_SOURCE_RE: Final = re.compile(
-    rf"(?P<prefix>codex|claude|grok):(?P<conv>{_LOCAL_KEY_PATTERN}):{_LOCAL_KEY_PATTERN}"
+    rf"(?P<prefix>codex|claude|grok|agy):(?P<conv>{_LOCAL_KEY_PATTERN}):{_LOCAL_KEY_PATTERN}"
 )
 _SOURCE_OF_PREFIX: Final = {prefix: source for source, prefix in LOCAL_PREFIX.items()}
 _CONV_PREFIX: Final = {Source.TELEGRAM: "tg:", Source.MAIL: "mail:"} | {

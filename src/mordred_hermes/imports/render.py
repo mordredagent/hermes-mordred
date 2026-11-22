@@ -75,6 +75,7 @@ SOURCE_LABELS: Final = {
     Source.CODEX: "Codex",
     Source.CLAUDE_CODE: "Claude Code",
     Source.GROK_BOT: "Grok Bot",
+    Source.ANTIGRAVITY: "Antigravity",
 }
 SOURCE_ICONS: Final = {
     Source.TELEGRAM: "✈",
@@ -82,6 +83,7 @@ SOURCE_ICONS: Final = {
     Source.CODEX: "⌘",
     Source.CLAUDE_CODE: "⌘",
     Source.GROK_BOT: "⌘",
+    Source.ANTIGRAVITY: "⌘",
 }
 BODY_INDENT: Final = "  "
 TRUNCATION_MARKER: Final = "…[truncated]"

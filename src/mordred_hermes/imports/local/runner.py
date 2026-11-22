@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from ..records import RecordError, Source
-from . import claude_code, codex, grok_bot
+from . import antigravity, claude_code, codex, grok_bot
 from ._model import LOCAL_SOURCES, Transcript, place_key, place_recorded_key, stored_place, to_records
 
 Progress = Callable[[dict[str, int]], None]
@@ -67,6 +67,8 @@ def default_root(source: Source, home_dir: Path | None = None) -> Path:
         return base / ".claude" / "projects"
     if source is Source.GROK_BOT:
         return base / "Library" / "Application Support" / "Grok Bot" / "sand-client-persistence"
+    if source is Source.ANTIGRAVITY:
+        return base / ".gemini" / "antigravity"
     raise LocalImportError("unknown_source")
 
 
@@ -85,6 +87,8 @@ def _files(source: Source, root: Path) -> Iterator[Path]:
         yield from codex.files(root)
     elif source is Source.CLAUDE_CODE:
         yield from claude_code.files(root)
+    elif source is Source.ANTIGRAVITY:
+        yield from antigravity.files(root)
     else:
         yield from grok_bot.files(root)
 
@@ -133,6 +137,8 @@ def _read(source: Source, path: Path, names: dict[str, str]) -> list[Transcript]
         return codex.read(path)
     if source is Source.CLAUDE_CODE:
         return claude_code.read(path)
+    if source is Source.ANTIGRAVITY:
+        return antigravity.read(path)
     return grok_bot.read(path, names)
 
 
@@ -163,9 +169,13 @@ def run_local_import(
         recorded = place_recorded_key(kind.value)
         places_known = store.meta_items(f"place.{kind.value}.").get(recorded) == "1"
         changed: list[tuple[Path, str, str]] = []
+        # Antigravity writes a conversation's text to its summaries database, not its own file.
+        extra = antigravity.signature_extra(base) if kind is Source.ANTIGRAVITY else ""
         for path in _files(kind, base):
             result.files_seen += 1
             signature = _signature(path)
+            if signature is not None and extra:
+                signature = f"{signature}.{extra}"
             key = _cursor_key(kind, path)
             if signature is not None and (cursors.get(key) != signature or not places_known):
                 changed.append((path, key, signature))

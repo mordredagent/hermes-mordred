@@ -1,4 +1,4 @@
-"""Local agent transcripts (Codex, Claude Code, Grok Bot) imported into ``mordred.db``.
+"""Local agent transcripts (Codex, Claude Code, Grok Bot, Antigravity) imported into ``mordred.db``.
 
 These sources are files on this machine, written by the agent apps themselves:
 
@@ -6,6 +6,8 @@ These sources are files on this machine, written by the agent apps themselves:
 - Claude Code: ``~/.claude/projects/**/*.jsonl`` (:mod:`.claude_code`).
 - Grok Bot: the desktop app's ``sand-client-persistence/*.blob`` transcript
   replicas, one per bot (:mod:`.grok_bot`).
+- Antigravity: ``~/.gemini/antigravity``, the text copy in
+  ``conversation_summaries.db`` of each ``conversations/<id>.db`` (:mod:`.antigravity`).
 
 Each reader turns a file into :class:`~._model.Transcript` objects; only the
 user's own turns and the agent's replies are kept (tool calls, reasoning and
