@@ -294,11 +294,6 @@ def _native_path(database: Any, *, uri: bool) -> tuple[Path | None, bool]:
 def _native_connect(authority: Authority) -> Callable[..., Any]:
     from .._core._database_contracts import DatabaseRefused
     from ._connection import ProtectedConnection, _open_unprotected, open_protected
-    from ._hermes_tracking import is_tracking_factory
-
-    # Hermes's module sees either this replacement (Connection is
-    # ProtectedConnection) or the stdlib module it imported before the swap.
-    tracking_bases: tuple[type, ...] = (ProtectedConnection, stdlib_sqlite3().Connection)
 
     def connect(database: Any, *args: Any, **kwargs: Any) -> Any:
         authority.check()
@@ -317,13 +312,6 @@ def _native_connect(authority: Authority) -> Callable[..., Any]:
         if options.keys() & kwargs.keys():
             raise TypeError("duplicate connection argument")
         options.update(kwargs)
-        if is_tracking_factory(options.get("factory"), tracking_bases):
-            # Dropping Hermes's tracking factory is safe: it is never
-            # instantiated, so it cannot bypass authority. The caller gets a
-            # plain ProtectedConnection, which Hermes's _retrofit_tracking
-            # re-tags with its pure-Python mixin; the mixin's close() calls
-            # super().close(), i.e. the guarded close.
-            del options["factory"]
         if options.get("factory", ProtectedConnection) is not ProtectedConnection:
             raise DatabaseRefused("custom connection factories cannot bypass authority")
         if options.get("detect_types", 0):
