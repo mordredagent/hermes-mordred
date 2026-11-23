@@ -615,3 +615,133 @@ def test_launcher_with_unbalanced_shebang_quote_is_ignored(tmp_path: Path) -> No
     launcher.write_text("#!/usr/bin/python3 'unterminated\nprint(1)\n", encoding="utf-8")
     launcher.chmod(0o755)
     assert _runtime_probe._python_for_launcher(launcher) is None
+
+
+# -----------------------------------------------------------------------------
+# Hermes Desktop's managed launcher — the base interpreter + an inline bootstrap
+# -----------------------------------------------------------------------------
+# The gateway as launchd (``ai.hermes.gateway``) really runs it, in ``ps args=``
+# form: the managed launcher ``<home>/hermes-agent/.hermes/bin/hermes`` execs the
+# BASE standalone interpreter with ``-I -c <bootstrap>``, and the bootstrap adds
+# the pm venv via ``site.addsitedir``. ``ps`` renders the bootstrap's newlines as
+# a literal ``\012``, and the code contains spaces.
+_DESKTOP_BOOTSTRAP = (
+    r"import os, re, sys\012import contextlib, site\012"
+    r"site.addsitedir(os.environ.get('HERMES_ENV_SITE', ''))\012"
+    r"from hermes_cli.main import main\012"
+    r"sys.argv[0] = re.sub(r'(-script\.pyw|\.exe)?$', '', sys.argv[0])\012"
+    r"sys.exit(main())\012"
+)
+_DESKTOP_ARGV = (
+    "{py} -I -c " + _DESKTOP_BOOTSTRAP + " --run-module hermes_cli.stderr_timestamp"
+    " --error-log {home}/logs/gateway.error.log -- {launcher} gateway run --external-supervisor"
+)
+
+
+class TestDesktopManagedLauncher:
+    """A ``-c`` bootstrap means argv[0] alone does not determine site-packages."""
+
+    @pytest.fixture
+    def layout(self, tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+        home = tmp_path / "home"
+        base = _make_python(home / "tools" / "python-3.14.9+20261021-darwin-arm64" / "bin", "python3")
+        venv = _make_python(home / "installs" / "inst1" / "environments" / "env1" / "venv" / "bin", "python3")
+        launcher = home / "hermes-agent" / ".hermes" / "bin" / "hermes"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("#!/bin/sh\nexit 0\n")
+        launcher.chmod(0o755)
+        return home, base, venv, _ProcessPath(launcher)
+
+    @staticmethod
+    def _desktop(monkeypatch: pytest.MonkeyPatch, result: Path | None) -> list[Path]:
+        calls: list[Path] = []
+
+        def fake(home: Path) -> Path | None:
+            calls.append(home)
+            return result
+
+        monkeypatch.setattr(_runtime_probe, "_desktop_runtime_python", fake)
+        return calls
+
+    def test_desktop_gateway_resolves_to_the_pm_venv(
+        self, layout: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        # The live false refusal: argv[0] is the base interpreter, which has no
+        # mordred on its own sys.path, while the gateway really loads it from the
+        # pm venv the bootstrap adds.
+        home, base, venv, launcher = layout
+        calls = self._desktop(monkeypatch, venv)
+        args = _DESKTOP_ARGV.format(py=base, home=home, launcher=launcher)
+        assert _runtime_probe._is_gateway_argv(args.split())
+        _install_ps(monkeypatch, _FakePs(scan=_scan_row(34227, args)))
+        assert discover_running_gateway_runtimes(home=home) == [GatewayRuntime(pid=34227, python=venv)]
+        assert calls == [home]
+
+    def test_desktop_resolution_runs_once_per_discovery_pass(
+        self, layout: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        # The launcher query is a 20 s-timeout subprocess: the state-file row and
+        # the scan row of the same gateway must share one answer.
+        home, base, venv, launcher = layout
+        calls = self._desktop(monkeypatch, venv)
+        args = _DESKTOP_ARGV.format(py=base, home=home, launcher=launcher)
+        _write_state(home, {"pid": 34227})
+        monkeypatch.setattr(_runtime_probe.os, "kill", lambda _pid, _sig: None)
+        scan = "\n".join([_scan_row(34227, args), _scan_row(34228, args)])
+        _install_ps(monkeypatch, _FakePs(scan=scan, per_pid={34227: _pid_row(args)}))
+        assert discover_running_gateway_runtimes(home=home) == [GatewayRuntime(pid=34227, python=venv)]
+        assert calls == [home]
+
+    def test_unresolvable_desktop_runtime_falls_back_to_argv0(
+        self, layout: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        # Fail-closed: no answer from the launcher keeps the historical argv[0],
+        # whose probe then refuses rather than passing unchecked.
+        home, base, _venv, launcher = layout
+        self._desktop(monkeypatch, None)
+        args = _DESKTOP_ARGV.format(py=base, home=home, launcher=launcher)
+        _install_ps(monkeypatch, _FakePs(scan=_scan_row(34227, args)))
+        assert discover_running_gateway_runtimes(home=home) == [GatewayRuntime(pid=34227, python=base)]
+
+    @pytest.mark.usefixtures("posix_modes")
+    def test_unacceptable_desktop_runtime_falls_back_to_argv0(
+        self, layout: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        home, base, venv, launcher = layout
+        venv.chmod(0o777)  # world-writable: never executed
+        self._desktop(monkeypatch, venv)
+        args = _DESKTOP_ARGV.format(py=base, home=home, launcher=launcher)
+        _install_ps(monkeypatch, _FakePs(scan=_scan_row(34227, args)))
+        assert discover_running_gateway_runtimes(home=home) == [GatewayRuntime(pid=34227, python=base)]
+
+    def test_inline_bootstrap_with_another_launcher_is_unchanged(
+        self, tmp_path: Path, layout: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        # Only the known managed-launcher path selects the Desktop resolution; a
+        # launcher path lifted from another process's argv is never acted on.
+        home, base, venv, _launcher = layout
+        calls = self._desktop(monkeypatch, venv)
+        other = tmp_path / "elsewhere" / "hermes-agent" / ".hermes" / "bin" / "hermes"
+        args = _DESKTOP_ARGV.format(py=base, home=home, launcher=other)
+        _install_ps(monkeypatch, _FakePs(scan=_scan_row(34227, args)))
+        assert discover_running_gateway_runtimes(home=home) == [GatewayRuntime(pid=34227, python=base)]
+        assert calls == []
+
+    def test_console_script_shape_with_the_managed_launcher_is_unchanged(
+        self, layout: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        # Without `-c`, argv[0] does determine site-packages (shape 2 proper).
+        home, base, venv, launcher = layout
+        calls = self._desktop(monkeypatch, venv)
+        _install_ps(monkeypatch, _FakePs(scan=_scan_row(34227, f"{base} {launcher} gateway run --replace")))
+        assert discover_running_gateway_runtimes(home=home) == [GatewayRuntime(pid=34227, python=base)]
+        assert calls == []
+
+    def test_module_shape_never_queries_the_desktop_launcher(
+        self, layout: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        home, base, venv, _launcher = layout
+        calls = self._desktop(monkeypatch, venv)
+        _install_ps(monkeypatch, _FakePs(scan=_scan_row(34227, _MANAGED_ARGV.format(py=base))))
+        assert discover_running_gateway_runtimes(home=home) == [GatewayRuntime(pid=34227, python=base)]
+        assert calls == []

@@ -349,6 +349,11 @@ def _managed_runtime_python(home: Path) -> Path | None:
 _SITE_PACKAGES = re.compile(r"'(/[^']+/venv)/lib/python[0-9.]+/site-packages'")
 
 
+def _desktop_launcher(home: Path) -> Path:
+    """Hermes Desktop's managed launcher (``<home>/hermes-agent/.hermes/bin/hermes``)."""
+    return home / "hermes-agent" / ".hermes" / "bin" / "hermes"
+
+
 def _desktop_runtime_python(home: Path) -> Path | None:
     """The venv python behind Hermes Desktop's managed launcher, if present.
 
@@ -358,7 +363,7 @@ def _desktop_runtime_python(home: Path) -> Path | None:
     exists. Ask the launcher itself: ``--run-module site`` prints ``sys.path``,
     which contains that environment's site-packages.
     """
-    launcher = home / "hermes-agent" / ".hermes" / "bin" / "hermes"
+    launcher = _desktop_launcher(home)
     if not launcher.is_file() or not os.access(launcher, os.X_OK):
         return None
     try:
@@ -605,6 +610,36 @@ def _absolute_launcher_token(tokens: list[str]) -> Path | None:
     return None
 
 
+def _has_inline_bootstrap(tokens: list[str]) -> bool:
+    """Whether a python-first argv's interpreter options include ``-c``.
+
+    Only the leading option tokens are inspected (``-I -c <code> …``): a ``-c``
+    later in the argv belongs to the program, not to the interpreter. An inline
+    bootstrap can extend ``sys.path`` (``site.addsitedir``) before Hermes starts,
+    so ``argv[0]`` alone no longer determines the gateway's site-packages.
+    """
+    for token in tokens[1:]:
+        if not token.startswith("-"):
+            return False
+        if token == "-c":  # noqa: S105 - CLI flag, not a secret
+            return True
+    return False
+
+
+def _is_desktop_gateway_argv(tokens: list[str], home: Path) -> bool:
+    """Whether a python-first gateway argv is Hermes Desktop's managed launcher.
+
+    That launcher execs the *base* standalone interpreter with ``-I -c
+    <bootstrap>`` and the bootstrap adds the pm venv via ``site.addsitedir``
+    (shape 2b of :func:`_is_gateway_argv`). The launcher token is compared
+    against the known :func:`_desktop_launcher` path, never executed: a launcher
+    path taken from another process's argv decides nothing on its own.
+    """
+    if not _PYTHON_BASENAME.match(Path(tokens[0]).name) or not _has_inline_bootstrap(tokens):
+        return False
+    return _absolute_launcher_token(tokens[1:]) == _desktop_launcher(home)
+
+
 def _is_gateway_argv(tokens: list[str]) -> bool:
     """Whether an argv is a Hermes gateway process.
 
@@ -614,6 +649,10 @@ def _is_gateway_argv(tokens: list[str]) -> bool:
     2. ``<python> <…/bin/hermes> gateway run …`` — a console script *as the kernel
        reports it*: a ``#!`` exec is rewritten to ``[interpreter, script, …]``, so
        ``hermes gateway run`` normally appears in this form, never as shape 3.
+       Shape 2b is Hermes Desktop's managed launcher, which execs the *base*
+       interpreter with an inline bootstrap: ``<python> -I -c <code> … --
+       <home>/hermes-agent/.hermes/bin/hermes gateway run …`` (``ps`` shows the
+       code's newlines as ``\\012``; it contains spaces, so it spans many tokens).
     3. ``<…/bin/hermes> gateway run …`` — argv[0] preserved as the script.
     4. ``bash <…/bin/hermes> gateway run …`` — a ``#!/usr/bin/env bash`` wrapper,
        likewise rewritten by the kernel; the launcher path must be absolute.
@@ -636,7 +675,9 @@ def _python_from_gateway_argv(tokens: list[str]) -> Path | None:
 
     For the python-first shapes (1 and 2) the interpreter *is* ``argv[0]`` — no
     file is read. Only the launcher shapes (3 and 4) fall back to reading the
-    launcher, and only when its path is absolute.
+    launcher, and only when its path is absolute. Shape 2b also answers
+    ``argv[0]`` here; :func:`_gateway_python_for_row` prefers the pm venv the
+    Desktop bootstrap adds, keeping ``argv[0]`` as its fail-closed fallback.
     """
     exe = Path(tokens[0])
     if _PYTHON_BASENAME.match(exe.name):
@@ -693,16 +734,33 @@ def _accept_interpreter(path: Path) -> Path | None:
     return path
 
 
-def _gateway_python_for_row(pid: int | None, args: str) -> Path | None:
+def _gateway_python_for_row(
+    pid: int | None,
+    args: str,
+    home: Path,
+    desktop_python: Callable[[], Path | None] | None = None,
+) -> Path | None:
     """The vetted interpreter for one ``ps`` row, or ``None`` if it is not a gateway.
 
     ``argv`` is preferred and ``/proc/<pid>/exe`` is consulted only when argv
     yields nothing usable (see :func:`_proc_exe_python` for why the kernel's
     symlink-resolved answer is the *worse* one for a venv).
+
+    For Hermes Desktop's managed-launcher shape (2b, see
+    :func:`_is_desktop_gateway_argv`) ``argv[0]`` is the base interpreter, whose
+    own ``sys.path`` lacks the pm venv the gateway really imports from; the venv
+    python from ``desktop_python`` (default :func:`_desktop_runtime_python`) is
+    tried first. When it yields nothing acceptable the row falls back to
+    ``argv[0]`` as before, so the caller's probe fails closed.
     """
     tokens = args.split()
     if not _is_gateway_argv(tokens):
         return None
+    if _is_desktop_gateway_argv(tokens, home):
+        resolved = desktop_python() if desktop_python is not None else _desktop_runtime_python(home)
+        desktop = None if resolved is None else _accept_interpreter(resolved)
+        if desktop is not None:
+            return desktop
     argv_python = _python_from_gateway_argv(tokens)
     accepted = None if argv_python is None else _accept_interpreter(argv_python)
     if accepted is not None:
@@ -722,9 +780,18 @@ def _collect_gateway_runtimes(home: Path) -> list[GatewayRuntime]:
     # Dedupe on (environment, interpreter name): two gateway processes from one
     # venv need one probe, while /usr/bin/python3.11 and /usr/bin/python3.13 share
     # a directory but not a site-packages and must stay separate candidates.
+    # The Desktop launcher query is a subprocess with a 20 s timeout: run it at
+    # most once per pass, however many Desktop-shaped rows there are.
+    desktop: list[Path | None] = []
+
+    def desktop_python() -> Path | None:
+        if not desktop:
+            desktop.append(_desktop_runtime_python(home))
+        return desktop[0]
+
     found: dict[tuple[str, str], GatewayRuntime] = {}
     for pid, args in rows:
-        python = _gateway_python_for_row(pid, args)
+        python = _gateway_python_for_row(pid, args, home, desktop_python)
         if python is None:
             continue
         found.setdefault((environment_key(python), python.name), GatewayRuntime(pid=pid, python=python))
