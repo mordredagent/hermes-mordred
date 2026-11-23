@@ -415,6 +415,10 @@ find_hermes_python() {
   # canonical directory is only a fallback: when a second Hermes install shadows
   # it on PATH, installing into the canonical one would leave `hermes` and
   # `hermes-mordred` pointing at different environments.
+  #
+  # Prints "<source> <python>". <source> is `managed` when only the Hermes
+  # Desktop managed launcher could name the environment, else `direct`; use
+  # locate_hermes_python rather than parsing this by hand.
   local launcher="$1"
   local hermes_home candidate detected managed
 
@@ -424,16 +428,16 @@ find_hermes_python() {
       detected="$(python_from_exec_line "$launcher")"
     fi
     if [[ -n "$detected" ]] && python_environment_root "$detected" >/dev/null; then
-      printf '%s\n' "$detected"
+      printf 'direct %s\n' "$detected"
       return
     fi
     managed="$(python_from_managed_launcher "$launcher")"
     if [[ -n "$managed" ]]; then
-      printf '%s\n' "$managed"
+      printf 'managed %s\n' "$managed"
       return
     fi
     if [[ -n "$detected" ]]; then
-      printf '%s\n' "$detected"
+      printf 'direct %s\n' "$detected"
       return
     fi
   fi
@@ -445,10 +449,27 @@ find_hermes_python() {
     "${hermes_home}/hermes-agent/venv/bin/python3" \
     "${hermes_home}/hermes-agent/venv/bin/python"; do
     if [[ -x "$candidate" ]]; then
-      printf '%s\n' "$candidate"
+      printf 'direct %s\n' "$candidate"
       return
     fi
   done
+}
+
+# Set by locate_hermes_python.
+HERMES_PYTHON=''
+HERMES_PYTHON_VIA_MANAGED_LAUNCHER=0
+
+locate_hermes_python() {
+  # find_hermes_python runs in a command substitution (its probes print to
+  # stdout), so a global it set would be lost with the subshell. It reports
+  # which branch it took instead, and this splits that into globals.
+  local found
+  found="$(find_hermes_python "$1")" || found=''
+  HERMES_PYTHON="${found#* }"
+  HERMES_PYTHON_VIA_MANAGED_LAUNCHER=0
+  if [[ "${found%% *}" == managed ]]; then
+    HERMES_PYTHON_VIA_MANAGED_LAUNCHER=1
+  fi
 }
 
 python_environment_root() {
@@ -531,15 +552,24 @@ is_installer_launcher() {
 }
 
 write_launcher_file() {
-  local target="$1" installed_cli="$2"
+  # $2 is the console script to exec or, with $3 non-empty, Hermes's managed
+  # launcher, run with `--run-module mordred_hermes`. The caller has checked
+  # $2 with path_is_shell_safe.
+  local target="$1" exec_path="$2" via_managed="${3:-}"
+  local command="\"${exec_path}\"" note=''
+  if [[ -n "$via_managed" ]]; then
+    command="\"${exec_path}\" --run-module mordred_hermes"
+    note=$'\n'"# Runs through Hermes's managed launcher, which selects the active install
+# environment at startup: Hermes rebuilds that environment on updates."
+  fi
   cat >"$target" <<EOF && chmod 755 "$target"
 #!/usr/bin/env bash
 ${LAUNCHER_MARKER} Safe to delete.
 # Mirrors Hermes's own launcher: an ambient PYTHONPATH/PYTHONHOME must not
-# redirect package discovery into a different checkout.
+# redirect package discovery into a different checkout.${note}
 unset PYTHONPATH
 unset PYTHONHOME
-exec "${installed_cli}" "\$@"
+exec ${command} "\$@"
 EOF
 }
 
@@ -549,8 +579,13 @@ install_launcher() {
   # would not, so an ambient PYTHONPATH could make `hermes-mordred` import a
   # different mordred_hermes than the one `hermes` loads. Owning the file also
   # means re-runs replace only launchers this installer wrote.
-  local installed_cli="$1" hermes_launcher="$2"
-  local link_dir link_path tmp
+  #
+  # $3 = 1 (the Hermes Desktop managed layout): Hermes rebuilds the install
+  # environment on updates and deletes the old one, so a wrapper naming its
+  # console script would break. Exec `hermes --run-module mordred_hermes`
+  # instead; the managed launcher picks the environment Hermes selects.
+  local installed_cli="$1" hermes_launcher="$2" via_managed="${3:-0}"
+  local link_dir link_path tmp exec_path managed_flag=''
 
   if [[ -n "$hermes_launcher" ]]; then
     link_dir="$(dirname "$hermes_launcher")"
@@ -572,8 +607,15 @@ install_launcher() {
     return
   fi
 
-  if ! path_is_shell_safe "$installed_cli"; then
-    warn "not generating a launcher: ${installed_cli} contains shell metacharacters"
+  exec_path="$installed_cli"
+  # A relative launcher (a relative PATH entry) would resolve against the
+  # caller's working directory; keep the console-script wrapper then.
+  if [[ "$via_managed" == 1 && "$hermes_launcher" == /* ]]; then
+    exec_path="$hermes_launcher"
+    managed_flag=1
+  fi
+  if ! path_is_shell_safe "$exec_path"; then
+    warn "not generating a launcher: ${exec_path} contains shell metacharacters"
     printf '%s\n' "$installed_cli"
     return
   fi
@@ -590,7 +632,7 @@ install_launcher() {
     return
   fi
 
-  if ! write_launcher_file "$tmp" "$installed_cli" || ! mv -f "$tmp" "$link_path"; then
+  if ! write_launcher_file "$tmp" "$exec_path" "$managed_flag" || ! mv -f "$tmp" "$link_path"; then
     rm -f "$tmp"
     warn "could not write the launcher at ${link_path}; run ${installed_cli} directly"
     printf '%s\n' "$installed_cli"
@@ -605,7 +647,8 @@ run_uninstall() {
   # environment exactly as an install would and hand over to it.
   local hermes_launcher hermes_python installed_cli
   hermes_launcher="$(find_hermes_command)"
-  hermes_python="$(find_hermes_python "$hermes_launcher")"
+  locate_hermes_python "$hermes_launcher"
+  hermes_python="$HERMES_PYTHON"
   if [[ -z "$hermes_python" ]]; then
     fail "could not find Hermes's Python environment; nothing to uninstall"
   fi
@@ -656,7 +699,8 @@ main() {
   fi
 
   hermes_launcher="$(find_hermes_command)"
-  hermes_python="$(find_hermes_python "$hermes_launcher")"
+  locate_hermes_python "$hermes_launcher"
+  hermes_python="$HERMES_PYTHON"
   if [[ -z "$hermes_python" ]]; then
     printf 'Install Hermes Agent first with its official installer:\n  %s\n' "$HERMES_INSTALL_COMMAND" >&2
     fail "could not find a Hermes-managed Python environment"
@@ -819,7 +863,7 @@ main() {
   if [[ ! -x "$installed_cli" ]]; then
     fail "installation completed but ${installed_cli} was not created"
   fi
-  exposed_cli="$(install_launcher "$installed_cli" "$hermes_launcher")"
+  exposed_cli="$(install_launcher "$installed_cli" "$hermes_launcher" "$HERMES_PYTHON_VIA_MANAGED_LAUNCHER")"
 
   # Releases up to 0.1.0a20 registered six Hermes plugins (mordred_network, ...);
   # Mordred is now the single plugin `mordred`. Switch an existing config.yaml

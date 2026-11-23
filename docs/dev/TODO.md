@@ -1061,6 +1061,12 @@ unrun live wrong-password check belongs to Desktop acceptance above.
   environment at run time; the Desktop page's Repair panel should report a stale
   launcher. Document in USAGE that `scripts/install.sh --from-source <checkout>`
   is the update path for a local checkout, not a direct `uv pip install`.
+  Done for `scripts/install.sh`: on the managed layout the wrapper now runs
+  `hermes --run-module mordred_hermes`, so it follows the environment Hermes
+  selects; re-running the installer replaces an old hard-coded wrapper. Still
+  open: the Windows launcher (`wizard/_windows_install.py`) names the resolved
+  interpreter the same way, existing wrappers stay stale until the installer is
+  re-run (no start-up rewrite), and the Repair-panel report.
 
 - [ ] Stale protection notice in long-lived chats (found 2026-10-23, live check,
   `dbcrypt`). Hermes freezes plugin prompt sections at session start, so a chat
