@@ -25,6 +25,7 @@ from .._core._database_contracts import DatabaseRefused
 from ..keyvault._database_authority import resolve_database_domain
 from . import _authority
 from ._authority import Authority
+from ._hermes_tracking import is_release_function
 from ._policy import in_scope, refuse_windows_remote_path
 
 # Qualified against Hermes's installed declarative schema. Future versions need
@@ -614,9 +615,22 @@ class ProtectedConnection:
     open_blob = blobopen = serialize = deserialize = iterdump = _unsupported
     set_authorizer = set_progress_handler = set_trace_callback = _unsupported
     enable_load_extension = load_extension = set_key = reset_key = _unsupported
-    create_function = create_aggregate = create_window_function = create_collation = _unsupported
+    create_aggregate = create_window_function = create_collation = _unsupported
     set_busy_handler = set_busy_timeout = interrupt = _unsupported
     autocommit = property(_unsupported, _unsupported)
+
+    def create_function(self, *args: Any, **kwargs: Any) -> None:
+        # The only admitted function is Hermes's no-argument release sentinel
+        # (connect_tracked): its callable is upstream's _ReleaseOnClose, which
+        # returns None from SQL and queues its key when SQLite frees it after
+        # closing the files. Registering it on the raw handle keeps upstream's
+        # release-after-close semantics: the raw handle is closed only through
+        # the guarded close/dispose paths.
+        if not is_release_function(args, kwargs):
+            self._unsupported()
+            return
+        with self._operation():
+            self._raw.create_function(args[0], 0, args[2])
 
 
 class _RawOwner:
