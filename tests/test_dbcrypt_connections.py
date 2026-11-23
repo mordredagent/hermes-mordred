@@ -1666,7 +1666,8 @@ def _stdlib_cannot_read(path):
     stdlib = stdlib_sqlite3()
     conn = stdlib.connect(str(path))
     try:
-        with pytest.raises(stdlib.DatabaseError):
+        # Ciphertext can surface as either, depending on the stdlib SQLite build.
+        with pytest.raises((stdlib.DatabaseError, UnicodeDecodeError)):
             conn.execute("SELECT * FROM records").fetchall()
     finally:
         conn.close()
