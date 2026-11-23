@@ -1489,21 +1489,86 @@ def test_whole_file_check_runs_once_per_file_under_one_key(native_root, authorit
     assert authority.verified_files == verified
 
 
-# Mirrors hermes_cli/sqlite_safe_read.py (2026-07+): connect_tracked() always
-# passes a tracking factory and re-tags a connection whose opener dropped it.
-_HERMES_TRACKING_SOURCE = '''
+# A faithful copy of the connect_tracked() path of Hermes's
+# hermes_cli/sqlite_safe_read.py (2026-11-19 checkout; docstrings trimmed).
+# ``sqlite3`` is injected as a module global: Hermes sees either the guarded
+# replacement module or the stdlib module it imported before the swap.
+_HERMES_TRACKING_SOURCE = """
+import secrets
+import sys
 import threading
+from collections import deque
+from pathlib import Path
+from typing import Optional
 
 _live_lock = threading.RLock()
-releases = []
-
-
-def _apply_releases():
-    releases.append(True)
+_live_connections: dict[str, int] = {}
+_released: deque[str] = deque()
+_RELEASE_FUNCTION = f"_hermes_release_{secrets.token_hex(8)}"
 
 
 class UntrackableConnectionError(RuntimeError):
     pass
+
+
+def _key(path: Path | str) -> str:
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return str(path)
+
+
+def _canonical_db_path(conn: sqlite3.Connection) -> Optional[str]:
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or len(row) < 3 or not row[2]:
+        return None
+    return _key(row[2])
+
+
+def _track_key(key: str, delta: int = 1) -> None:
+    remaining = _live_connections.get(key, 0) + delta
+    if remaining > 0:
+        _live_connections[key] = remaining
+    else:
+        _live_connections.pop(key, None)
+
+
+def _apply_releases() -> None:
+    while _released:
+        _track_key(_released.popleft(), -1)
+
+
+class _ReleaseOnClose:
+    __slots__ = ("armed", "key")
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        self.armed = False
+
+    def __call__(self) -> None:
+        return None
+
+    def __del__(self) -> None:
+        if self.armed and _released is not None:
+            _released.append(self.key)
+
+
+def _live_main_key(key: str) -> Optional[str]:
+    _apply_releases()
+    if key in _live_connections:
+        return key
+    for suffix in ("-wal", "-shm"):
+        if key.endswith(suffix) and key[:-len(suffix)] in _live_connections:
+            return key[:-len(suffix)]
+    return None
+
+
+def has_live_connection(path: Path | str) -> bool:
+    with _live_lock:
+        return _live_main_key(_key(path)) is not None
 
 
 class _TrackingMixin:
@@ -1517,13 +1582,13 @@ class _TrackingMixin:
 
 
 class TrackedConnection(_TrackingMixin, sqlite3.Connection):
-    """A connection whose close() releases its tracked path."""
+    \"\"\"A sqlite3.Connection that untracks its path exactly once on close.\"\"\"
 
 
-_tracked_factory_cache = {}
+_tracked_factory_cache: dict[type, type] = {}
 
 
-def _tracking_factory(factory):
+def _tracking_factory(factory: type) -> type:
     if factory is sqlite3.Connection:
         return TrackedConnection
     if issubclass(factory, _TrackingMixin):
@@ -1535,26 +1600,47 @@ def _tracking_factory(factory):
     return cached
 
 
+def connect_tracked(path, *, tracking_path=None, connect_fn=None, **kwargs):
+    opener = connect_fn if connect_fn is not None else sqlite3.connect
+    kwargs["factory"] = _tracking_factory(kwargs.get("factory", sqlite3.Connection))
+
+    with _live_lock:
+        conn = opener(str(path), **kwargs)
+        try:
+            resolved = _key(tracking_path) if tracking_path is not None else _canonical_db_path(conn)
+            if resolved is None:
+                return conn
+            if not isinstance(conn, _TrackingMixin):
+                conn = _retrofit_tracking(conn, resolved)
+            _track_key(resolved)
+            release = _ReleaseOnClose(resolved)
+            try:
+                before = sys.getrefcount(release)
+                conn.create_function(_RELEASE_FUNCTION, 0, release)
+                if sys.getrefcount(release) == before:
+                    raise sqlite3.ProgrammingError("connection factory did not register the release function")
+            except Exception:
+                _track_key(resolved, -1)
+                raise
+            release.armed = True
+            conn._hermes_tracked_path = resolved
+            return conn
+        except Exception:
+            try:
+                sqlite3.Connection.close(conn)
+            except Exception:
+                pass
+            raise
+
+
 def _retrofit_tracking(conn, resolved):
     cls = type(conn)
     try:
         conn.__class__ = _tracking_factory(cls)
         return conn
     except TypeError as exc:
-        raise UntrackableConnectionError(f"{cls.__name__} for {resolved}") from exc
-
-
-def connect_tracked(path, *, tracking_path=None, connect_fn=None, **kwargs):
-    opener = connect_fn if connect_fn is not None else sqlite3.connect
-    kwargs["factory"] = _tracking_factory(kwargs.get("factory", sqlite3.Connection))
-    with _live_lock:
-        conn = opener(str(path), **kwargs)
-        resolved = str(tracking_path or path)
-        if not isinstance(conn, _TrackingMixin):
-            conn = _retrofit_tracking(conn, resolved)
-        conn._hermes_tracked_path = resolved
-        return conn
-'''
+        raise UntrackableConnectionError(f"connection to {resolved} uses factory {cls.__name__}") from exc
+"""
 
 
 def _hermes_tracking(sqlite3_module, monkeypatch=None, name="hermes_cli.sqlite_safe_read"):
@@ -1566,6 +1652,12 @@ def _hermes_tracking(sqlite3_module, monkeypatch=None, name="hermes_cli.sqlite_s
     if monkeypatch is not None:
         monkeypatch.setitem(sys.modules, name, module)
     return module
+
+
+def _hermes_for(native, hermes_sqlite3, monkeypatch):
+    from mordred_hermes.dbcrypt._shim import stdlib_sqlite3
+
+    return _hermes_tracking(native if hermes_sqlite3 == "protected" else stdlib_sqlite3(), monkeypatch)
 
 
 def _stdlib_cannot_read(path):
@@ -1588,33 +1680,65 @@ def test_hermes_tracked_factory_opens_guarded_connection(native_root, authority,
 
     module = native_module(authority)
     stdlib = stdlib_sqlite3()
-    hermes = _hermes_tracking(module if hermes_sqlite3 == "protected" else stdlib, monkeypatch)
+    hermes = _hermes_for(module, hermes_sqlite3, monkeypatch)
     expected_base = ProtectedConnection if hermes_sqlite3 == "protected" else stdlib.Connection
     assert hermes.TrackedConnection.__bases__ == (hermes._TrackingMixin, expected_base)
     path = native_root[0] / "state.db"
+    key = str(path.resolve())
     factories = {"protected": module.Connection, "stdlib": stdlib.Connection}
     kwargs = {} if factory is None else {"factory": factories[factory]}
     conn = hermes.connect_tracked(path, connect_fn=module.connect, timeout=5.0, **kwargs)
     try:
         assert isinstance(conn, ProtectedConnection)
         assert isinstance(conn, hermes._TrackingMixin)
-        assert conn._hermes_tracked_path == str(path)
+        assert conn._hermes_tracked_path == key
+        assert hermes._live_connections == {key: 1}
         conn.execute("CREATE TABLE records(value)")
         conn.execute("INSERT INTO records VALUES (1)")
         conn.commit()
         cursor = conn.execute("SELECT value FROM records")
         assert cursor.connection is conn
         assert cursor.fetchall() == [(1,)]
+        assert hermes.has_live_connection(path)
     finally:
         conn.close()
-    assert hermes.releases == [True]
+    # The raw handle's close freed the release sentinel; the mixin applied it.
+    assert hermes._live_connections == {}
+    assert not hermes._released
+    assert not hermes.has_live_connection(path)
     assert conn._closed
     assert conn._hermes_tracked_path is None
     with pytest.raises(DatabaseRefused):
         conn.execute("SELECT 1")
     assert raw_rows(path, derive(native_root[2])) == [(1,)]
     _stdlib_cannot_read(path)
+    assert _owned_handles(authority) == []
     authority.check()
+
+
+@pytest.mark.parametrize("hermes_sqlite3", ["protected", "stdlib"])
+def test_hermes_tracking_survives_annotation_introspection(native_root, authority, monkeypatch, hermes_sqlite3):
+    import contextlib
+    import typing
+
+    from mordred_hermes.dbcrypt._connection import ProtectedConnection
+
+    module = native_module(authority)
+    hermes = _hermes_for(module, hermes_sqlite3, monkeypatch)
+    for factory in (hermes.TrackedConnection, hermes._tracking_factory(ProtectedConnection)):
+        assert factory.__annotations__ is not None
+        # ProtectedConnection's own hints need not evaluate at runtime.
+        with contextlib.suppress(NameError, TypeError):
+            typing.get_type_hints(factory)
+        # The introspection cached annotations in the class dict itself.
+        assert set(vars(factory)) & {"__annotations__", "__annotate_func__", "__annotations_cache__"}
+    path = native_root[0] / "state.db"
+    for factory in (None, module.Connection):
+        kwargs = {} if factory is None else {"factory": factory}
+        conn = hermes.connect_tracked(path, connect_fn=module.connect, **kwargs)
+        assert isinstance(conn, hermes._TrackingMixin)
+        conn.close()
+    assert hermes._live_connections == {}
 
 
 def test_hermes_tracked_factory_is_dropped_not_instantiated(native_root, authority, monkeypatch):
@@ -1629,6 +1753,170 @@ def test_hermes_tracked_factory_is_dropped_not_instantiated(native_root, authori
         assert conn.execute("SELECT 1").fetchall() == [(1,)]
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("hermes_sqlite3", ["protected", "stdlib"])
+def test_hermes_release_sentinel_is_inert_from_sql(native_root, authority, monkeypatch, hermes_sqlite3):
+    module = native_module(authority)
+    hermes = _hermes_for(module, hermes_sqlite3, monkeypatch)
+    path = native_root[0] / "state.db"
+    conn = hermes.connect_tracked(path, connect_fn=module.connect)
+    try:
+        # The authorizer admits SQLITE_FUNCTION; the sentinel only returns NULL.
+        assert conn.execute(f"SELECT {hermes._RELEASE_FUNCTION}()").fetchone() == (None,)
+        assert hermes._live_connections == {str(path.resolve()): 1}
+    finally:
+        conn.close()
+    assert hermes._live_connections == {}
+
+
+def _create_function_call(case, hermes, monkeypatch):
+    """(method, args, kwargs) for one refused registration on a guarded connection."""
+    name = hermes._RELEASE_FUNCTION
+    release = hermes._ReleaseOnClose("key")
+
+    class Subclass(hermes._ReleaseOnClose):
+        __slots__ = ()
+
+    if case == "other_prefix":
+        return "create_function", ("_hermes_releasx_" + name[-16:], 0, release), {}
+    if case == "uppercase_hex":
+        upper = "_hermes_release_" + name[-16:].upper()
+        monkeypatch.setattr(hermes, "_RELEASE_FUNCTION", upper)
+        return "create_function", (upper, 0, release), {}
+    if case == "not_the_constant":
+        other = "_hermes_release_" + ("0" * 16 if name[-16:] != "0" * 16 else "1" * 16)
+        return "create_function", (other, 0, release), {}
+    if case == "str_subclass":
+        return "create_function", (type("Name", (str,), {})(name), 0, release), {}
+    if case == "constant_not_str":
+        monkeypatch.setattr(hermes, "_RELEASE_FUNCTION", type("Name", (str,), {})(name))
+        return "create_function", (name, 0, release), {}
+    if case == "narg_one":
+        return "create_function", (name, 1, release), {}
+    if case == "narg_false":
+        return "create_function", (name, False, release), {}
+    if case == "narg_negative":
+        return "create_function", (name, -1, release), {}
+    if case == "plain_callable":
+        return "create_function", (name, 0, lambda: None), {}
+    if case == "release_subclass":
+        return "create_function", (name, 0, Subclass("key")), {}
+    if case == "release_class_not_plain":
+
+        class Base:
+            pass
+
+        class _ReleaseOnClose(Base):
+            def __call__(self):
+                return None
+
+        monkeypatch.setattr(hermes, "_ReleaseOnClose", _ReleaseOnClose)
+        return "create_function", (name, 0, _ReleaseOnClose()), {}
+    if case == "deterministic_kwarg":
+        return "create_function", (name, 0, release), {"deterministic": True}
+    if case == "keyword_arguments":
+        return "create_function", (), {"name": name, "narg": 0, "func": release}
+    if case == "two_arguments":
+        return "create_function", (name, 0), {}
+    if case == "module_missing":
+        monkeypatch.delitem(sys.modules, "hermes_cli.sqlite_safe_read")
+        return "create_function", (name, 0, release), {}
+    if case == "module_not_a_module":
+        from types import SimpleNamespace
+
+        monkeypatch.setitem(sys.modules, "hermes_cli.sqlite_safe_read", SimpleNamespace(**vars(hermes)))
+        return "create_function", (name, 0, release), {}
+    if case == "aggregate":
+        return "create_aggregate", (name, 0, hermes._ReleaseOnClose), {}
+    if case == "window_function":
+        return "create_window_function", (name, 0, hermes._ReleaseOnClose), {}
+    if case == "collation":
+        return "create_collation", (name, release), {}
+    raise AssertionError(case)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "other_prefix",
+        "uppercase_hex",
+        "not_the_constant",
+        "str_subclass",
+        "constant_not_str",
+        "narg_one",
+        "narg_false",
+        "narg_negative",
+        "plain_callable",
+        "release_subclass",
+        "release_class_not_plain",
+        "deterministic_kwarg",
+        "keyword_arguments",
+        "two_arguments",
+        "module_missing",
+        "module_not_a_module",
+        "aggregate",
+        "window_function",
+        "collation",
+    ],
+)
+def test_only_hermes_release_sentinel_function_is_admitted(native_root, authority, monkeypatch, case):
+    module = native_module(authority)
+    hermes = _hermes_tracking(module, monkeypatch)
+    conn = module.connect(native_root[0] / "state.db")
+    try:
+        method, args, kwargs = _create_function_call(case, hermes, monkeypatch)
+        with pytest.raises(DatabaseRefused, match="requires an authorized implementation"):
+            getattr(conn, method)(*args, **kwargs)
+        name = hermes._RELEASE_FUNCTION
+        with pytest.raises(sc.OperationalError, match="no such function"):
+            conn.execute(f"SELECT {name}()")
+        assert conn.execute("SELECT 1").fetchone() == (1,)
+    finally:
+        conn.close()
+
+
+def test_release_sentinel_admission_still_checks_authority(native_root, authority, monkeypatch):
+    root = native_root[0]
+    module = native_module(authority)
+    hermes = _hermes_tracking(module, monkeypatch)
+    conn = module.connect(root / "state.db")
+    release = hermes._ReleaseOnClose("key")
+    (root / "mordred/db-encryption.marker").unlink()
+    with pytest.raises(DatabaseRefused):
+        conn.create_function(hermes._RELEASE_FUNCTION, 0, release)
+    assert authority.terminal
+    conn.close()
+
+
+@pytest.mark.parametrize("hermes_sqlite3", ["protected", "stdlib"])
+def test_failed_hermes_registration_disposes_connection(native_root, authority, monkeypatch, hermes_sqlite3):
+    from mordred_hermes.dbcrypt import _connection
+
+    module = native_module(authority)
+    hermes = _hermes_for(module, hermes_sqlite3, monkeypatch)
+    # Upstream reads the constant at call time; an uppercase name fails admission.
+    monkeypatch.setattr(hermes, "_RELEASE_FUNCTION", hermes._RELEASE_FUNCTION.upper())
+    path = native_root[0] / "state.db"
+    before = len(_connection._LIVE_CONNECTIONS)
+    try:
+        hermes.connect_tracked(path, connect_fn=module.connect)
+    except DatabaseRefused:
+        pass
+    else:
+        raise AssertionError("registration was admitted")
+    assert hermes._live_connections == {}
+    if hermes_sqlite3 == "protected":
+        # sqlite3.Connection.close(conn) is ProtectedConnection.close: disposed at once.
+        assert len(_connection._LIVE_CONNECTIONS) == before
+        assert _owned_handles(authority) == []
+    # Over the stdlib base, upstream's C close raises TypeError (swallowed); the
+    # dropped facade's finalizer queues its owner and the next admission reaps it.
+    gc.collect()
+    module.connect(":memory:").close()
+    assert len(_connection._LIVE_CONNECTIONS) == before
+    assert _owned_handles(authority) == []
+    authority.check()
 
 
 def _refused_tracking_factory(case, hermes, monkeypatch):
@@ -1709,10 +1997,8 @@ def _refused_tracking_factory(case, hermes, monkeypatch):
     ],
 )
 def test_lookalike_tracking_factories_are_refused(native_root, authority, monkeypatch, hermes_sqlite3, case):
-    from mordred_hermes.dbcrypt._shim import stdlib_sqlite3
-
     module = native_module(authority)
-    hermes = _hermes_tracking(module if hermes_sqlite3 == "protected" else stdlib_sqlite3(), monkeypatch)
+    hermes = _hermes_for(module, hermes_sqlite3, monkeypatch)
     factory = _refused_tracking_factory(case, hermes, monkeypatch)
     path = native_root[0] / "state.db"
     with pytest.raises(DatabaseRefused, match="custom connection factories"):
@@ -1723,28 +2009,30 @@ def test_lookalike_tracking_factories_are_refused(native_root, authority, monkey
 
 
 @pytest.mark.parametrize("hermes_sqlite3", ["protected", "stdlib"])
-def test_revocation_closes_hermes_tracked_connection(native_root, authority, monkeypatch, hermes_sqlite3):
-    from mordred_hermes.dbcrypt._shim import stdlib_sqlite3
-
+def test_revocation_closes_and_releases_hermes_tracked_connection(native_root, authority, monkeypatch, hermes_sqlite3):
     root, _, material, _ = native_root
     path = root / "state.db"
     module = native_module(authority)
-    hermes = _hermes_tracking(module if hermes_sqlite3 == "protected" else stdlib_sqlite3(), monkeypatch)
+    hermes = _hermes_for(module, hermes_sqlite3, monkeypatch)
     conn = hermes.connect_tracked(path, connect_fn=module.connect)
     conn.execute("CREATE TABLE records(value)")
     conn.execute("INSERT INTO records VALUES (1)")
     conn.commit()
     conn.execute("INSERT INTO records VALUES (2)")
     cursor = conn.execute("SELECT value FROM records ORDER BY value")
+    assert hermes.has_live_connection(path)
     (root / "mordred/db-encryption.marker").unlink()
     with pytest.raises(DatabaseRefused):
         conn.execute("INSERT INTO records VALUES (3)")
     assert authority.terminal
     assert conn._revoked
     assert conn._closed
+    # Disposal closed the raw handle, so SQLite already freed the sentinel.
+    assert not hermes.has_live_connection(path)
+    assert hermes._live_connections == {}
     with pytest.raises(DatabaseRefused):
         cursor.fetchone()
     assert raw_rows(path, derive(material)) == [(1,)]
     conn.close()
-    assert hermes.releases == [True]
+    assert hermes._live_connections == {}
     assert conn._hermes_tracked_path is None
