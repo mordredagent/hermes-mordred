@@ -50,6 +50,14 @@ KEY_DOES_NOT_OPEN: Final = (
 #: Set on the replacement module so a second install (and the integrity
 #: checks) can tell it apart from the stdlib module.
 MARKER: Final = "__mordred_sqlcipher__"
+#: Hermes's tracked-connection helper; looked up in ``sys.modules``, never imported.
+_HERMES_TRACKING_MODULE: Final = "hermes_cli.sqlite_safe_read"
+#: Class-body entries CPython 3.11-3.15 itself adds to ``class X(_TrackingMixin,
+#: Connection): """doc"""`` and ``type(name, (_TrackingMixin, Connection), {})``.
+#: Anything else is a method or attribute of the factory's own.
+_TRACKING_FACTORY_KEYS: Final = frozenset(
+    {"__module__", "__doc__", "__dict__", "__weakref__", "__firstlineno__", "__static_attributes__"}
+)
 
 
 def _database_path(database: Any, uri: bool) -> str | None:
@@ -291,9 +299,34 @@ def _native_path(database: Any, *, uri: bool) -> tuple[Path | None, bool]:
     return path, readonly
 
 
+def _is_hermes_tracking_factory(factory: object, bases: tuple[type, ...]) -> bool:
+    """Whether ``factory`` is exactly ``_TrackingMixin`` over one of ``bases``.
+
+    ``hermes_cli.sqlite_safe_read.connect_tracked`` always passes such a
+    factory (``TrackedConnection`` or a cached ``Tracked<X>``). Any own class
+    attribute, extra or reordered base, foreign mixin or metaclass refuses.
+    """
+    if type(factory) is not type:
+        return False
+    hermes = sys.modules.get(_HERMES_TRACKING_MODULE)
+    if not isinstance(hermes, types.ModuleType):
+        return False
+    mixin = vars(hermes).get("_TrackingMixin")
+    if type(mixin) is not type or mixin.__bases__ != (object,):
+        return False
+    if len(factory.__bases__) != 2 or factory.__bases__[0] is not mixin:
+        return False
+    base = factory.__bases__[1]
+    return any(base is allowed for allowed in bases) and set(vars(factory)) <= _TRACKING_FACTORY_KEYS
+
+
 def _native_connect(authority: Authority) -> Callable[..., Any]:
     from .._core._database_contracts import DatabaseRefused
     from ._connection import ProtectedConnection, _open_unprotected, open_protected
+
+    # Hermes's module sees either this replacement (Connection is
+    # ProtectedConnection) or the stdlib module it imported before the swap.
+    tracking_bases: tuple[type, ...] = (ProtectedConnection, stdlib_sqlite3().Connection)
 
     def connect(database: Any, *args: Any, **kwargs: Any) -> Any:
         authority.check()
@@ -312,6 +345,13 @@ def _native_connect(authority: Authority) -> Callable[..., Any]:
         if options.keys() & kwargs.keys():
             raise TypeError("duplicate connection argument")
         options.update(kwargs)
+        if _is_hermes_tracking_factory(options.get("factory"), tracking_bases):
+            # Dropping Hermes's tracking factory is safe: it is never
+            # instantiated, so it cannot bypass authority. The caller gets a
+            # plain ProtectedConnection, which Hermes's _retrofit_tracking
+            # re-tags with its pure-Python mixin; the mixin's close() calls
+            # super().close(), i.e. the guarded close.
+            del options["factory"]
         if options.get("factory", ProtectedConnection) is not ProtectedConnection:
             raise DatabaseRefused("custom connection factories cannot bypass authority")
         if options.get("detect_types", 0):
