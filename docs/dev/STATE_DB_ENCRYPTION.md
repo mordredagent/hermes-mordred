@@ -167,8 +167,12 @@ honours `HERMES_HOME` before Hermes is importable.
 
 Because of this launch form, the runtime gate's running-gateway check maps a
 gateway that runs the bare standalone interpreter to the environment that
-Desktop's launcher selects now, when that environment's `venv/bin/python`
-resolves to the same interpreter. Venv interpreters are probed as themselves.
+Desktop's launcher selects now. It does this only when the gateway's
+interpreter path on its command line, not resolved, is the one that
+`<home>/hermes-agent/.hermes/bin/hermes` runs in its `exec` line. Any other
+path, including a symlink to the same binary, is probed as itself. A second
+Hermes checkout that starts its gateway for the same home with the same
+standalone interpreter path has the same command line and cannot be told apart.
 
 ## Phase 2 (done)
 

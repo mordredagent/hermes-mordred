@@ -381,9 +381,9 @@ the hook reseals the current config and removes the plaintext. Do not re-run
 > path must be absolute. A gateway running under another account (or a shape
 > outside that set) is not seen, and therefore not probed. A Hermes Desktop
 > gateway runs the bare standalone interpreter, and Hermes's startup adds the
-> selected environment to it. When the environment that Desktop's launcher
-> selects now has a `venv/bin/python` that resolves to that interpreter, that
-> environment's python is probed instead. If a running gateway
+> selected environment to it. When the gateway's interpreter path is exactly
+> the one that Desktop's launcher for this home runs, the python of the
+> environment that the launcher selects now is probed instead. If a running gateway
 > cannot load the shim, the command refuses and touches nothing (excerpt):
 >
 > ```text

@@ -394,8 +394,10 @@ def gateway_runtime_lines(*, home: Path, platform: str) -> list[str]:
     Unlike the rest of ``status`` this spends three short subprocess probes per
     discovered gateway (macOS only, and only when one is actually running). No
     probe opens the vault or prompts for Touch ID — the config probe runs with
-    the ``.pth`` hook neutralized. Any failure yields no lines: ``status`` must
-    never raise or block.
+    the ``.pth`` hook neutralized. For a Hermes Desktop standalone gateway,
+    discovery also starts the Desktop launcher once to learn the selected
+    environment, with the ``config.yaml`` startup hook opted out. Any failure
+    yields no lines: ``status`` must never raise or block.
     """
     if platform != _DARWIN:
         return []

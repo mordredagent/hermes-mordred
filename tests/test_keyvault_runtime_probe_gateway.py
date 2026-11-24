@@ -614,10 +614,15 @@ def _make_venv_python(venv: Path, base_python: Path) -> Path:
 
 
 def _make_desktop_home(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """Build a home with the standalone interpreter and a selected environment linked to it."""
+    """Build a home with the standalone interpreter, a selected environment linked to it, and its launcher."""
     home = tmp_path / "home"
     standalone = _make_python(home / "tools" / "python-3.14.9" / "bin", "python3")
     selected = _make_venv_python(home / "installs" / "i1" / "environments" / "e1" / "venv", standalone)
+    launcher = home / "hermes-agent" / ".hermes" / "bin" / "hermes"
+    launcher.parent.mkdir(parents=True)
+    bootstrap = "import os, sys\nimport hermes_bootstrap\n"  # Hermes's real bootstrap spans many lines
+    launcher.write_text(f'#!/bin/sh\nexec {shlex.join([str(standalone), "-I", "-c", bootstrap])} "$@"\n')
+    launcher.chmod(0o755)
     return home, standalone, selected
 
 
@@ -638,6 +643,17 @@ class TestDesktopLaunchForm:
         monkeypatch.setattr(_runtime_probe, "_desktop_runtime_python", lambda _home: None)
         _install_ps(monkeypatch, _FakePs(scan=_scan_row(7001, _DESKTOP_ARGV.format(py=standalone))))
         assert discover_running_gateway_runtimes(home=home) == [GatewayRuntime(pid=7001, python=standalone)]
+
+    def test_symlink_to_the_standalone_interpreter_is_reported_as_itself(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+        (tmp_path / "other" / "bin").mkdir(parents=True)
+        other = _ProcessPath(tmp_path / "other" / "bin" / "python3")
+        other.symlink_to(standalone)
+        monkeypatch.setattr(_runtime_probe, "_desktop_runtime_python", lambda _home: selected)
+        _install_ps(monkeypatch, _FakePs(scan=_scan_row(7004, _DESKTOP_ARGV.format(py=other))))
+        assert discover_running_gateway_runtimes(home=home) == [GatewayRuntime(pid=7004, python=other)]
 
     def test_unrelated_interpreter_and_other_venv_are_reported_as_themselves(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None

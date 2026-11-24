@@ -37,3 +37,21 @@ def test_managed_venv_still_wins_and_missing_launcher_is_none(tmp_path: Path, mo
     managed.write_text("")
     _launcher(tmp_path, "'/nowhere/venv/lib/python3.14/site-packages'")
     assert _runtime_probe.discover_runtime_python(home=tmp_path) == managed
+
+
+def test_launcher_child_runs_with_the_config_hook_opted_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MORDRED_CONFIG_DECRYPT", raising=False)
+    venv = tmp_path / "installs" / "a" / "environments" / "b" / "venv"
+    python = venv / "bin" / "python3"
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    launcher = tmp_path / "hermes-agent" / ".hermes" / "bin" / "hermes"
+    launcher.parent.mkdir(parents=True)
+    # Answers only when the child's environment opts out of the config.yaml startup hook.
+    launcher.write_text(
+        f"#!/bin/sh\n[ \"$MORDRED_CONFIG_DECRYPT\" = 0 ] && printf '%s\\n' \"'{venv}/lib/python3.14/site-packages'\"\n"
+        "exit 0\n"
+    )
+    launcher.chmod(0o755)
+
+    assert _runtime_probe._desktop_runtime_python(tmp_path) == python
