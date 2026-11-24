@@ -36,6 +36,7 @@ Heavy imports stay function-local; this module imports on any platform.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import re
@@ -46,7 +47,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Final, NamedTuple
+from typing import Final
 
 from .._core._home import hermes_home as _hermes_home
 
@@ -384,7 +385,7 @@ def _desktop_runtime_python(home: Path) -> Path | None:
     exists. Ask the launcher itself: ``--run-module site`` prints ``sys.path``,
     which contains that environment's site-packages.
     """
-    launcher = home / "hermes-agent" / ".hermes" / "bin" / "hermes"
+    launcher = _desktop_launcher_path(home)
     if not launcher.is_file() or not os.access(launcher, os.X_OK):
         return None
     try:
@@ -487,18 +488,20 @@ _SHELL_BASENAMES = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 _GATEWAY_MODULE_PREFIX = "hermes_cli"
 
 
-class GatewayRuntime(NamedTuple):
-    """A live ``hermes … gateway run`` process and the interpreter to probe for it.
+@dataclasses.dataclass(frozen=True)
+class GatewayRuntime:
+    """A live ``hermes … gateway run`` process and the interpreter running it.
 
-    That is the interpreter running it, except for a Hermes Desktop standalone
-    gateway mapped by a caller-supplied expected runtime, which carries that
-    runtime's python instead.
     ``pid`` is ``None`` only if a row's pid could not be read (the interpreter is
     still actionable without it; the pid is diagnostic sugar for the operator).
+    ``python_is_argv0`` is true only when ``python`` is, verbatim, the first token
+    of the gateway's command line (not read from a launcher file, not a
+    ``/proc/<pid>/exe`` answer); it is not part of equality.
     """
 
     pid: int | None
     python: Path
+    python_is_argv0: bool = dataclasses.field(default=False, compare=False)
 
 
 def environment_key(python: Path) -> str:
@@ -740,6 +743,40 @@ def _gateway_python_for_row(pid: int | None, args: str) -> Path | None:
     return None if fallback is None else _accept_interpreter(fallback)
 
 
+def _collect_gateway_runtimes(home: Path) -> list[GatewayRuntime]:
+    """Both discovery sources, deduplicated by environment + interpreter name."""
+    rows: list[tuple[int | None, str]] = []
+    state_pid = _state_file_pid(home)
+    if state_pid is not None:
+        rows.extend(_parse_pid_rows(_ps(["-p", str(state_pid), "-o", "uid=,args="]), state_pid))
+    rows.extend(_parse_scan_rows(_ps(["-axo", "pid=,uid=,args="])))
+
+    # Dedupe on (environment, interpreter name): two gateway processes from one
+    # venv need one probe, while /usr/bin/python3.11 and /usr/bin/python3.13 share
+    # a directory but not a site-packages and must stay separate candidates.
+    # A merged entry keeps python_is_argv0 only if every merged row had it.
+    found: dict[tuple[str, str], GatewayRuntime] = {}
+    for pid, args in rows:
+        python = _gateway_python_for_row(pid, args)
+        if python is None:
+            continue
+        key = (environment_key(python), python.name)
+        is_argv0 = _is_argv0_python(args, python)
+        kept = found.get(key)
+        found[key] = (
+            GatewayRuntime(pid=pid, python=python, python_is_argv0=is_argv0)
+            if kept is None
+            else dataclasses.replace(kept, python_is_argv0=kept.python_is_argv0 and is_argv0)
+        )
+    return list(found.values())
+
+
+def _is_argv0_python(args: str, python: Path) -> bool:
+    """Whether ``python`` is, verbatim, the first token of the ``ps`` command line ``args``."""
+    tokens = args.split()
+    return bool(tokens) and tokens[0] == str(python)
+
+
 def _is_same_file(first: Path, second: Path) -> bool:
     """Whether both paths resolve to one existing file; ``False`` when either cannot be resolved."""
     try:
@@ -748,50 +785,33 @@ def _is_same_file(first: Path, second: Path) -> bool:
         return False
 
 
-def _collect_gateway_runtimes(home: Path, expected_runtime: Path | None = None) -> list[GatewayRuntime]:
-    """Both discovery sources, deduplicated by environment + interpreter name.
-
-    With ``expected_runtime``, a Hermes Desktop standalone gateway is reported as
-    ``expected_runtime`` (after :func:`_accept_interpreter`): its argv interpreter
-    path, not resolved, must equal the one the home's Desktop launcher ``exec``s
-    (:func:`_read_desktop_launcher_python`, a file read), and it must be the file
-    ``expected_runtime`` resolves to. Every other row is reported as itself.
-    """
-    rows: list[tuple[int | None, str]] = []
-    state_pid = _state_file_pid(home)
-    if state_pid is not None:
-        rows.extend(_parse_pid_rows(_ps(["-p", str(state_pid), "-o", "uid=,args="]), state_pid))
-    rows.extend(_parse_scan_rows(_ps(["-axo", "pid=,uid=,args="])))
-
-    standalone = None if expected_runtime is None else _read_desktop_launcher_python(home)
-    accepted_expected = None
-    if standalone is not None and expected_runtime is not None:
-        accepted_expected = _accept_interpreter(expected_runtime)
-
-    # Dedupe on (environment, interpreter name): two gateway processes from one
-    # venv need one probe, while /usr/bin/python3.11 and /usr/bin/python3.13 share
-    # a directory but not a site-packages and must stay separate candidates.
-    found: dict[tuple[str, str], GatewayRuntime] = {}
-    for pid, args in rows:
-        python = _gateway_python_for_row(pid, args)
-        if python is None:
-            continue
-        if accepted_expected is not None and python == standalone and _is_same_file(python, accepted_expected):
-            python = accepted_expected
-        found.setdefault((environment_key(python), python.name), GatewayRuntime(pid=pid, python=python))
-    return list(found.values())
-
-
-def discover_running_gateway_runtimes(
-    home: Path | None = None, expected_runtime: Path | None = None
+def map_desktop_gateways_to_expected_runtime(
+    gateways: list[GatewayRuntime], home: Path, expected_runtime: Path
 ) -> list[GatewayRuntime]:
-    """Interpreters to probe for the ``hermes … gateway run`` processes running *right now*.
+    """Return ``gateways`` with each Hermes Desktop standalone one reported as ``expected_runtime``; starts no process.
 
-    Each is the process's own interpreter. Only when the caller passes the
-    ``expected_runtime`` it already resolved is a Hermes Desktop standalone
-    gateway reported as ``expected_runtime`` instead (see
-    :func:`_collect_gateway_runtimes`). Discovery never starts the Desktop
-    launcher. Windows ignores ``expected_runtime``.
+    A gateway is replaced only when its ``python`` is its command line's first
+    token, equals (not resolved) the interpreter in this home's Desktop launcher
+    ``exec`` line, that interpreter is the file ``expected_runtime`` resolves to,
+    and ``expected_runtime`` passes :func:`_accept_interpreter`. Every other
+    gateway is returned unchanged; a missing or unreadable launcher maps nothing.
+    """
+    standalone = _read_desktop_launcher_python(home)
+    if standalone is None or not _is_same_file(expected_runtime, standalone):
+        return list(gateways)
+    accepted = _accept_interpreter(expected_runtime)
+    if accepted is None:
+        return list(gateways)
+    return [
+        dataclasses.replace(gateway, python=accepted, python_is_argv0=False)
+        if gateway.python_is_argv0 and gateway.python == standalone
+        else gateway
+        for gateway in gateways
+    ]
+
+
+def discover_running_gateway_runtimes(home: Path | None = None) -> list[GatewayRuntime]:
+    """Interpreters of the ``hermes … gateway run`` processes running *right now*.
 
     On Windows, an unknown inventory raises GatewayDiscoveryUnavailable.
     POSIX discovery retains its historical best-effort behavior and never raises
@@ -816,7 +836,7 @@ def discover_running_gateway_runtimes(
     if os.name != "posix":
         return []
     try:
-        return _collect_gateway_runtimes(_hermes_home() if home is None else home, expected_runtime)
+        return _collect_gateway_runtimes(_hermes_home() if home is None else home)
     except Exception:
         # Broad on purpose: discovery is advisory, and raising here would abort a
         # seal (or `status`) over an unreadable process table.

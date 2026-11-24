@@ -381,10 +381,11 @@ the hook reseals the current config and removes the plaintext. Do not re-run
 > path must be absolute. A gateway running under another account (or a shape
 > outside that set) is not seen, and therefore not probed. A Hermes Desktop
 > gateway runs the bare standalone interpreter, and Hermes's startup adds the
-> selected environment to it. When the gateway's interpreter path is exactly
-> the one that Desktop's launcher for this home runs, the command treats that
-> gateway as the expected runtime it has already checked. (`encryption status`
-> does not do this and still shows that gateway's bare interpreter.) If a running gateway
+> selected environment to it. When the gateway's own command line starts with
+> exactly the interpreter path that Desktop's launcher for this home runs, the
+> command treats that gateway as the expected runtime it has already checked.
+> (`encryption status` does not do this and still shows that gateway's bare
+> interpreter.) If a running gateway
 > cannot load the shim, the command refuses and touches nothing (excerpt):
 >
 > ```text
