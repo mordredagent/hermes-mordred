@@ -754,7 +754,8 @@ def _collect_gateway_runtimes(home: Path) -> list[GatewayRuntime]:
     # Dedupe on (environment, interpreter name): two gateway processes from one
     # venv need one probe, while /usr/bin/python3.11 and /usr/bin/python3.13 share
     # a directory but not a site-packages and must stay separate candidates.
-    # A merged entry keeps python_is_argv0 only if every merged row had it.
+    # A merged entry keeps python_is_argv0 only if every merged row had it with
+    # the same unresolved path as the kept python.
     found: dict[tuple[str, str], GatewayRuntime] = {}
     for pid, args in rows:
         python = _gateway_python_for_row(pid, args)
@@ -766,7 +767,10 @@ def _collect_gateway_runtimes(home: Path) -> list[GatewayRuntime]:
         found[key] = (
             GatewayRuntime(pid=pid, python=python, python_is_argv0=is_argv0)
             if kept is None
-            else dataclasses.replace(kept, python_is_argv0=kept.python_is_argv0 and is_argv0)
+            else dataclasses.replace(
+                kept,
+                python_is_argv0=kept.python_is_argv0 and is_argv0 and python == kept.python,
+            )
         )
     return list(found.values())
 

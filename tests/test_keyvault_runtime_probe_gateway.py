@@ -739,6 +739,49 @@ class TestDesktopGatewayGate:
         assert _run_gate(home, probe_gateway_fails) == 1
         assert probed == [None, standalone]
 
+    @pytest.mark.parametrize("alias_first", [False, True])
+    def test_gate_probes_a_merged_gateway_started_through_an_alias_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None, alias_first: bool
+    ) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+        alias = _alias_of_standalone(tmp_path, standalone)
+        monkeypatch.setenv(_runtime_probe.RUNTIME_PYTHON_ENV, str(selected))
+        rows = [_scan_row(7001, _DESKTOP_ARGV.format(py=standalone)), _scan_row(7002, _DESKTOP_ARGV.format(py=alias))]
+        _install_ps(monkeypatch, _FakePs(scan="\n".join(reversed(rows) if alias_first else rows)))
+        probed: list[Path | None] = []
+
+        def probe_bare_interpreter_fails(*, home: Path, runtime_python: Path | None = None) -> tuple[bool, str]:
+            """Pass the primary check; fail any gateway interpreter, as the bare standalone one would."""
+            probed.append(runtime_python)
+            return (True, "ok") if runtime_python is None else (False, "mordred plugin not registered")
+
+        assert _run_gate(home, probe_bare_interpreter_fails) == 1
+        assert probed == [None, alias if alias_first else standalone]
+
+    def test_gate_passes_two_desktop_gateways_with_the_same_standalone_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+        monkeypatch.setenv(_runtime_probe.RUNTIME_PYTHON_ENV, str(selected))
+        scan = "\n".join(_scan_row(pid, _DESKTOP_ARGV.format(py=standalone)) for pid in (7001, 7002))
+        _install_ps(monkeypatch, _FakePs(scan=scan))
+        probed: list[Path | None] = []
+
+        def probe_bare_interpreter_fails(*, home: Path, runtime_python: Path | None = None) -> tuple[bool, str]:
+            """Pass the primary check; fail any gateway interpreter, as the bare standalone one would."""
+            probed.append(runtime_python)
+            return (True, "ok") if runtime_python is None else (False, "mordred plugin not registered")
+
+        assert _run_gate(home, probe_bare_interpreter_fails) == 0
+        assert probed == [None]
+
+
+def _alias_of_standalone(tmp_path: Path, standalone: Path) -> Path:
+    """Return ``standalone`` spelled through a symlinked directory that points at its ``bin``."""
+    alias_dir = tmp_path / "alias-bin"
+    alias_dir.symlink_to(standalone.parent, target_is_directory=True)
+    return _ProcessPath(alias_dir / standalone.name)
+
 
 @pytest.mark.usefixtures("file_symlink")
 class TestMapDesktopGateways:
@@ -831,3 +874,24 @@ class TestPythonIsArgv0:
         _install_ps(monkeypatch, _FakePs(scan=scan))
         found = discover_running_gateway_runtimes(home=tmp_path / "home")
         assert [(g.pid, g.python, g.python_is_argv0) for g in found] == [(1, python, False)]
+
+    @pytest.mark.usefixtures("file_symlink")
+    @pytest.mark.parametrize("alias_first", [False, True])
+    def test_merged_argv0_rows_with_different_paths_are_not_argv0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None, alias_first: bool
+    ) -> None:
+        standalone = _make_python(tmp_path / "tools" / "bin", "python3")
+        alias = _alias_of_standalone(tmp_path, standalone)
+        rows = [_scan_row(1, _DESKTOP_ARGV.format(py=standalone)), _scan_row(2, _DESKTOP_ARGV.format(py=alias))]
+        _install_ps(monkeypatch, _FakePs(scan="\n".join(reversed(rows) if alias_first else rows)))
+        found = discover_running_gateway_runtimes(home=tmp_path / "home")
+        assert [g.python_is_argv0 for g in found] == [False]
+
+    def test_merged_argv0_rows_with_the_same_path_stay_argv0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        python = _make_python(tmp_path / "a" / "bin", "python3")
+        scan = "\n".join(_scan_row(pid, _DESKTOP_ARGV.format(py=python)) for pid in (1, 2))
+        _install_ps(monkeypatch, _FakePs(scan=scan))
+        found = discover_running_gateway_runtimes(home=tmp_path / "home")
+        assert [(g.pid, g.python, g.python_is_argv0) for g in found] == [(1, python, True)]
