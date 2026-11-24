@@ -73,10 +73,6 @@ _PROBE_TIMEOUT_S = 20.0
 #: memory key, which no probe needs.
 _PROBE_ENV_STRIPPED: Final = frozenset({"PYTHONPATH", "PYTHONHOME", "HERMES_MEMORY_KEY"})
 
-#: Opts a child Hermes process out of the ``config.yaml`` startup hook, so it never
-#: opens the vault or writes plaintext config.
-_CONFIG_HOOK_OPT_OUT_ENV: Final = {"MORDRED_CONFIG_DECRYPT": "0"}
-
 #: Cap on launcher-wrapper indirection while resolving an interpreter (a bash
 #: ``hermes`` that exec's a venv ``hermes`` that has a python shebang = depth 2).
 _MAX_LAUNCHER_HOPS = 5
@@ -386,10 +382,9 @@ def _desktop_runtime_python(home: Path) -> Path | None:
     Python that selects ``<home>/installs/<id>/environments/<id>/venv`` at
     startup; neither ``<home>/hermes-agent/venv`` nor ``hermes`` on PATH
     exists. Ask the launcher itself: ``--run-module site`` prints ``sys.path``,
-    which contains that environment's site-packages. The child runs with the
-    ``config.yaml`` startup hook opted out (``MORDRED_CONFIG_DECRYPT=0``).
+    which contains that environment's site-packages.
     """
-    launcher = _desktop_launcher_path(home)
+    launcher = home / "hermes-agent" / ".hermes" / "bin" / "hermes"
     if not launcher.is_file() or not os.access(launcher, os.X_OK):
         return None
     try:
@@ -398,7 +393,7 @@ def _desktop_runtime_python(home: Path) -> Path | None:
             capture_output=True,
             text=True,
             timeout=20,
-            env={**{k: v for k, v in os.environ.items() if k not in _PROBE_ENV_STRIPPED}, **_CONFIG_HOOK_OPT_OUT_ENV},
+            env={k: v for k, v in os.environ.items() if k not in _PROBE_ENV_STRIPPED},
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -496,7 +491,8 @@ class GatewayRuntime(NamedTuple):
     """A live ``hermes … gateway run`` process and the interpreter to probe for it.
 
     That is the interpreter running it, except for a Hermes Desktop standalone
-    gateway, which carries the launcher-selected environment's python instead.
+    gateway mapped by a caller-supplied expected runtime, which carries that
+    runtime's python instead.
     ``pid`` is ``None`` only if a row's pid could not be read (the interpreter is
     still actionable without it; the pid is diagnostic sugar for the operator).
     """
@@ -744,15 +740,22 @@ def _gateway_python_for_row(pid: int | None, args: str) -> Path | None:
     return None if fallback is None else _accept_interpreter(fallback)
 
 
-def _collect_gateway_runtimes(home: Path) -> list[GatewayRuntime]:
+def _is_same_file(first: Path, second: Path) -> bool:
+    """Whether both paths resolve to one existing file; ``False`` when either cannot be resolved."""
+    try:
+        return first.resolve(strict=True) == second.resolve(strict=True)
+    except OSError:
+        return False
+
+
+def _collect_gateway_runtimes(home: Path, expected_runtime: Path | None = None) -> list[GatewayRuntime]:
     """Both discovery sources, deduplicated by environment + interpreter name.
 
-    A gateway in Hermes Desktop's launch form runs the bare standalone interpreter
-    and ``hermes_bootstrap`` adds the launcher-selected environment at startup, so
-    that row is reported as the selected environment's python — the one its next
-    start unseals with. A row matches only when its argv interpreter path, not
-    resolved, is the one the home's Desktop launcher ``exec``s
-    (:func:`_read_desktop_launcher_python`); any other path is reported as itself.
+    With ``expected_runtime``, a Hermes Desktop standalone gateway is reported as
+    ``expected_runtime`` (after :func:`_accept_interpreter`): its argv interpreter
+    path, not resolved, must equal the one the home's Desktop launcher ``exec``s
+    (:func:`_read_desktop_launcher_python`, a file read), and it must be the file
+    ``expected_runtime`` resolves to. Every other row is reported as itself.
     """
     rows: list[tuple[int | None, str]] = []
     state_pid = _state_file_pid(home)
@@ -760,30 +763,35 @@ def _collect_gateway_runtimes(home: Path) -> list[GatewayRuntime]:
         rows.extend(_parse_pid_rows(_ps(["-p", str(state_pid), "-o", "uid=,args="]), state_pid))
     rows.extend(_parse_scan_rows(_ps(["-axo", "pid=,uid=,args="])))
 
-    gateways = [(pid, python) for pid, args in rows if (python := _gateway_python_for_row(pid, args)) is not None]
-    standalone = _read_desktop_launcher_python(home) if gateways else None
-    has_desktop_gateway = standalone is not None and any(python == standalone for _pid, python in gateways)
-    selected = _desktop_runtime_python(home) if has_desktop_gateway else None
-    accepted_selected = None if selected is None else _accept_interpreter(selected)
+    standalone = None if expected_runtime is None else _read_desktop_launcher_python(home)
+    accepted_expected = None
+    if standalone is not None and expected_runtime is not None:
+        accepted_expected = _accept_interpreter(expected_runtime)
 
     # Dedupe on (environment, interpreter name): two gateway processes from one
     # venv need one probe, while /usr/bin/python3.11 and /usr/bin/python3.13 share
     # a directory but not a site-packages and must stay separate candidates.
     found: dict[tuple[str, str], GatewayRuntime] = {}
-    for pid, python in gateways:
-        if accepted_selected is not None and python == standalone:
-            python = accepted_selected
+    for pid, args in rows:
+        python = _gateway_python_for_row(pid, args)
+        if python is None:
+            continue
+        if accepted_expected is not None and python == standalone and _is_same_file(python, accepted_expected):
+            python = accepted_expected
         found.setdefault((environment_key(python), python.name), GatewayRuntime(pid=pid, python=python))
     return list(found.values())
 
 
-def discover_running_gateway_runtimes(home: Path | None = None) -> list[GatewayRuntime]:
+def discover_running_gateway_runtimes(
+    home: Path | None = None, expected_runtime: Path | None = None
+) -> list[GatewayRuntime]:
     """Interpreters to probe for the ``hermes … gateway run`` processes running *right now*.
 
-    Each is the process's own interpreter, except that a Hermes Desktop
-    standalone gateway is reported as the launcher-selected environment's python
-    (see :func:`_collect_gateway_runtimes`). That case starts the Desktop launcher
-    once with ``--run-module site``.
+    Each is the process's own interpreter. Only when the caller passes the
+    ``expected_runtime`` it already resolved is a Hermes Desktop standalone
+    gateway reported as ``expected_runtime`` instead (see
+    :func:`_collect_gateway_runtimes`). Discovery never starts the Desktop
+    launcher. Windows ignores ``expected_runtime``.
 
     On Windows, an unknown inventory raises GatewayDiscoveryUnavailable.
     POSIX discovery retains its historical best-effort behavior and never raises
@@ -808,7 +816,7 @@ def discover_running_gateway_runtimes(home: Path | None = None) -> list[GatewayR
     if os.name != "posix":
         return []
     try:
-        return _collect_gateway_runtimes(_hermes_home() if home is None else home)
+        return _collect_gateway_runtimes(_hermes_home() if home is None else home, expected_runtime)
     except Exception:
         # Broad on purpose: discovery is advisory, and raising here would abort a
         # seal (or `status`) over an unreadable process table.
@@ -934,7 +942,7 @@ def _probe_capability(
     python, locate_err = _resolve_runtime_python(home, runtime_python)
     if python is None:
         return False, locate_err
-    proc, run_err = _run_runtime_probe(python, probe_src, timeout=timeout, extra_env=_CONFIG_HOOK_OPT_OUT_ENV)
+    proc, run_err = _run_runtime_probe(python, probe_src, timeout=timeout, extra_env={"MORDRED_CONFIG_DECRYPT": "0"})
     if proc is None:
         return False, run_err
     if proc.returncode == 0:
@@ -1057,7 +1065,7 @@ def runtime_memory_key_available(
         _MEMORY_KEY_PROBE_SRC,
         hermes_startup=True,
         timeout=timeout,
-        extra_env={"HERMES_HOME": str(home), **_CONFIG_HOOK_OPT_OUT_ENV},
+        extra_env={"HERMES_HOME": str(home), "MORDRED_CONFIG_DECRYPT": "0"},
     )
     if proc is None:
         return False, error

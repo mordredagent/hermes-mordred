@@ -24,10 +24,8 @@ artifacts —
 The one deliberate exception is :func:`gateway_runtime_lines`, appended to the
 text output on macOS: it inspects the process table for a running
 ``hermes gateway`` and probes that interpreter's decrypt shims in a subprocess.
-Its probes open no vault and prompt for nothing, and it is skipped entirely for
-``--json``. For a Hermes Desktop standalone gateway it also starts the Desktop
-launcher once (``--run-module site``) to learn the selected environment; that
-child runs with the ``config.yaml`` startup hook opted out.
+It still opens no vault and prompts for nothing, and it is skipped entirely for
+``--json``.
 
 ``active`` is the *effective* state on **this** OS. The runtime decrypt shims are
 macOS-only (:mod:`mordred_hermes.keyvault._runtime_env`,

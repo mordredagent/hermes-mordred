@@ -40,6 +40,7 @@ matching the wizard CLI convention.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -59,15 +60,16 @@ if TYPE_CHECKING:
 #: seal supplies its production probe.
 RuntimeProbe = Callable[..., "tuple[bool, str]"]
 
-#: Running-gateway discovery signature: ``discover(home=...) -> [GatewayRuntime]``.
+#: Running-gateway discovery signature:
+#: ``discover(home=..., expected_runtime=None) -> [GatewayRuntime]``.
 GatewayDiscovery = Callable[..., "list[GatewayRuntime]"]
 
 
-def _default_gateway_discovery(*, home: Path) -> list[GatewayRuntime]:
-    """Production discovery of the live gateway processes (import kept lazy)."""
+def _default_gateway_discovery(*, home: Path, expected_runtime: Path | None = None) -> list[GatewayRuntime]:
+    """Production discovery of the live gateway processes, mapped by ``expected_runtime`` (import kept lazy)."""
     from ..keyvault._runtime_probe import discover_running_gateway_runtimes
 
-    return discover_running_gateway_runtimes(home=home)
+    return discover_running_gateway_runtimes(home=home, expected_runtime=expected_runtime)
 
 
 def _install_lines(python: Path) -> str:
@@ -183,6 +185,12 @@ def _gateway_gate(
     from ..keyvault._runtime_probe import discover_runtime_python
 
     primary = discover_runtime_python(home=home)
+    if primary is not None:
+        # Discover again with the expected runtime, so a Hermes Desktop standalone
+        # gateway is judged by that runtime (see discover_running_gateway_runtimes).
+        # If that fails, the unmapped gateways from the first scan are probed.
+        with contextlib.suppress(Exception):
+            gateways = list(discovery(home=home, expected_runtime=primary))
     primary_key = None if primary is None else _interpreter_key(primary)
     for gateway in gateways:
         if primary_key is not None and _interpreter_key(gateway.python) == primary_key:
