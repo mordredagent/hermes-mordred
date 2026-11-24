@@ -1913,6 +1913,52 @@ def test_vault_step_states_from_status():
     assert "Restart Hermes Desktop" in waiting["buttons"]
 
 
+# VaultStep whose status the script changes: OPTED_OUT reports env_optout, BACK a fresh status.
+LIVE_VAULT_STEP = (
+    "VaultStep({id: 'vault', n: '1.2a', state: globalThis.stepState || 'next', code: globalThis.stepCode || null, "
+    f"vault: globalThis.stepVault || {json.dumps(VAULT_NONE)}, refresh}})"
+)
+SETTLE = "tree = view(); effects.forEach(f => f()); tree = view()\n"
+OPTED_OUT = (
+    f"globalThis.stepVault = {json.dumps({**VAULT_READY, 'env_injecting': False, 'optout': True})}; "
+    "globalThis.stepState = 'attention'; globalThis.stepCode = 'env_optout'; " + SETTLE
+)
+BACK = "globalThis.stepVault = null; globalThis.stepState = 'next'; globalThis.stepCode = null; " + SETTLE
+SNAPSHOT = "out.NAME = {text: text(tree), buttons: labels(tree), tree: JSON.stringify(tree)}\n"
+OPTOUT_TEXT = "hermes-mordred encryption enable env"
+RESTART_TEXT = "reads .env from the vault"
+
+
+def snapshot(name: str) -> str:
+    return SNAPSHOT.replace("NAME", name)
+
+
+@pytest.mark.parametrize(
+    "lead,answers,before",
+    [
+        (PREPARE + SAVED + snapshot("before"), [PREPARED], WORDS[0]),
+        (PREPARE + SAVED + COMMIT + snapshot("before"), [PREPARED, {"ok": True}], RESTART_TEXT),
+        (PREPARE + snapshot("before"), [{"ok": False, "error": "memory_operation_in_progress"}], "Another vault"),
+    ],
+    ids=["prepared-flow", "stored-outcome", "stored-failure"],
+)
+def test_the_env_optout_status_wins_over_the_vault_steps_local_state(lead, answers, before):
+    script = (
+        lead + OPTED_OUT + snapshot("optout") + "out.badge = STATE_BADGES.attention.text\n" + BACK + snapshot("back")
+    )
+    result = component(LIVE_VAULT_STEP, answers, script)
+    assert before in result["out"]["before"]["tree"]
+    optout, back = result["out"]["optout"], result["out"]["back"]
+    assert OPTOUT_TEXT in optout["text"]
+    assert result["out"]["badge"] in optout["text"]
+    for snap in (optout, back):
+        assert all(word not in snap["tree"] for word in WORDS)
+        assert RESTART_TEXT not in snap["text"] and "Restart Hermes Desktop" not in snap["buttons"]
+        assert "Another vault" not in snap["text"]
+        assert "Cancel" not in snap["buttons"] and "Move .env into the vault" not in snap["buttons"]
+    assert "Create the vault" not in optout["buttons"]
+
+
 ANCHOR = "mordred-hermes.vault.0123456789abcdef"
 REMEDY = f"security delete-generic-password -s mordred-hermes.vault.anchor -a {ANCHOR}"
 

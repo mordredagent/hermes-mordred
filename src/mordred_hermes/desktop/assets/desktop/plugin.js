@@ -1753,7 +1753,8 @@ function VaultCommitCard({ flow, saved, setSaved, askEveryTime, setAskEveryTime,
 // prepare answer has no passphrase (`passphrase_reused`) and the commit only moves .env.
 // The passphrase lives only in this component's state: dropped after the commit, on
 // Cancel, on a failure that ends the flow, when the step is done or blocked and when the
-// page goes away. Never notified, logged or copied.
+// page goes away. Never notified, logged or copied. An env_optout status also drops the
+// commit's notice and the last failure, so only its instruction shows.
 function VaultStep({ id, n, state, blocker = null, goto = null, code = null, vault, refresh }) {
   const [flow, setFlow] = useState(null)
   const [saved, setSaved] = useState(false)
@@ -1774,6 +1775,12 @@ function VaultStep({ id, n, state, blocker = null, goto = null, code = null, vau
   const shown = state === 'blocked' ? state : busy ? 'running' : flow ? (failure ? 'attention' : 'next') : state === 'done' ? state : failure ? 'attention' : state
   useClearSecrets(drop, shown)
   useDropOnDone(state, () => setFailure(null))
+  useEffect(() => {
+    if (code !== 'env_optout') return
+    drop()
+    setOutcome(null)
+    setFailure(null)
+  }, [code])
   const prepare = async () => {
     setBusy(true)
     setFailure(null)
