@@ -476,6 +476,21 @@ STATE_CASES.update(
                 telegram_import="blocked:needs_memory",
             ),
         ),
+        "v4, .env enrolled, then encryption opted out": (
+            mac(
+                memory=False,
+                login=False,
+                **v4(vault={**VAULT_READY, "env_injecting": False, "optout": True}, armed=False),
+            ),
+            None,
+            ready_but(
+                vault="attention:env_optout",
+                memory="blocked:needs_vault",
+                databases="blocked:needs_memory",
+                telegram="blocked:needs_memory",
+                telegram_import="blocked:needs_memory",
+            ),
+        ),
         "v4, memory already on from an older ceremony": (
             mac(**v4(vault={**VAULT_NONE, "exists": True})),
             None,
@@ -1508,9 +1523,14 @@ def test_overview_from_version_4_reads_the_store_and_the_mailbox_label():
             False,
             ("attention", "Secure Enclave · vault without .env · memory not encrypted · databases off"),
         ),
+        (
+            {**VAULT_READY, "env_injecting": False, "optout": True},
+            False,
+            ("attention", "Secure Enclave · vault · memory not encrypted · databases off"),
+        ),
         (None, True, ("partial", "Secure Enclave · memory encrypted · databases off")),
     ],
-    ids=["no-vault", "vault-without-env", "env-opted-out", "api-without-vault"],
+    ids=["no-vault", "vault-without-env", "env-opted-out", "enrolled-env-opted-out", "api-without-vault"],
 )
 def test_overview_protection_row_names_the_vault(vault, memory, expected):
     status = mac(memory=memory, **v4(vault=vault, armed=False, available=False, code="not_armed"))
@@ -1876,6 +1896,13 @@ def test_vault_step_states_from_status():
     optout = component(vault_step({**VAULT_NONE, "exists": True, "optout": True}, "attention", "env_optout"), [])
     assert "hermes-mordred encryption enable env" in optout["text"]
     assert "Create the vault" not in optout["buttons"] and "Move .env into the vault" not in optout["buttons"]
+    enrolled = {**VAULT_READY, "env_injecting": False, "optout": True}
+    enrolled_optout = component(vault_step(enrolled, "attention", "env_optout"), [])
+    assert "hermes-mordred encryption enable env" in enrolled_optout["text"]
+    assert "is not in it yet" not in enrolled_optout["text"]
+    assert "Restart Hermes Desktop" not in enrolled_optout["buttons"]
+    assert "Create the vault" not in enrolled_optout["buttons"]
+    assert "Move .env into the vault" not in enrolled_optout["buttons"]
     done = component(vault_step(VAULT_READY, "done"), [])
     assert "On · .env is in the vault · opens without Touch ID while you are logged in." in done["text"]
     assert "Restart Hermes Desktop" not in done["buttons"]

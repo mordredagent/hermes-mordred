@@ -1009,7 +1009,7 @@ function stepStates(status, sync = null) {
   const vault = splitVault(status) ? status.vault : null
   if (vault) {
     decide('vault', {
-      done: Boolean(vault.exists && vault.env_enrolled),
+      done: Boolean(vault.exists && vault.env_enrolled && !vault.optout),
       fact: vault.optout ? 'env_optout' : null,
       blocker: firstBlocker([hardware, 'needs_enclave']),
     })
@@ -1088,7 +1088,7 @@ function protectionRow(status, layout, hardware, memory) {
   const state = databaseState(db)
   const parts = [hardware, memory, Boolean(state.done), ...(vault ? [Boolean(vault.exists && vault.env_enrolled)] : [])]
   const on = parts.filter(Boolean).length
-  const attention = db.supported === false || Boolean(state.code) || Boolean(vault && vault.optout && !vault.env_enrolled)
+  const attention = db.supported === false || Boolean(state.code) || Boolean(vault && vault.optout)
   const dot = attention ? 'attention' : on === parts.length ? 'done' : on === 0 && !state.restart ? 'not_started' : 'partial'
   return { ...row, dot, detail: [...facts, databasesFact(db, state)].join(' · ') }
 }
@@ -1846,24 +1846,24 @@ function VaultStep({ id, n, state, blocker = null, goto = null, code = null, vau
       })
     : shown === 'done'
       ? jsx('p', { children: VAULT_DONE })
-      : jsxs(Fragment, {
-          children: [
-            jsx('p', { key: 'body', children: exists ? VAULT_EXISTS_BODY : VAULT_BODY }),
-            code === 'env_optout'
-              ? null
-              : jsx(Row, {
-                  key: 'prepare',
-                  children: [
-                    jsx(Button, { key: 'go', disabled: busy, onClick: prepare, children: exists ? 'Move .env into the vault' : 'Create the vault' }),
-                    jsx('span', {
-                      key: 'hint',
-                      style: { fontSize: 12, color: MUTED_TEXT },
-                      children: exists ? 'Nothing changes until you confirm.' : 'Shows a recovery passphrase first; nothing is created yet.',
-                    }),
-                  ],
-                }),
-          ],
-        })
+      : code === 'env_optout'
+        ? null
+        : jsxs(Fragment, {
+            children: [
+              jsx('p', { key: 'body', children: exists ? VAULT_EXISTS_BODY : VAULT_BODY }),
+              jsx(Row, {
+                key: 'prepare',
+                children: [
+                  jsx(Button, { key: 'go', disabled: busy, onClick: prepare, children: exists ? 'Move .env into the vault' : 'Create the vault' }),
+                  jsx('span', {
+                    key: 'hint',
+                    style: { fontSize: 12, color: MUTED_TEXT },
+                    children: exists ? 'Nothing changes until you confirm.' : 'Shows a recovery passphrase first; nothing is created yet.',
+                  }),
+                ],
+              }),
+            ],
+          })
   return jsx(Step, {
     id,
     n,
