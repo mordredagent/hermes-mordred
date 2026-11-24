@@ -165,6 +165,11 @@ imported; the PluginManager wrapper is deferred to a post-import hook because
 the Hermes checkout is not on `sys.path` at that moment; `hermes_home()`
 honours `HERMES_HOME` before Hermes is importable.
 
+Because of this launch form, the runtime gate's running-gateway check maps a
+gateway that runs the bare standalone interpreter to the environment that
+Desktop's launcher selects now, when that environment's `venv/bin/python`
+resolves to the same interpreter. Venv interpreters are probed as themselves.
+
 ## Phase 2 (done)
 
 `mordred_hermes.dbcrypt` (`_policy`, `_key`, `_shim`), installed first thing

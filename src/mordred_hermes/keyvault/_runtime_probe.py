@@ -711,22 +711,41 @@ def _gateway_python_for_row(pid: int | None, args: str) -> Path | None:
     return None if fallback is None else _accept_interpreter(fallback)
 
 
+def _is_desktop_standalone_python(gateway_python: Path, selected_python: Path) -> bool:
+    """Whether a non-venv gateway interpreter is the same file the launcher-selected venv python resolves to."""
+    if any((directory / "pyvenv.cfg").is_file() for directory in (gateway_python.parent, gateway_python.parent.parent)):
+        return False  # a venv python (another environment) is judged as itself
+    try:
+        return selected_python.resolve(strict=True) == gateway_python.resolve(strict=True)
+    except OSError:
+        return False
+
+
 def _collect_gateway_runtimes(home: Path) -> list[GatewayRuntime]:
-    """Both discovery sources, deduplicated by environment + interpreter name."""
+    """Both discovery sources, deduplicated by environment + interpreter name.
+
+    A gateway in Hermes Desktop's launch form runs the bare standalone interpreter
+    and ``hermes_bootstrap`` adds the launcher-selected environment at startup, so
+    that row is reported as the selected environment's python — the one its next
+    start unseals with (see :func:`_is_desktop_standalone_python`).
+    """
     rows: list[tuple[int | None, str]] = []
     state_pid = _state_file_pid(home)
     if state_pid is not None:
         rows.extend(_parse_pid_rows(_ps(["-p", str(state_pid), "-o", "uid=,args="]), state_pid))
     rows.extend(_parse_scan_rows(_ps(["-axo", "pid=,uid=,args="])))
 
+    gateways = [(pid, python) for pid, args in rows if (python := _gateway_python_for_row(pid, args)) is not None]
+    selected = _desktop_runtime_python(home) if gateways else None
+    accepted_selected = None if selected is None else _accept_interpreter(selected)
+
     # Dedupe on (environment, interpreter name): two gateway processes from one
     # venv need one probe, while /usr/bin/python3.11 and /usr/bin/python3.13 share
     # a directory but not a site-packages and must stay separate candidates.
     found: dict[tuple[str, str], GatewayRuntime] = {}
-    for pid, args in rows:
-        python = _gateway_python_for_row(pid, args)
-        if python is None:
-            continue
+    for pid, python in gateways:
+        if accepted_selected is not None and _is_desktop_standalone_python(python, accepted_selected):
+            python = accepted_selected
         found.setdefault((environment_key(python), python.name), GatewayRuntime(pid=pid, python=python))
     return list(found.values())
 
