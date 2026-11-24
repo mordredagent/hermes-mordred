@@ -1010,7 +1010,6 @@ function stepStates(status, sync = null) {
   if (vault) {
     decide('vault', {
       done: Boolean(vault.exists && vault.env_enrolled && !vault.optout),
-      fact: vault.optout ? 'env_optout' : null,
       blocker: firstBlocker([hardware, 'needs_enclave']),
     })
   }
@@ -1072,7 +1071,8 @@ function modelRow(check) {
 
 function vaultFact(vault) {
   if (!vault.exists) return 'no vault'
-  return vault.env_enrolled ? 'vault' : 'vault without .env'
+  if (!vault.env_enrolled) return 'vault without .env'
+  return vault.optout ? 'vault, .env encryption off' : 'vault'
 }
 
 function protectionRow(status, layout, hardware, memory) {
@@ -1086,9 +1086,9 @@ function protectionRow(status, layout, hardware, memory) {
   if (!reportsV4(status)) return { ...row, dot: 'attention', detail: [...facts, 'databases: Update Mordred to use this'].join(' · ') }
   const db = status.databases
   const state = databaseState(db)
-  const parts = [hardware, memory, Boolean(state.done), ...(vault ? [Boolean(vault.exists && vault.env_enrolled)] : [])]
+  const parts = [hardware, memory, Boolean(state.done), ...(vault ? [Boolean(vault.exists && vault.env_enrolled && !vault.optout)] : [])]
   const on = parts.filter(Boolean).length
-  const attention = db.supported === false || Boolean(state.code) || Boolean(vault && vault.optout)
+  const attention = db.supported === false || Boolean(state.code)
   const dot = attention ? 'attention' : on === parts.length ? 'done' : on === 0 && !state.restart ? 'not_started' : 'partial'
   return { ...row, dot, detail: [...facts, databasesFact(db, state)].join(' · ') }
 }
@@ -1698,7 +1698,9 @@ function MemoryStep({ id = null, n, state, blocker = null, goto = null, refresh,
 
 const VAULT_BODY = 'Hermes keeps its API keys in .env. This step creates Mordred’s encrypted vault on this Mac and moves .env into it. First you get a recovery passphrase of eight words: it is the only way to open the vault if this Mac is lost or the Secure Enclave key is gone. Nothing is created until you confirm that you wrote it down.'
 const VAULT_EXISTS_BODY = 'This Mac already has a vault, but Hermes’s .env is not in it yet. This step moves .env into the vault; the recovery passphrase shown when the vault was created stays the only one.'
-// `/vault/prepare` on an existing vault without .env: no passphrase exists to show.
+// .env enrolled, then `encryption disable env` (or uninstall) restored the plaintext.
+const VAULT_OPTOUT_BODY = '.env encryption was turned off earlier, so Hermes uses a plaintext .env. This step moves the current .env into the vault, replacing the older copy kept there, and turns encryption back on. The recovery passphrase shown when the vault was created stays the only one.'
+// `/vault/prepare` on an existing vault without .env, or with .env opted out: no passphrase exists to show.
 const VAULT_REUSE = 'The vault already exists; its recovery passphrase is the one shown when it was created. .env will be moved into it.'
 const VAULT_DONE = 'Hermes reads .env from the vault when it starts. The recovery passphrase was shown once, when the vault was created.'
 const VAULT_RESTART = 'Restart Hermes Desktop so Hermes reads .env from the vault, then turn on memory encryption (step 1.2b).'
@@ -1750,11 +1752,11 @@ function VaultCommitCard({ flow, saved, setSaved, askEveryTime, setAskEveryTime,
 // Step 1.2a (macOS, version 4 API): prepare → acknowledge → commit. `/vault/prepare`
 // returns the passphrase and changes nothing; `/vault/{flow}/commit` creates the vault
 // with that passphrase and moves .env into it. For an existing vault without .env the
-// prepare answer has no passphrase (`passphrase_reused`) and the commit only moves .env.
+// prepare answer has no passphrase (`passphrase_reused`) and the commit only moves .env;
+// with .env opted out, the commit moves the current .env in again and turns encryption on.
 // The passphrase lives only in this component's state: dropped after the commit, on
 // Cancel, on a failure that ends the flow, when the step is done or blocked and when the
-// page goes away. Never notified, logged or copied. An env_optout status also drops the
-// commit's notice and the last failure, so only its instruction shows.
+// page goes away. Never notified, logged or copied.
 function VaultStep({ id, n, state, blocker = null, goto = null, code = null, vault, refresh }) {
   const [flow, setFlow] = useState(null)
   const [saved, setSaved] = useState(false)
@@ -1775,12 +1777,6 @@ function VaultStep({ id, n, state, blocker = null, goto = null, code = null, vau
   const shown = state === 'blocked' ? state : busy ? 'running' : flow ? (failure ? 'attention' : 'next') : state === 'done' ? state : failure ? 'attention' : state
   useClearSecrets(drop, shown)
   useDropOnDone(state, () => setFailure(null))
-  useEffect(() => {
-    if (code !== 'env_optout') return
-    drop()
-    setOutcome(null)
-    setFailure(null)
-  }, [code])
   const prepare = async () => {
     setBusy(true)
     setFailure(null)
@@ -1853,24 +1849,22 @@ function VaultStep({ id, n, state, blocker = null, goto = null, code = null, vau
       })
     : shown === 'done'
       ? jsx('p', { children: VAULT_DONE })
-      : code === 'env_optout'
-        ? null
-        : jsxs(Fragment, {
-            children: [
-              jsx('p', { key: 'body', children: exists ? VAULT_EXISTS_BODY : VAULT_BODY }),
-              jsx(Row, {
-                key: 'prepare',
-                children: [
-                  jsx(Button, { key: 'go', disabled: busy, onClick: prepare, children: exists ? 'Move .env into the vault' : 'Create the vault' }),
-                  jsx('span', {
-                    key: 'hint',
-                    style: { fontSize: 12, color: MUTED_TEXT },
-                    children: exists ? 'Nothing changes until you confirm.' : 'Shows a recovery passphrase first; nothing is created yet.',
-                  }),
-                ],
-              }),
-            ],
-          })
+      : jsxs(Fragment, {
+          children: [
+            jsx('p', { key: 'body', children: exists ? (vault.optout && vault.env_enrolled ? VAULT_OPTOUT_BODY : VAULT_EXISTS_BODY) : VAULT_BODY }),
+            jsx(Row, {
+              key: 'prepare',
+              children: [
+                jsx(Button, { key: 'go', disabled: busy, onClick: prepare, children: exists ? 'Move .env into the vault' : 'Create the vault' }),
+                jsx('span', {
+                  key: 'hint',
+                  style: { fontSize: 12, color: MUTED_TEXT },
+                  children: exists ? 'Nothing changes until you confirm.' : 'Shows a recovery passphrase first; nothing is created yet.',
+                }),
+              ],
+            }),
+          ],
+        })
   return jsx(Step, {
     id,
     n,

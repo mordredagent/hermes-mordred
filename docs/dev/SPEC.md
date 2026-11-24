@@ -6292,13 +6292,21 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
   job or event. The page shows it, the owner ticks "I have written it down", then
   `POST /vault/{flow_id}/commit {"unattended": bool}` creates the vault with THAT
   passphrase (the typed-passphrase path of `_vault_lifecycle.init`), creates an empty
-  0600 `.env` when none exists, and enrolls `.env`. A lost response after commit is
+  0600 `.env` when none exists and none is enrolled, and enrolls `.env`. A lost response after commit is
   harmless (the phrase was delivered before commit). A backend restart between prepare
   and commit answers `vault_flow_expired` and nothing was created.
 - Commit on an existing vault with `env_enrolled: false` enrolls `.env` without a new
   phrase and answers `passphrase_reused: true` (the phrase shown at creation stays the
-  only one). `optout: true` answers `env_optout` (the owner restored a plaintext
-  `.env`; Terminal: `hermes-mordred encryption enable env`).
+  only one). With `optout: true` (the owner restored a plaintext `.env` with
+  `encryption disable env` or `uninstall`), prepare answers the same reuse flow on an
+  existing vault (the new-vault flow without one), and commit runs `encryption enable
+  env`: the on-disk `.env` replaces the enrolled copy, the opt-out marker is removed,
+  and the plaintext is removed after the read-back check. With no plaintext `.env` on
+  disk, commit never creates one over the enrolled copy: `enable` refuses ("nothing to
+  protect"), the answer is `memory_encryption_failed`, and the copy and the marker stay.
+  The page shows step 1.2a as a step to do, with a sentence that `.env` encryption was
+  turned off earlier. `env_optout` stays in `MESSAGES` for an older backend that still
+  answers it.
 - `GET /status` adds `vault`: `{"exists", "env_enrolled", "env_injecting", "optout",
   "unattended"}`. These are facts; `unattended` is the key's effective policy read
   from the key store, never the requested one, and it is `null` when that policy is
