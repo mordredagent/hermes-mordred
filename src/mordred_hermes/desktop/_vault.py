@@ -7,7 +7,7 @@ with THAT passphrase (``_vault_lifecycle.init`` reuses a passphrase remembered
 in the :class:`~..wizard._flow_session.FlowSession`, the CLI's typed-passphrase
 path), create an empty ``.env`` when there is none and none is enrolled, and
 enroll ``.env``. With the opt-out marker present (``encryption disable env``)
-the commit re-enrolls the on-disk ``.env`` exactly as ``encryption enable env``
+the commit turns ``.env`` encryption back on exactly as ``encryption enable env``
 does. A lost answer after commit therefore never loses the phrase. ``/memory/enable``
 is memory-only. Both workers run in a thread under the route's ceremony lock.
 
@@ -322,8 +322,8 @@ def commit(
     """Create the vault with the prepared passphrase (or reuse the existing one) and enroll ``.env``.
 
     ``vault_exists`` when ``.env`` is enrolled and injected already. Under the
-    opt-out marker the on-disk ``.env`` replaces the enrolled copy; without a
-    plaintext there, ``enable`` refuses and the copy and the marker stay.
+    opt-out marker ``enable`` seals the on-disk ``.env`` (empty when absent) plus
+    the Mordred-owned keys only the enrolled copy has.
     """
     from ..keyvault.vault import artifacts_present
     from ..wizard import env_decrypt_cli

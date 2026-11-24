@@ -57,8 +57,8 @@ async def vault_prepare(request: Request) -> Any:
 async def vault_commit(flow_id: str, request: Request) -> Any:
     """Body ``{"unattended": bool}``. Create the vault with the prepared passphrase, enroll ``.env``.
 
-    Opted out, the on-disk ``.env`` is enrolled again (the vault copy is
-    replaced) and the opt-out marker removed, as ``encryption enable env``.
+    Opted out, the on-disk ``.env`` plus the Mordred-owned keys only the vault
+    copy has are enrolled and the opt-out marker removed, as ``encryption enable env``.
     ``{"ok": true, "passphrase_reused": bool}``; ``vault_flow_expired`` (TTL,
     replaced, restart: nothing was created), ``vault_exists``,
     ``vault_anchor_stale`` (with ``anchor_store``, ``anchor_identity`` and,

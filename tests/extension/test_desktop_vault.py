@@ -648,7 +648,7 @@ def test_the_real_ceremony_creates_a_vault_that_the_prepared_phrase_recovers(
 
 @pytest.fixture
 def opted_out(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """A real vault with ``.env`` (``A=1``, ``B=2``) enrolled, then ``encryption disable env`` (software fakes)."""
+    """A real vault with ``.env`` (``A=1``, ``B=2``, ``MORDRED_X=old``) enrolled, then ``encryption disable env``."""
     from tests._keyvault_fakes import FakeAnchorStore
     from tests.test_wizard_flow_session import _RecordingBackend, _stub_runtime_probes
 
@@ -656,7 +656,7 @@ def opted_out(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     _stub_runtime_probes(monkeypatch)
     home = desktop.home
     root = home / "mordred" / "vault"
-    (home / ".env").write_text("A=1\nB=2\n", encoding="utf-8")
+    (home / ".env").write_text("A=1\nB=2\nMORDRED_X=old\n", encoding="utf-8")
     backend, store = _RecordingBackend(), FakeAnchorStore()
     monkeypatch.setattr(_seams, "vault_root", lambda: root)
     monkeypatch.setattr(vault_cli, "_resolve_root", lambda _r: root)
@@ -667,7 +667,7 @@ def opted_out(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     assert desktop.post(f"/vault/{prepared['flow_id']}/commit", {"unattended": True})["ok"] is True
     assert env_decrypt_cli.disable(home=home, root=root, backend=backend, store=store) == 0
     marker = home / "mordred" / "env-vault.optout"
-    assert marker.exists() and (home / ".env").read_text(encoding="utf-8") == "A=1\nB=2\n"
+    assert marker.exists() and (home / ".env").read_text(encoding="utf-8") == "A=1\nB=2\nMORDRED_X=old\n"
 
     def vault_env() -> bytes:
         with kv_vault.recover_vault(root, " ".join(prepared["passphrase"])) as opened:
@@ -683,28 +683,34 @@ def _reenable(o: Any) -> dict[str, Any]:
 
 
 def test_an_opted_out_env_is_enrolled_again_from_the_file_on_disk(opted_out: Any) -> None:
-    (opted_out.home / ".env").write_text("A=1\n", encoding="utf-8")  # the owner removed B meanwhile
+    (opted_out.home / ".env").write_text("A=1\n", encoding="utf-8")  # the owner removed B and MORDRED_X meanwhile
     assert _reenable(opted_out) == {"ok": True, "passphrase_reused": True}
-    assert opted_out.vault_env() == b"A=1\n"
+    assert opted_out.vault_env() == b"A=1\nMORDRED_X=old\n"
     assert not opted_out.marker.exists() and not (opted_out.home / ".env").exists()
     status = opted_out.desktop.get("/status?client_version=4")["vault"]
     assert status["env_enrolled"] is True and status["env_injecting"] is True and status["optout"] is False
 
 
-def test_an_opted_out_env_without_a_plaintext_keeps_the_enrolled_copy(opted_out: Any) -> None:
+def test_an_opted_out_env_without_a_plaintext_keeps_only_the_mordred_keys(opted_out: Any) -> None:
     (opted_out.home / ".env").unlink()
-    assert _reenable(opted_out) == {"ok": False, "error": "memory_encryption_failed"}
-    assert opted_out.vault_env() == b"A=1\nB=2\n"
-    assert opted_out.marker.exists() and not (opted_out.home / ".env").exists()
+    assert _reenable(opted_out) == {"ok": True, "passphrase_reused": True}
+    assert opted_out.vault_env() == b"MORDRED_X=old\n"
+    assert not opted_out.marker.exists() and not (opted_out.home / ".env").exists()
+
+
+def test_a_mordred_key_on_disk_keeps_the_on_disk_value(opted_out: Any) -> None:
+    (opted_out.home / ".env").write_text("A=1\nMORDRED_X=new\n", encoding="utf-8")
+    assert _reenable(opted_out) == {"ok": True, "passphrase_reused": True}
+    assert opted_out.vault_env() == b"A=1\nMORDRED_X=new\n"
 
 
 def test_a_failed_reenable_keeps_the_plaintext_the_copy_and_the_marker(
     opted_out: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (opted_out.home / ".env").write_text("A=1\n", encoding="utf-8")
-    monkeypatch.setattr(vault_cli, "add_and_verify", lambda **_kw: (1, None))
+    monkeypatch.setattr(vault_cli, "_open_hot_path_or_report", lambda *_a, **_kw: None)
     assert _reenable(opted_out) == {"ok": False, "error": "memory_encryption_failed"}
-    assert opted_out.vault_env() == b"A=1\nB=2\n"
+    assert opted_out.vault_env() == b"A=1\nB=2\nMORDRED_X=old\n"
     assert opted_out.marker.exists() and (opted_out.home / ".env").read_text(encoding="utf-8") == "A=1\n"
 
 

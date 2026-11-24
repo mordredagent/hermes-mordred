@@ -6300,11 +6300,13 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
   only one). With `optout: true` (the owner restored a plaintext `.env` with
   `encryption disable env` or `uninstall`), prepare answers the same reuse flow on an
   existing vault (the new-vault flow without one), and commit runs `encryption enable
-  env`: the on-disk `.env` replaces the enrolled copy, the opt-out marker is removed,
-  and the plaintext is removed after the read-back check. With no plaintext `.env` on
-  disk, commit never creates one over the enrolled copy: `enable` refuses ("nothing to
-  protect"), the answer is `memory_encryption_failed`, and the copy and the marker stay.
-  The page shows step 1.2a as a step to do, with a sentence that `.env` encryption was
+  env`. On macOS, with `.env` still enrolled, that seals the on-disk `.env` text (empty
+  when there is no plaintext; commit never creates one) plus every Mordred-owned key
+  (`HERMES_MEMORY_KEY`, `MORDRED_*`) that the old vault copy has and the on-disk text
+  does not. Nothing else comes from the old copy, and the carried lines are never
+  written to a plaintext file. The opt-out marker is removed after the read-back check,
+  then the plaintext. A failure before the enrollment write changes nothing and answers
+  `memory_encryption_failed`. The page shows step 1.2a as a step to do, with a sentence that `.env` encryption was
   turned off earlier. `env_optout` stays in `MESSAGES` for an older backend that still
   answers it.
 - `GET /status` adds `vault`: `{"exists", "env_enrolled", "env_injecting", "optout",

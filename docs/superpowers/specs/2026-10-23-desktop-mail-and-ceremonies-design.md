@@ -1102,7 +1102,8 @@ Decisions (these win over everything above and are mirrored in SPEC):
   `env_enrolled: false` enrolls `.env` without a new phrase (`passphrase_reused:
   true` in the answer; the phrase shown at creation stays the only one);
   `optout: true` (the owner restored a plaintext `.env`) gets the same reuse
-  flow, and commit runs `encryption enable env` on the on-disk `.env` (see
+  flow, and commit runs `encryption enable env`: the on-disk `.env` plus the
+  Mordred-owned keys only the old vault copy has (see
   SPEC.md "Vault and memory ceremonies from the page"; earlier drafts answered
   `env_optout` and sent the owner to Terminal). `/memory/enable` requires
   `env_enrolled && env_injecting` (`env_required` otherwise). The Touch ID

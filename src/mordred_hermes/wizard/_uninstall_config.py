@@ -47,6 +47,7 @@ from .._core._config_io import DOTENV_LIMIT, CanonicalPaths, canonical_session, 
 from .._core._plugin_identity import LEGACY_PLUGIN_NAMES, PLUGIN_NAME
 from .._core._policy_io import policy_mapping_from_snapshot
 from .._core._yaml_io import yaml_mapping_from_snapshot
+from ..keyvault._env_reseal import is_mordred_owned_env_key
 from .policy_writer import _bounded_utf8, _canonical_paths, _checked_policy_edit, _PrivateWriteOutcome, _windows
 
 __all__ = [
@@ -59,8 +60,6 @@ __all__ = [
 ]
 
 _MORDRED_PLUGIN_NAMES = frozenset((PLUGIN_NAME, *LEGACY_PLUGIN_NAMES))
-_MEMORY_KEY_ENV = "HERMES_MEMORY_KEY"
-_ENV_PREFIX = "MORDRED_"
 
 
 # -----------------------------------------------------------------------------
@@ -251,10 +250,6 @@ class EnvCleanup:
     error: str | None = None
 
 
-def _is_mordred_key(name: str | None) -> bool:
-    return name is not None and (name == _MEMORY_KEY_ENV or name.startswith(_ENV_PREFIX))
-
-
 def _split_env(text: str) -> tuple[str, str, list[str]]:
     """``(kept_text, removed_text, removed_names)`` -- lines are kept verbatim."""
     from dotenv.parser import parse_stream
@@ -263,7 +258,7 @@ def _split_env(text: str) -> tuple[str, str, list[str]]:
     removed: list[str] = []
     names: list[str] = []
     for binding in parse_stream(io.StringIO(text)):
-        if _is_mordred_key(binding.key):
+        if is_mordred_owned_env_key(binding.key):
             removed.append(binding.original.string)
             if binding.key not in names:
                 names.append(str(binding.key))

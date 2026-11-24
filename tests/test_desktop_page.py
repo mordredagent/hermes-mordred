@@ -1911,8 +1911,9 @@ def test_an_opted_out_env_is_moved_into_the_vault_again():
         vault_step(vault), [REUSE, {"ok": True, "passphrase_reused": True}], "out.body = text(tree)\n" + MOVE + MOVE
     )
     body = result["out"]["body"]
-    assert ".env encryption was turned off earlier, so Hermes uses a plaintext .env." in body
-    assert "is not in it yet" not in body and "hermes-mordred encryption enable env" not in body
+    assert ".env encryption was turned off earlier." in body
+    assert "the vault will hold what is in .env now, and keys that are not in that file are removed" in body
+    assert "plaintext" not in body and "is not in it yet" not in body
     assert result["requests"] == [["/vault/prepare", {}], ["/vault/v2/commit", {"unattended": True}]]
     assert "Restart Hermes Desktop so Hermes reads .env from the vault" in result["text"]
     assert "Restart Hermes Desktop" in result["buttons"]

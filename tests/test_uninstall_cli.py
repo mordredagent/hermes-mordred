@@ -1779,3 +1779,56 @@ def test_env_cleanup_failure_stops_package_removal(plain_install, monkeypatch):
     monkeypatch.setattr(uninstall_cli, "apply_env_cleanup", lambda path, **kw: EnvCleanup(path, error="disk failed"))
     assert run_uninstall(ctx, UninstallOptions(yes=True)) == 1
     assert not runner.uninstalls
+
+
+def _vault_env(installed: Installed) -> bytes:
+    from mordred_hermes.keyvault import vault
+
+    key_id = _identity.vault_identity(installed.root)
+    with vault.open_vault(
+        installed.root, key_id=key_id, backend=installed.backend, store=installed.store, anchor_label=key_id
+    ) as opened:
+        return opened.read_file(".env")
+
+
+def test_desktop_reenable_after_uninstall_keeps_the_memory_key(installed, encrypted_databases, monkeypatch, tmp_path):
+    import contextlib
+    import functools
+    import io
+
+    pytest.importorskip("fastapi")
+    from dotenv import dotenv_values
+
+    from mordred_hermes.desktop import _seams, api
+    from tests.extension._desktop_support import desktop_client
+
+    home, root = installed.home, installed.root
+    assert run_uninstall(installed.context(), UninstallOptions(yes=True)) == 0
+    marker = home / "mordred" / "env-vault.optout"
+    old = dotenv_values(stream=io.StringIO(_vault_env(installed).decode()))
+    assert marker.exists() and "HERMES_MEMORY_KEY" not in (home / ".env").read_text(encoding="utf-8")
+    assert old["HERMES_MEMORY_KEY"]
+    (home / ".env").write_text("OPENROUTER_API_KEY=sk-changed\n# a comment\n", encoding="utf-8")
+
+    for module in (env_decrypt_cli, memory_cli):
+        monkeypatch.setattr(module, "_runtime_gate", lambda **_kw: 0)
+        monkeypatch.setattr(
+            module, "enable", functools.partial(module.enable, backend=installed.backend, store=installed.store)
+        )
+    monkeypatch.setattr(
+        "mordred_hermes.extension.telegram.memory_guard.memory_encryption_active",
+        lambda home=None: memory_marker_path(installed.home).is_file(),
+    )
+    with contextlib.contextmanager(desktop_client)(monkeypatch, tmp_path) as desktop:
+        monkeypatch.setattr(api, "_home", lambda: home)
+        monkeypatch.setattr(_seams, "vault_root", lambda: root)
+        prepared = desktop.post("/vault/prepare", {})
+        assert prepared["ok"] is True and prepared["passphrase_reused"] is True
+        committed = desktop.post(f"/vault/{prepared['flow_id']}/commit", {"unattended": True})
+        assert committed == {"ok": True, "passphrase_reused": True}
+        assert not marker.exists() and not (home / ".env").exists()
+        new = dotenv_values(stream=io.StringIO(_vault_env(installed).decode()))
+        assert new["OPENROUTER_API_KEY"] == "sk-changed" and "OTHER" not in new
+        assert new["HERMES_MEMORY_KEY"] == old["HERMES_MEMORY_KEY"]
+        assert new["MORDRED_MULLVAD_ACCOUNT"] == "1234567890"
+        assert desktop.post("/memory/enable") == {"ok": True, "restart_required": True}

@@ -1699,7 +1699,7 @@ function MemoryStep({ id = null, n, state, blocker = null, goto = null, refresh,
 const VAULT_BODY = 'Hermes keeps its API keys in .env. This step creates Mordred’s encrypted vault on this Mac and moves .env into it. First you get a recovery passphrase of eight words: it is the only way to open the vault if this Mac is lost or the Secure Enclave key is gone. Nothing is created until you confirm that you wrote it down.'
 const VAULT_EXISTS_BODY = 'This Mac already has a vault, but Hermes’s .env is not in it yet. This step moves .env into the vault; the recovery passphrase shown when the vault was created stays the only one.'
 // .env enrolled, then `encryption disable env` (or uninstall) restored the plaintext.
-const VAULT_OPTOUT_BODY = '.env encryption was turned off earlier, so Hermes uses a plaintext .env. This step moves the current .env into the vault, replacing the older copy kept there, and turns encryption back on. The recovery passphrase shown when the vault was created stays the only one.'
+const VAULT_OPTOUT_BODY = '.env encryption was turned off earlier. This step turns it back on: the vault will hold what is in .env now, and keys that are not in that file are removed from the vault copy, except Mordred’s own keys (such as the memory key), which are kept. The recovery passphrase shown when the vault was created stays the only one.'
 // `/vault/prepare` on an existing vault without .env, or with .env opted out: no passphrase exists to show.
 const VAULT_REUSE = 'The vault already exists; its recovery passphrase is the one shown when it was created. .env will be moved into it.'
 const VAULT_DONE = 'Hermes reads .env from the vault when it starts. The recovery passphrase was shown once, when the vault was created.'
