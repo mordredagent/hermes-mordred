@@ -185,6 +185,26 @@ def test_scheduled_conversion_runs_at_native_startup_before_install(home, monkey
         assert _keyed_rows(path, home.key) == [(SECRET,)]
 
 
+def test_scheduled_conversion_finishes_with_desktop_chromium_and_plugin_links(home):
+    root = home.root
+    chrome = root / "browser-profile/chrome"
+    chrome.mkdir(parents=True)
+    (chrome / "SingletonLock").symlink_to("host-12345")
+    _plain_db(chrome / "Cookies.db")
+    external = root.parent / f"{root.name}-zerc20-plugin"
+    external.mkdir()
+    _plain_db(external / "plugin.db")
+    (root / "plugins").mkdir()
+    (root / "plugins/zerc20").symlink_to(external, target_is_directory=True)
+    _runtime_bootstrap._install_database_encryption()
+    assert read_marker(root) == Marker(home.snapshot)
+    assert not _migrate.pending_path(root).exists()
+    for path in (root / "state.db", root / "profiles/work/state.db", chrome / "Cookies.db"):
+        assert not _is_plaintext(path)
+        assert _keyed_rows(path, home.key) == [(SECRET,)]
+    assert _is_plaintext(external / "plugin.db"), "a database outside the Hermes root stays out of scope"
+
+
 def test_startup_conversion_refuses_without_root_memory_enabled_and_continues_plain(home):
     (home.root / "mordred/memory-vault.marker").unlink()
     before = _databases(home.root)
