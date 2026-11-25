@@ -1,0 +1,36 @@
+{
+  "button": {
+    "cancel": "Batalkan",
+    "download": "Unduh",
+    "notNow": "Jangan Sekarang",
+    "ok": "OKE",
+    "showLog": "Tampilkan Log",
+    "stopAndContinue": "Hentikan dan Lanjutkan",
+    "tryAgain": "Coba Lagi"
+  },
+  "installer": {
+    "closeAndRetry": "Mordred masih berjalan. Tutup Mordred, lalu buka lagi penginstal Mordred.",
+    "couldNotStop": "Mordred tidak dapat dihentikan. Mulai ulang Mac, lalu buka lagi penginstal Mordred.",
+    "done": "Mordred telah diinstal dan akan berjalan saat Anda masuk. File cadangannya adalah {path}: file itu saja sudah cukup untuk memulihkan kunci Anda di Mac lain, jadi simpan salinannya di tempat yang aman dan pribadi.",
+    "downloadFailed": "{name} tidak berhasil diunduh. Periksa jaringan, lalu buka lagi penginstal Mordred: penginstal akan melanjutkan dari titik terakhir.",
+    "downloadProgress": "Mengunduh {name}: {percent}% selesai.",
+    "downloadStarted": "Mengunduh {name} (sekitar {size} MB). Penginstal akan terus berjalan dengan sendirinya.",
+    "failed": "Mordred tidak dapat diinstal: {reason}",
+    "fileInTheWay": "{path} menghalangi dan tidak dibuat oleh Mordred. Pindahkan ke tempat lain, lalu buka lagi penginstal Mordred.",
+    "largeModel": "Unduh juga model besar (Bonsai 27B, sekitar 8 GB)? Model ini menulis judul dan topik untuk riwayat Anda. Anda dapat menambahkannya nanti dengan membuka lagi penginstal Mordred.",
+    "needsTools": "Mordred memerlukan Alat Baris Perintah dari Apple. Instal alat tersebut di jendela yang baru saja terbuka, lalu buka lagi penginstal Mordred.",
+    "serverDidNotStop": "Server Mordred tidak berhenti. Tunggu satu menit, lalu buka lagi penginstal Mordred.",
+    "stillRunning": "Mordred masih berjalan (dari instalasi sebelumnya, atau jendela Hermes). Hentikan dan lanjutkan?",
+    "touchIdNext": "Berikutnya, konfirmasikan dengan Touch ID: sekali sekarang untuk menyiapkan kunci Mordred, dan sekali lagi sesaat kemudian saat Mordred mulai berjalan. Tekan OKE, lalu sentuh sensor saat jendela Touch ID muncul.",
+    "touchIdNotConfirmed": "Touch ID tidak dikonfirmasi, sehingga kunci tidak disiapkan. Buka lagi penginstal Mordred.",
+    "touchIdRetry": "Touch ID tidak dikonfirmasi, sehingga belum ada yang disiapkan. Coba lagi?",
+    "unexpected": "Sebuah langkah berhenti secara tak terduga (baris {line}). Buka log untuk melihat langkah mana; lalu buka lagi penginstal Mordred: penginstal akan melanjutkan dari titik terakhir.",
+    "unfinishedKeys": "Kunci dari penyiapan sebelumnya yang belum selesai tidak dapat dihapus. Buka lagi penginstal Mordred."
+  },
+  "touchId": {
+    "approveBrowser": "Izinkan browser “{label}” terhubung ke Mordred. Kode {code}",
+    "credentials": "Baca info masuk Telegram atau email Mordred",
+    "setup": "Siapkan kunci dan enkripsi Mordred",
+    "startup": "Buka brankas dan database Mordred"
+  }
+}

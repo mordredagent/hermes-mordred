@@ -113,7 +113,7 @@ def test_package_pairing_and_help_import_without_aiohttp() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "ws://127.0.0.1:7788/ext" in completed.stdout
+    assert "ws://127.0.0.1:47711/ext" in completed.stdout
     assert "PAIRING=mordred_hermes.extension.pairing" in completed.stdout
 
 
@@ -388,5 +388,5 @@ def test_wizard_extension_serve_parses_host_and_port() -> None:
 def test_wizard_extension_serve_defaults() -> None:
     parser = _build_wizard_parser()
     ns = parser.parse_args(["mordred", "extension", "serve"])
-    assert ns.port == 7788
+    assert ns.port == 47711
     assert ns.host == "127.0.0.1"

@@ -69,7 +69,9 @@ class _ObservationParser(argparse.ArgumentParser):
 def _setup_options(setup: _ObservationParser) -> None:
     # Keep this finite startup grammar aligned with wizard._cli_parsers._add_setup.
     # Setup owns database mutation; it must not first acquire a runtime lease.
-    setup.add_argument("--non-interactive", action="store_true")
+    prompts = setup.add_mutually_exclusive_group()
+    prompts.add_argument("--non-interactive", action="store_true")
+    prompts.add_argument("--no-prompts", action="store_true")
     hermes_setup = setup.add_mutually_exclusive_group()
     hermes_setup.add_argument("--with-hermes-setup", action="store_true")
     hermes_setup.add_argument("--skip-hermes-setup", action="store_true")
@@ -79,6 +81,7 @@ def _setup_options(setup: _ObservationParser) -> None:
     seed = setup.add_mutually_exclusive_group()
     seed.add_argument("--store-seed-for-hd", action="store_true")
     seed.add_argument("--paper-only", action="store_true")
+    setup.add_argument("--backup-file")
 
 
 def _passive_or_maintenance(  # noqa: C901, PLR0915 - finite CLI grammar
@@ -151,7 +154,9 @@ def _passive_or_maintenance(  # noqa: C901, PLR0915 - finite CLI grammar
         if verb == "set-memory-key":
             item.add_argument("--rotate", action="store_true")
     keyvault = child(sub, "keyvault").add_subparsers(required=True)
-    init = child(keyvault, "init").add_mutually_exclusive_group()
+    init_parser = child(keyvault, "init")
+    init_parser.add_argument("--backup-file")
+    init = init_parser.add_mutually_exclusive_group()
     init.add_argument("--paper-only", action="store_true")
     init.add_argument("--store-seed-for-hd", action="store_true")
     child(keyvault, "recover").add_argument("--blob", required=True)

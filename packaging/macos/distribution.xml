@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Mordred</title>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+    <!-- rootVolumeOnly skips the destination step: everything Mordred installs
+         lives in the logged-in user's home, so there is nothing to choose. -->
+    <options customize="never" require-scripts="true" hostArchitectures="arm64" rootVolumeOnly="true"/>
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="14.0"/>
+        </allowed-os-versions>
+    </volume-check>
+    <choices-outline>
+        <line choice="mordred"/>
+    </choices-outline>
+    <choice id="mordred" title="Mordred">
+        <pkg-ref id="com.mordred.installer"/>
+    </choice>
+    <pkg-ref id="com.mordred.installer" version="__VERSION__" onConclusion="none">Mordred-core.pkg</pkg-ref>
+</installer-gui-script>

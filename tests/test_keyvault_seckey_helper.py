@@ -195,6 +195,28 @@ def test_find_helper_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     assert _find_helper() is None
 
 
+def test_sign_helper_follows_the_home_helper_over_local_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A home that names its own helper must sign with it, not with an older
+    # ~/.local/bin binary that may not know the signing commands.
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    (home / ".local" / "bin" / _HELPER_NAME).write_text("#!/bin/sh\n")
+    own = tmp_path / "own-helper"
+    own.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(_seckey_helper.Path, "home", classmethod(lambda _cls: home))
+    monkeypatch.delenv("MORDRED_SEKEY_SIGN_HELPER", raising=False)
+    monkeypatch.setenv("MORDRED_SEKEY_HELPER", str(own))
+    assert _seckey_helper.find_sekey_sign_helper() == str(own)
+
+
+def test_sign_helper_override_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    signer = tmp_path / "signer"
+    signer.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("MORDRED_SEKEY_HELPER", str(tmp_path / "own-helper"))
+    monkeypatch.setenv("MORDRED_SEKEY_SIGN_HELPER", str(signer))
+    assert _seckey_helper.find_sekey_sign_helper() == str(signer)
+
+
 # ---------------------------------------------------------------------------
 # _HelperSecKeyOps happy paths (real subprocess + real crypto)
 # ---------------------------------------------------------------------------

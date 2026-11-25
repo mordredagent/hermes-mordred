@@ -1,0 +1,36 @@
+{
+  "button": {
+    "cancel": "キャンセル",
+    "download": "ダウンロード",
+    "notNow": "今はしない",
+    "ok": "OK",
+    "showLog": "ログを表示",
+    "stopAndContinue": "止めて続ける",
+    "tryAgain": "もう一度"
+  },
+  "installer": {
+    "closeAndRetry": "Mordred がまだ動いています。閉じてから、Mordred のインストーラーをもう一度開いてください。",
+    "couldNotStop": "Mordred を止められませんでした。Mac を再起動してから、Mordred のインストーラーをもう一度開いてください。",
+    "done": "Mordred を入れました。ログインすると自動で起動します。バックアップファイルは {path} です。このファイルだけで別の Mac に鍵を戻せるので、安全で人に見られない場所にコピーを保管してください。",
+    "downloadFailed": "{name} をダウンロードできませんでした。ネットワークを確かめてから、Mordred のインストーラーをもう一度開いてください。止まったところから続けます。",
+    "downloadProgress": "{name} をダウンロード中: {percent}% 完了。",
+    "downloadStarted": "{name} をダウンロードしています（約 {size} MB）。インストーラーはそのまま進みます。",
+    "failed": "Mordred を入れられませんでした: {reason}",
+    "fileInTheWay": "{path} があり、Mordred が作ったものではないため進めません。別の場所に移してから、Mordred のインストーラーをもう一度開いてください。",
+    "largeModel": "大きいモデル（Bonsai 27B、約 8 GB）もダウンロードしますか？履歴の見出しとトピックを作ります。あとで Mordred のインストーラーをもう一度開いて追加することもできます。",
+    "needsTools": "Mordred には Apple のコマンドラインツールが必要です。いま開いた画面から入れてから、Mordred のインストーラーをもう一度開いてください。",
+    "serverDidNotStop": "Mordred のサーバーが止まりませんでした。1 分待ってから、Mordred のインストーラーをもう一度開いてください。",
+    "stillRunning": "Mordred がまだ動いています（前のインストール、または Hermes の画面）。止めて続けますか？",
+    "touchIdNext": "次に Touch ID で確認します。今 1 回（Mordred の鍵の準備）、そのすぐ後にもう 1 回（Mordred の起動）です。OK を押し、Touch ID の画面が出たらセンサーに触れてください。",
+    "touchIdNotConfirmed": "Touch ID が確認されなかったため、鍵を準備できませんでした。Mordred のインストーラーをもう一度開いてください。",
+    "touchIdRetry": "Touch ID が確認されなかったため、まだ何も準備していません。もう一度試しますか？",
+    "unexpected": "途中の手順が予期せず止まりました（{line} 行目）。ログを開くとどの手順か分かります。Mordred のインストーラーをもう一度開くと、止まったところから続けます。",
+    "unfinishedKeys": "前に途中で止まった準備の鍵を消せませんでした。Mordred のインストーラーをもう一度開いてください。"
+  },
+  "touchId": {
+    "approveBrowser": "ブラウザー「{label}」を Mordred に接続します。コード {code}",
+    "credentials": "Mordred の Telegram またはメールのサインイン情報を読む",
+    "setup": "Mordred の鍵と暗号化を準備する",
+    "startup": "Mordred の金庫とデータベースを開く"
+  }
+}

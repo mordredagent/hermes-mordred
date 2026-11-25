@@ -1,0 +1,36 @@
+{
+  "button": {
+    "cancel": "Annuleer",
+    "download": "Download",
+    "notNow": "Niet nu",
+    "ok": "OK",
+    "showLog": "Toon log",
+    "stopAndContinue": "Stop en ga door",
+    "tryAgain": "Probeer opnieuw"
+  },
+  "installer": {
+    "closeAndRetry": "Mordred is nog actief. Sluit Mordred af en open daarna het Mordred-installatieprogramma opnieuw.",
+    "couldNotStop": "Mordred kan niet worden gestopt. Herstart de Mac en open daarna het Mordred-installatieprogramma opnieuw.",
+    "done": "Mordred is geïnstalleerd en start wanneer je inlogt. Het reservekopiebestand is {path}: met dat bestand alleen kun je je sleutels op een andere Mac herstellen, dus bewaar een kopie op een veilige, besloten plek.",
+    "downloadFailed": "{name} is niet gedownload. Controleer het netwerk en open daarna het Mordred-installatieprogramma opnieuw: het gaat verder waar het gebleven was.",
+    "downloadProgress": "{name} wordt gedownload: {percent}% voltooid.",
+    "downloadStarted": "{name} wordt gedownload (ongeveer {size} MB). Het installatieprogramma gaat vanzelf verder.",
+    "failed": "Mordred kan niet worden geïnstalleerd: {reason}",
+    "fileInTheWay": "{path} staat in de weg en is niet door Mordred aangemaakt. Verplaats het naar een andere plek en open daarna het Mordred-installatieprogramma opnieuw.",
+    "largeModel": "Ook het grote model downloaden (Bonsai 27B, ongeveer 8 GB)? Het schrijft koppen en onderwerpen voor je geschiedenis. Je kunt het later toevoegen door het Mordred-installatieprogramma opnieuw te openen.",
+    "needsTools": "Mordred heeft de opdrachtregeltools van Apple nodig. Installeer ze in het venster dat zojuist is geopend en open daarna het Mordred-installatieprogramma opnieuw.",
+    "serverDidNotStop": "De server van Mordred is niet gestopt. Wacht een minuut en open daarna het Mordred-installatieprogramma opnieuw.",
+    "stillRunning": "Mordred is nog actief (een eerdere installatie of een Hermes-venster). Stoppen en doorgaan?",
+    "touchIdNext": "Bevestig hierna met Touch ID: één keer nu om de sleutels van Mordred in te stellen, en zo meteen nog een keer wanneer Mordred start. Klik op ‘OK’ en raak de sensor aan wanneer het Touch ID-venster verschijnt.",
+    "touchIdNotConfirmed": "Touch ID is niet bevestigd, dus de sleutels zijn niet ingesteld. Open het Mordred-installatieprogramma opnieuw.",
+    "touchIdRetry": "Touch ID is niet bevestigd, dus er is nog niets ingesteld. Opnieuw proberen?",
+    "unexpected": "Een stap is onverwacht gestopt (regel {line}). Open het logbestand om te zien welke; open daarna het Mordred-installatieprogramma opnieuw: het gaat verder waar het gebleven was.",
+    "unfinishedKeys": "De sleutels van een eerdere, onvoltooide configuratie konden niet worden verwijderd. Open het Mordred-installatieprogramma opnieuw."
+  },
+  "touchId": {
+    "approveBrowser": "De browser ‘{label}’ toestaan verbinding te maken met Mordred. Code {code}",
+    "credentials": "De Telegram- of mailinloggegevens van Mordred lezen",
+    "setup": "De sleutels en versleuteling van Mordred instellen",
+    "startup": "De kluis en databases van Mordred openen"
+  }
+}

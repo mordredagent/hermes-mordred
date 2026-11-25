@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import mordred_hermes_sekey
 
@@ -21,6 +22,53 @@ final class PresenceTests: XCTestCase {
         try active.authenticated()
         active.revoke()
         XCTAssertThrowsError(try active.check())
+    }
+}
+
+final class PresenceOptionsTests: XCTestCase {
+    func testDefaultsAreTheOriginalSingleKeyCredentialSession() {
+        let options = PresenceOptions(arguments: ["--presence-session", "300"])
+        XCTAssertEqual(options, PresenceOptions(arguments: ["--presence-session", "300", "--max-keys", "1", "--purpose", "credentials"]))
+        XCTAssertEqual(options?.maxKeys, 1)
+        XCTAssertEqual(options?.purpose, .credentials)
+    }
+
+    func testPurposeAndKeyCount() {
+        let options = PresenceOptions(arguments: ["--presence-session", "60", "--purpose", "startup", "--max-keys", "4"])
+        XCTAssertEqual(options?.seconds, 60)
+        XCTAssertEqual(options?.maxKeys, 4)
+        XCTAssertEqual(options?.purpose.reason, "Open Mordred's vault and databases")
+    }
+
+    func testMalformedOptionsAreRefused() {
+        for arguments in [
+            ["--presence-session"],
+            ["--presence-session", "x"],
+            ["--presence-session", "60", "--max-keys"],
+            ["--presence-session", "60", "--max-keys", "0"],
+            ["--presence-session", "60", "--max-keys", "9"],
+            ["--presence-session", "60", "--purpose", "wallet"],
+            ["--presence-session", "60", "--max-keys", "2", "--max-keys", "3"],
+            ["--presence-session", "60", "--other", "1"],
+            ["--sign", "60"],
+        ] {
+            XCTAssertNil(PresenceOptions(arguments: arguments), "\(arguments)")
+        }
+    }
+}
+
+final class PresenceKeysTests: XCTestCase {
+    func testAtMostTheLimitAndEachKeyStaysBoundToItsFile() throws {
+        let first = SHA256.hash(data: Data("one".utf8)), second = SHA256.hash(data: Data("two".utf8))
+        let keys = PresenceKeys(limit: 2)
+        try keys.admit(tag: "aa", digest: first)
+        try keys.admit(tag: "aa", digest: first)
+        try keys.admit(tag: "bb", digest: second)
+        XCTAssertThrowsError(try keys.admit(tag: "cc", digest: first))
+        XCTAssertThrowsError(try keys.admit(tag: "aa", digest: second))
+        let single = PresenceKeys(limit: 1)
+        try single.admit(tag: "aa", digest: first)
+        XCTAssertThrowsError(try single.admit(tag: "bb", digest: second))
     }
 }
 

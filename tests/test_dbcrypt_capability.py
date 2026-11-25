@@ -474,6 +474,10 @@ def test_automatic_native_startup_installs_real_guarded_shim(native_root, monkey
         _runtime_bootstrap._install_database_encryption()
         assert _shim.is_installed()
         assert dbcrypt._runtime._PROVIDER.authority.root == root
+        # Startup admits custody without authenticating; the first use unwraps once.
+        assert sum(op == "ecdh" for op, _ in backend.calls) == 0
+        _ = dbcrypt._runtime._PROVIDER.authority.key
+        _ = dbcrypt._runtime._PROVIDER.authority.key
         assert sum(op == "ecdh" for op, _ in backend.calls) == 1
         assert (root / "mordred/db-key-source.json").read_bytes() == before
     finally:

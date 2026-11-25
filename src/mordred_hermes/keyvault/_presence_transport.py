@@ -22,13 +22,29 @@ class PresenceChannel(Protocol):
 
 
 class Channel:
-    def __init__(self, binary: str, override: tuple[str, str] | None, seconds: int) -> None:
+    def __init__(
+        self,
+        binary: str,
+        override: tuple[str, str] | None,
+        seconds: int,
+        *,
+        max_keys: int = 1,
+        purpose: str = "credentials",
+        reason: str | None = None,
+    ) -> None:
         env = dict(os.environ)
         if override is not None:
             env[override[0]] = override[1]
+        args = [binary, "--presence-session", str(seconds)]
+        if max_keys != 1 or purpose != "credentials":
+            # Only helpers reporting ``presence_stores`` accept these options.
+            args += ["--max-keys", str(max_keys), "--purpose", purpose]
+        if reason is not None:
+            # The Touch ID window's text in the user's language (``presence_reason`` helpers).
+            args += ["--reason", reason]
         try:
             self._process = subprocess.Popen(  # noqa: S603 - trusted helper, no shell
-                [binary, "--presence-session", str(seconds)],
+                args,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,

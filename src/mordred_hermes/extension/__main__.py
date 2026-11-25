@@ -1,7 +1,7 @@
 """``python -m mordred_hermes.extension`` — run the browser-extension
 WebSocket server (:mod:`mordred_hermes.extension.api`) in the foreground.
 
-Serves ``ws://127.0.0.1:7788/ext`` (SPEC.ja.md §6). This is the one-command
+Serves ``ws://127.0.0.1:47711/ext`` (SPEC.ja.md §6). This is the one-command
 launcher for operators who want the extension bridge running without a full
 Hermes gateway process; ``hermes-mordred extension serve``
 (``wizard/_cli_parsers.py``) wires the same :func:`serve` into the wizard CLI.
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 # constants, SPEC.ja.md §6). Hardcoded rather than imported at module scope so
 # importing *this* module never pulls in aiohttp — see the module docstring.
 _DEFAULT_HOST = "127.0.0.1"
-_DEFAULT_PORT = 7788
+_DEFAULT_PORT = 47711
 # Winsock codes (errno on Windows): WSAEADDRINUSE, WSAEACCES.
 _WSAEADDRINUSE = 10048
 _WSAEACCES = 10013
@@ -330,15 +330,62 @@ _VAULT_FATAL_MESSAGE = (
 )
 
 
+def _startup_window() -> Callable[[], None]:
+    """One Touch ID for start-up's key uses (the vault, then the databases).
+
+    Only for a home whose setup enrolled attended keys; the window closes itself
+    (and its helper) a minute after the vault opened. Returns the closer.
+    """
+    from .._core._home import hermes_home
+    from ..keyvault import _presence
+
+    home = hermes_home()
+    if sys.platform != "darwin" or not _presence.operation_presence_configured(home):
+        return lambda: None
+    try:
+        return _presence.open_window(home, "startup")
+    except Exception:  # a window only saves prompts; never stop the server over one
+        logging.getLogger(__name__).warning("start-up presence window not opened")
+        return lambda: None
+
+
+def _open_database_key() -> None:
+    """Unwrap the databases' key now, inside start-up's window.
+
+    The key is otherwise unwrapped at its first use (an import, a recall
+    search), which can come after the window closed and would ask for Touch ID
+    again. A failure is only logged: that first use asks, as before.
+    """
+    from .. import dbcrypt
+
+    provider = dbcrypt._runtime._PROVIDER
+    if provider is None or not provider.runtime_native:
+        return
+    try:
+        provider()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("database key not opened at start (%s)", type(exc).__name__)
+
+
 def _open_vault_in_background(gate: VaultGate) -> None:
     """The start-up unlock, off the event loop. A daemon thread: a stop while the
     Touch ID prompt is still open must not wait for the helper's timeout. A fatal
     vault has already stopped the server (``VaultGate.on_fatal``)."""
+    from ..keyvault._presence import OPERATION_SECONDS
     from .vault_gate import VaultFatal
 
     def run() -> None:
-        with contextlib.suppress(VaultFatal):
-            gate.open_at_start()
+        close = _startup_window()
+        try:
+            with contextlib.suppress(VaultFatal):
+                gate.open_at_start()
+            _open_database_key()
+        finally:
+            # Anything else start-up opens soon after: leave the window that
+            # long, then end it.
+            closer = threading.Timer(OPERATION_SECONDS["startup"], close)
+            closer.daemon = True
+            closer.start()
 
     threading.Thread(target=run, name="vault-open", daemon=True).start()
 
@@ -426,7 +473,7 @@ def _run_forever(server: ExtensionAPIServer, host: str, port: int, color: bool, 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m mordred_hermes.extension",
-        description="Run the Mordred browser-extension WebSocket server (ws://127.0.0.1:7788/ext) in the foreground.",
+        description="Run the Mordred browser-extension WebSocket server (ws://127.0.0.1:47711/ext) in the foreground.",
     )
     parser.add_argument(
         "--host",

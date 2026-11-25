@@ -14,7 +14,8 @@ One agent per Hermes home: the label is ``com.mordred.hermes.extension`` for
 ``~/.hermes`` and gets a short hash of the home's path for any other home, so a
 development home and the real one never replace each other's agent.
 
-The plist never holds a secret. It names the interpreter and module to run and
+The plist never holds a secret. It names the interpreter and the ``hermes-mordred``
+script of the same environment (``extension serve``), and
 copies a few settings from the installing shell: ``HERMES_HOME``, ``PATH``,
 ``PYTHONPATH``, ``LANG`` and the ``MORDRED_*`` settings, except any whose name
 says it is a key, secret, token, password or hash. Secrets belong in the vault's
@@ -31,15 +32,24 @@ import plistlib
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 BASE_LABEL: Final = "com.mordred.hermes.extension"
+#: The console script the agent runs. Hermes's runtime bootstrap (the ``.pth``
+#: that installs database encryption into the process) recognises a process by
+#: this name; ``python -m mordred_hermes.extension`` would run without it, and
+#: the import store refuses such a process (``unprotected_process``).
+CLI_NAME: Final = "hermes-mordred"
 LOG_NAME: Final = "extension-serve.log"
 #: Seconds launchd waits before starting the server again after it exited.
 THROTTLE_SECONDS: Final = 30
+#: How long ``install`` waits for launchd to let go of a replaced agent.
+UNLOAD_WAIT_SECONDS: Final = 15.0
+_UNLOAD_POLL_SECONDS: Final = 0.5
 _COPIED: Final = ("HERMES_HOME", "PATH", "PYTHONPATH", "LANG")
 #: A name part (between underscores) that marks a secret: ``*_API_KEY``, ``*_CLIENT_SECRET``, …
 _SECRET_NAME: Final = re.compile(
@@ -102,8 +112,13 @@ class AgentSpec:
     def log_path(self) -> Path:
         return self.home / "logs" / LOG_NAME
 
+    @property
+    def cli(self) -> str:
+        """``hermes-mordred`` next to the interpreter (the same environment)."""
+        return str(Path(self.python).parent / CLI_NAME)
+
     def program_arguments(self) -> list[str]:
-        serve = ["-m", "mordred_hermes.extension", "--host", self.host, "--port", str(self.port)]
+        serve = [self.cli, "extension", "serve", "--host", self.host, "--port", str(self.port)]
         if self.env_script is None:
             return [self.python, *serve]
         # Arguments, not interpolation: no path is ever parsed by the shell.
@@ -158,6 +173,8 @@ def build_spec(
         if not script.is_file():
             raise AgentError(f"--env-script {env_script} is not a file.")
     interpreter = python or sys.executable
+    if not (Path(interpreter).parent / CLI_NAME).is_file():
+        raise AgentError(f"{CLI_NAME} is not installed next to {interpreter}; reinstall hermes-mordred.")
     for what, path in (("the Hermes home", home), ("--env-script", script), ("the Python interpreter", interpreter)):
         if path is not None and (folder := protected_folder(Path(path))) is not None:
             raise AgentError(
@@ -190,7 +207,7 @@ def install(spec: AgentSpec, *, agents_dir: Path | None = None, run: Runner = _l
     path.parent.mkdir(parents=True, exist_ok=True)
     spec.log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     # An agent already loaded under this label is replaced, not doubled.
-    run(["bootout", f"{_domain()}/{spec.label}"])
+    _unload(spec.label, run)
     tmp = path.with_suffix(".plist.tmp")
     tmp.write_bytes(spec.plist())
     tmp.chmod(0o644)
@@ -199,6 +216,21 @@ def install(spec: AgentSpec, *, agents_dir: Path | None = None, run: Runner = _l
     if loaded.returncode != 0:
         raise AgentError(f"launchctl could not load {path.name} (exit {loaded.returncode}).")
     return path
+
+
+def _unload(label: str, run: Runner) -> None:
+    """Boot the agent out and wait until launchd no longer knows it.
+
+    ``bootout`` returns before a running job is gone; bootstrapping the same
+    label meanwhile fails (launchctl exit 5).
+    """
+    run(["bootout", f"{_domain()}/{label}"])
+    waited = 0.0
+    while run(["print", f"{_domain()}/{label}"]).returncode == 0:
+        if waited >= UNLOAD_WAIT_SECONDS:
+            raise AgentError(f"launchd did not stop {label}; try again in a minute.")
+        time.sleep(_UNLOAD_POLL_SECONDS)
+        waited += _UNLOAD_POLL_SECONDS
 
 
 def uninstall(label: str, *, agents_dir: Path | None = None, run: Runner = _launchctl) -> bool:
@@ -263,6 +295,9 @@ def cli(action: str, *, host: str, port: int, env_script: str | None) -> int:
                 env_script=Path(env_script) if env_script else None,
             )
             path = install(spec)
+            from . import native_host
+
+            native_host.write_endpoint(home, spec.host, spec.port)  # the extension finds it here
             print(f"Installed {path}")
             print(f"Starts at login: ws://{spec.host}:{spec.port}/ext for {spec.home}")
             print(f"Settings copied: {', '.join(sorted(spec.env))}")

@@ -212,8 +212,8 @@ def diagnose_database(home: Path) -> DatabaseStatus:
         return replace(status, capability="unavailable", reason="database intent cannot be checked safely")
     provider = KeyProvider(home=home)
     try:
-        authority = provider.authority
-        authority.check()
+        provider()  # the explicit authentication: acquisition alone does not unwrap
+        provider.authority.check()
         return replace(status, capability="available", authenticated=True, reason=None)
     except Exception:
         return replace(status, capability="unavailable", reason="database authority authentication was refused")

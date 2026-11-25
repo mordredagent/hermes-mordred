@@ -443,6 +443,24 @@ file at `--output` is complete (mode `0600`); verify it and remove the private
 relying on it. Never run `reset` unless an isolated recovery test has verified the
 latest blob or every dependency on the source has been removed.
 
+`keyvault init --backup-file <path>` (also `setup --backup-file <path>`) skips
+the paper ceremony: the seed is never shown, no offline device or air gap is
+needed, and the keyvault's backup, seed included, is saved to that new file
+(mode `0600`), protected by the passphrase. The file and the passphrase are
+then everything recovery needs: `keyvault recover --blob <path>`, pressing
+Enter at the Seed Phrase prompt, reads the seed out of the file. Whoever holds
+both holds the keyvault, so keep the file apart from the passphrase. A backup of
+a paper-only Keyvault holds no seed, and recovering it still needs the 24 words.
+
+`setup --no-prompts --backup-file <path>` (what the Mac installer runs) asks
+nothing in the terminal; only Touch ID dialogs appear. A keyvault it creates
+gets a generated passphrase, which is used for the at-rest vault's recovery too
+and saved inside the backup file with the keyvault's backup. That file alone
+then restores the keyvault: `keyvault recover --blob <path>` asks nothing, and
+whoever holds the file holds the keyvault. A later `setup --no-prompts` reads
+the passphrase back from the same file. Keys confirm with Touch ID unless
+`--unattended-keys` is given.
+
 #### `keyvault eth` — Ethereum keys (HD wallet)
 
 `keyvault init` stores your 24-word seed encrypted by default

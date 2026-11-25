@@ -692,7 +692,14 @@ class TrustStore:
                         "hermes-id", trust.vault_id, trust.hermes_spki, {"hermes_spki": b64u(trust.hermes_spki)}
                     )
                 )
-            reason = f"allow the browser “{label}” to connect to Mordred. Code {code}"
+            from .. import i18n
+
+            reason = i18n.text(
+                "touchId.approveBrowser",
+                "Allow the browser “{label}” to connect to Mordred. Code {code}",
+                label=label,
+                code=code,
+            )
             if trust.kind == "test" and not test_root_allowed():
                 raise TrustError("test_root_refused")
             signatures = trust.v.sign([ENDORSE_CONTEXT + b.encode() for b in bodies], reason)
