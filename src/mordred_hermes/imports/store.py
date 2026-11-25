@@ -109,6 +109,7 @@ keeps a revised row and the merged metadata unpublished until the batch is.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import os
 import re
@@ -176,6 +177,29 @@ __all__ = [
 ]
 
 SUPPORTED_SCHEMA_VERSION: Final = _schema.SCHEMA_VERSION
+
+#: How long an import's writes wait for the database. The recall topics updater
+#: rewrites its tables in one transaction (5-10 s measured with ~19k parts); an
+#: import that waited only BUSY_TIMEOUT_S was refused as busy while it wrote.
+WRITE_BUSY_TIMEOUT_S: Final = 30.0
+_WAIT_LIMIT: contextvars.ContextVar[float | None] = contextvars.ContextVar("import_store_wait_limit", default=None)
+
+
+@contextlib.contextmanager
+def waiting_at_most(seconds: float) -> Iterator[None]:
+    """Bound this context's waits for the database (a revocation keeps its own deadline)."""
+    token = _WAIT_LIMIT.set(max(0.0, seconds))
+    try:
+        yield
+    finally:
+        _WAIT_LIMIT.reset(token)
+
+
+def _write_wait() -> float:
+    limit = _WAIT_LIMIT.get()
+    return WRITE_BUSY_TIMEOUT_S if limit is None else min(WRITE_BUSY_TIMEOUT_S, limit)
+
+
 MAX_SEARCH_LIMIT: Final = 500
 MAX_NEIGHBORS: Final = 50
 _MAX_TERMS: Final = 32
@@ -664,7 +688,7 @@ class ImportStore:
             conn = self._opener(self.path)
             try:
                 conn.isolation_level = None  # explicit BEGIN / COMMIT below
-                conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_S * 1000)}")
+                conn.execute(f"PRAGMA busy_timeout = {int(_write_wait() * 1000)}")
                 yield conn
             finally:
                 conn.close()
@@ -1596,7 +1620,7 @@ def open_import_store(home: Path) -> ImportStore:
             raise ImportRefused("store_unavailable") from None
 
         def opener(target: Path) -> sqlite3.Connection:
-            return _open_guarded(target, authority=authority, timeout=BUSY_TIMEOUT_S)
+            return _open_guarded(target, authority=authority, timeout=_write_wait())
 
         store = ImportStore(path, opener)
         store.initialize(Path(os.path.realpath(home)))
