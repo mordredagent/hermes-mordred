@@ -35,6 +35,10 @@ _DENY_DIRS: Final = frozenset(
 _DB_SUFFIXES: Final = (".db", ".sqlite", ".sqlite3")
 _SIDECARS: Final = ("-wal", "-shm", "-journal")
 _ARCHIVES: Final = (".zip", ".tar", ".gz", ".tgz")
+# Chromium recreates these per-run links under its profile; none can hold a database.
+_CHROMIUM_PROCESS_LINKS: Final = frozenset(
+    {"RunningChromeVersion", "SingletonCookie", "SingletonLock", "SingletonSocket"}
+)
 _Kind = Literal["database", "pending", "journal", "backup", "unknown"]
 _STATE_KINDS: Final[dict[str, _Kind]] = {
     "db-encryption.marker": "journal",
@@ -100,13 +104,51 @@ def _reparse(info: os.stat_result) -> bool:
     return bool(getattr(info, "st_reparse_tag", 0) or getattr(info, "st_file_attributes", 0) & 0x400)
 
 
-def _inspect(child: os.DirEntry[str], path: Path, kind: _Kind | None) -> tuple[Dependency | None, bool]:
+def _is_chromium_process_link_name(parts: tuple[str, ...]) -> bool:
+    """Whether a home-relative path is one of Chromium's per-run link names in ``browser-profile/chrome``."""
+    return len(parts) == 3 and parts[:2] == ("browser-profile", "chrome") and parts[2] in _CHROMIUM_PROCESS_LINKS
+
+
+def _has_chromium_process_link_target(parts: tuple[str, ...], path: Path) -> bool:
+    """Whether a Chromium per-run link has no target, or is its SingletonSocket link to a Unix socket."""
+    try:
+        target = path.stat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return parts[2] == "SingletonSocket" and stat.S_ISSOCK(target.st_mode)
+
+
+def _is_external_plugin_link(parts: tuple[str, ...], path: Path, physical_root: Path) -> bool:
+    """Whether a direct ``plugins/<name>`` link points to an existing directory outside the root; never walks it."""
+    if len(parts) != 2 or parts[0] != "plugins":
+        return False
+    try:
+        target = path.resolve(strict=True)
+        info = target.lstat()
+    except (OSError, RuntimeError):
+        return False
+    return stat.S_ISDIR(info.st_mode) and not _reparse(info) and not target.is_relative_to(physical_root)
+
+
+def _inspect(
+    child: os.DirEntry[str], path: Path, parts: tuple[str, ...], physical_root: Path
+) -> tuple[Dependency | None, bool]:
+    kind = _kind(parts)
     try:
         info = child.stat(follow_symlinks=False)
         if _reparse(info):
             return Dependency(path, "unknown", None), False
-        if kind is None and stat.S_ISLNK(info.st_mode) and stat.S_ISREG(child.stat().st_mode):
-            return None, False  # An alias of an ordinary config/text file carries no database state.
+        if kind is None and stat.S_ISLNK(info.st_mode):
+            if _is_chromium_process_link_name(parts):
+                if _has_chromium_process_link_target(parts, path):
+                    return None, False
+                return Dependency(path, "unknown", None), False
+            if _is_external_plugin_link(parts, path, physical_root):
+                return None, False
+            if stat.S_ISREG(child.stat().st_mode):
+                return None, False  # An alias of an ordinary config/text file carries no database state.
     except OSError:
         return Dependency(path, "unknown", None), False
     if stat.S_ISDIR(info.st_mode):
@@ -149,6 +191,7 @@ def scan_dependencies(root: Path) -> Inventory:
     """
     entries: dict[Path, Dependency] = {}
     directories = [root]
+    physical_root = Path(os.path.realpath(root))
 
     def unknown(path: Path) -> None:
         entries[path] = Dependency(path, "unknown", None)
@@ -166,7 +209,7 @@ def scan_dependencies(root: Path) -> Inventory:
                     parts = _home_parts(path.relative_to(root).parts)
                     if _excluded(parts):
                         continue
-                    dependency, descend = _inspect(child, path, _kind(parts))
+                    dependency, descend = _inspect(child, path, parts, physical_root)
                     if dependency is not None and not _source_binding_metadata(root, path):
                         entries[path] = dependency
                     if descend:

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import os
+import shutil
+import socket
+import tempfile
+from collections.abc import Iterator
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -428,3 +432,113 @@ def test_source_binding_exemption_is_exact_root_path_only(tmp_path, relative):
     result = scan_dependencies(tmp_path)
     assert not result.complete
     assert any(entry.path == path and entry.kind == "unknown" for entry in result.entries)
+
+
+def _external_directory(tmp_path: Path, name: str) -> Path:
+    external = tmp_path.parent / f"{tmp_path.name}-{name}"
+    external.mkdir()
+    return external
+
+
+@pytest.fixture
+def unix_socket() -> Iterator[Path]:
+    """A bound Unix socket under a short path, since AF_UNIX paths are length-limited."""
+    directory = Path(tempfile.mkdtemp(prefix="mordred-sock-", dir="/tmp"))
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(directory / "S"))
+    yield directory / "S"
+    server.close()
+    shutil.rmtree(directory)
+
+
+def _add_desktop_links(home: Path, external: Path, unix_socket: Path) -> list[Path]:
+    """Create the links Hermes Desktop leaves in a macOS home: Chromium per-run links and an external plugin."""
+    chrome = home / "browser-profile/chrome"
+    chrome.mkdir(parents=True)
+    for name in ("RunningChromeVersion", "SingletonCookie", "SingletonLock"):
+        (chrome / name).symlink_to(f"missing-{name}")
+    (chrome / "SingletonSocket").symlink_to(unix_socket)
+    (home / "plugins").mkdir()
+    (home / "plugins/zerc20").symlink_to(external, target_is_directory=True)
+    (chrome / "Cookies.db").write_bytes(b"opaque browser database")
+    (home / "plugins/local").mkdir()
+    (home / "plugins/local/plugin.db").write_bytes(b"opaque plugin database")
+    return [chrome / "Cookies.db", home / "plugins/local/plugin.db"]
+
+
+@_POSIX_PATHS
+@pytest.mark.parametrize("prefix", ["", "profiles/work/"])
+def test_desktop_chromium_and_external_plugin_links_are_skipped(tmp_path: Path, unix_socket: Path, prefix: str) -> None:
+    from mordred_hermes._core._database_inventory import scan_dependencies
+
+    external = _external_directory(tmp_path, "plugin")
+    (external / "plugin.db").write_bytes(b"outside the managed root")
+    home = tmp_path / prefix
+    home.mkdir(parents=True, exist_ok=True)
+    databases = _add_desktop_links(home, external, unix_socket)
+    result = scan_dependencies(tmp_path)
+    assert result.complete
+    assert [(entry.path, entry.kind) for entry in result.entries] == [(path, "database") for path in sorted(databases)]
+
+
+@_POSIX_PATHS
+@pytest.mark.parametrize(
+    "case",
+    [
+        "chromium-regular-file",
+        "chromium-directory",
+        "chromium-lock-to-socket",
+        "chromium-wrong-depth",
+        "plugin-missing",
+        "plugin-loop",
+        "plugin-in-root",
+        "plugin-database-name",
+        "plugin-nested",
+        "managed-cron",
+    ],
+)
+def test_other_desktop_shaped_links_stay_unknown(tmp_path: Path, unix_socket: Path, case: str) -> None:
+    from mordred_hermes._core._database_inventory import scan_dependencies
+
+    external = _external_directory(tmp_path, "target")
+    chrome = tmp_path / "browser-profile/chrome"
+    chrome.mkdir(parents=True)
+    plugins = tmp_path / "plugins"
+    plugins.mkdir()
+    if case == "chromium-regular-file":
+        (external / "file").write_text("x")
+        link = chrome / "SingletonLock"
+        link.symlink_to(external / "file")
+    elif case == "chromium-directory":
+        link = chrome / "SingletonCookie"
+        link.symlink_to(external, target_is_directory=True)
+    elif case == "chromium-lock-to-socket":
+        link = chrome / "SingletonLock"
+        link.symlink_to(unix_socket)
+    elif case == "chromium-wrong-depth":
+        (chrome / "Default").mkdir()
+        link = chrome / "Default/SingletonSocket"
+        link.symlink_to("missing")
+    elif case == "plugin-missing":
+        link = plugins / "zerc20"
+        link.symlink_to(external / "missing", target_is_directory=True)
+    elif case == "plugin-loop":
+        link = plugins / "zerc20"
+        link.symlink_to(link, target_is_directory=True)
+    elif case == "plugin-in-root":
+        (tmp_path / "cron").mkdir()
+        link = plugins / "zerc20"
+        link.symlink_to(tmp_path / "cron", target_is_directory=True)
+    elif case == "plugin-database-name":
+        link = plugins / "zerc20.db"
+        link.symlink_to(external, target_is_directory=True)
+    elif case == "plugin-nested":
+        (plugins / "local").mkdir()
+        link = plugins / "local/zerc20"
+        link.symlink_to(external, target_is_directory=True)
+    else:
+        link = tmp_path / "cron"
+        link.symlink_to(external, target_is_directory=True)
+    result = scan_dependencies(tmp_path)
+    assert not result.complete
+    assert (link, "unknown") in [(entry.path, entry.kind) for entry in result.entries]
