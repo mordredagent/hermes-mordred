@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from .._private_fs import open_private_directory
+from ..config.database_inventory import CHROMIUM_PROCESS_LINK_NAMES, CHROMIUM_SOCKET_LINK_NAME
 from ._database_contracts import DatabaseRefused, Dependency, Inventory, NativeSnapshot, decode_database_source_binding
 from ._database_lifecycle import ExclusiveLease
 
@@ -35,10 +36,6 @@ _DENY_DIRS: Final = frozenset(
 _DB_SUFFIXES: Final = (".db", ".sqlite", ".sqlite3")
 _SIDECARS: Final = ("-wal", "-shm", "-journal")
 _ARCHIVES: Final = (".zip", ".tar", ".gz", ".tgz")
-# Chromium recreates these per-run links under its profile; none can hold a database.
-_CHROMIUM_PROCESS_LINKS: Final = frozenset(
-    {"RunningChromeVersion", "SingletonCookie", "SingletonLock", "SingletonSocket"}
-)
 _Kind = Literal["database", "pending", "journal", "backup", "unknown"]
 _STATE_KINDS: Final[dict[str, _Kind]] = {
     "db-encryption.marker": "journal",
@@ -106,7 +103,7 @@ def _reparse(info: os.stat_result) -> bool:
 
 def _is_chromium_process_link_name(parts: tuple[str, ...]) -> bool:
     """Whether a home-relative path is one of Chromium's per-run link names in ``browser-profile/chrome``."""
-    return len(parts) == 3 and parts[:2] == ("browser-profile", "chrome") and parts[2] in _CHROMIUM_PROCESS_LINKS
+    return len(parts) == 3 and parts[:2] == ("browser-profile", "chrome") and parts[2] in CHROMIUM_PROCESS_LINK_NAMES
 
 
 def _has_chromium_process_link_target(parts: tuple[str, ...], path: Path) -> bool:
@@ -117,7 +114,7 @@ def _has_chromium_process_link_target(parts: tuple[str, ...], path: Path) -> boo
         return True
     except OSError:
         return False
-    return parts[2] == "SingletonSocket" and stat.S_ISSOCK(target.st_mode)
+    return parts[2] == CHROMIUM_SOCKET_LINK_NAME and stat.S_ISSOCK(target.st_mode)
 
 
 def _is_external_plugin_link(parts: tuple[str, ...], path: Path, physical_root: Path) -> bool:
