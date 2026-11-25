@@ -346,8 +346,79 @@ def test_install_ensure_member_only_on_pm_managed_hermes(tmp_path: Path, monkeyp
     monkeypatch.setattr(member, "pm_managed", lambda: False)
     assert install.ensure_member(tmp_path) is False and calls == []
     monkeypatch.setattr(member, "pm_managed", lambda: True)
+    monkeypatch.setattr(member, "read_pm_selection", lambda: {})
     assert install.ensure_member(tmp_path) is True
     assert calls == [tmp_path / "plugins" / "mordred"]
+
+
+def test_list_member_candidates_keeps_pm_home_order_and_enabling_homes_only(tmp_path: Path) -> None:
+    root, disabled, profile = (tmp_path / name / "plugins" for name in ("root", "disabled", "profile"))
+    selection = {root: ["zerc20", "mordred"], disabled: ["zerc20"], profile: ["mordred"]}
+    assert member.list_member_candidates(selection, "mordred") == [root / "mordred", profile / "mordred"]
+
+
+def _member_with_shim(plugin_dir: Path) -> Path:
+    (plugin_dir / "dashboard").mkdir(parents=True)
+    (plugin_dir / "dashboard" / "plugin_api.py").write_text("shim")
+    (plugin_dir / "pyproject.toml").write_text(f"# {member.MARKER}\\n")
+    (plugin_dir / member.PACKAGE).mkdir()
+    return plugin_dir
+
+
+@pytest.mark.usefixtures("posix_member_model")
+@pytest.mark.parametrize(
+    ("present_before", "valid_before", "written", "target", "kept"),
+    [
+        # Both homes hold a member: the first keeps it, the second loses it (issue #323).
+        ({"first", "second"}, {"first", "second"}, set(), "first", {"first"}),
+        # Only the second holds a valid one: it stays there, nothing is moved.
+        ({"first", "second"}, {"second"}, set(), "second", {"second"}),
+        # Running from pm's build writes nothing: the only member must not be removed.
+        ({"second"}, set(), set(), "first", {"second"}),
+        # Two members without bootstraps from older builds, nothing written: keep one.
+        ({"first", "second"}, set(), set(), "first", {"first"}),
+        # The target is written: the duplicate goes.
+        ({"second"}, set(), {"first"}, "first", {"first"}),
+    ],
+)
+def test_install_ensure_member_keeps_one_member_across_enabling_homes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    present_before: set[str],
+    valid_before: set[str],
+    written: set[str],
+    target: str,
+    kept: set[str],
+) -> None:
+    dirs = {name: _member_with_shim(tmp_path / name / "plugins" / "mordred") for name in ("first", "second")}
+    for name in {"first", "second"} - present_before:
+        (dirs[name] / "pyproject.toml").unlink()
+    names = {path: name for name, path in dirs.items()}
+    valid = set(valid_before)
+    calls: list[str] = []
+
+    def fake_ensure(plugin_dir: Path) -> bool:
+        calls.append(names[plugin_dir])
+        if names[plugin_dir] in written:
+            valid.add(names[plugin_dir])
+            (plugin_dir / "pyproject.toml").write_text(f"# {member.MARKER}\\n")
+        return names[plugin_dir] in written
+
+    monkeypatch.setattr(member, "ensure_member", fake_ensure)
+    monkeypatch.setattr(
+        member,
+        "member_status",
+        lambda plugin_dir: {
+            "present": (plugin_dir / "pyproject.toml").exists(),
+            "valid": names[plugin_dir] in valid and (plugin_dir / "pyproject.toml").exists(),
+        },
+    )
+    monkeypatch.setattr(member, "pm_managed", lambda: True)
+    monkeypatch.setattr(member, "read_pm_selection", lambda: {path.parent: ["mordred"] for path in dirs.values()})
+    install.ensure_member(tmp_path / "second")
+    assert calls == [target]
+    assert {name for name, path in dirs.items() if (path / "pyproject.toml").exists()} == kept
+    assert all((path / "dashboard" / "plugin_api.py").read_text() == "shim" for path in dirs.values())
 
 
 @pytest.mark.usefixtures("posix_member_model")
