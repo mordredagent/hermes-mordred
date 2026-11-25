@@ -8,6 +8,7 @@ covered in ``tests/recall``.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 from typing import Any
 
@@ -299,10 +300,23 @@ def test_page_sessions_cannot_ask_for_recommendations() -> None:
     assert svc.calls == []
 
 
-def _translating(conn: Any, payload: dict[str, Any]) -> list[dict[str, Any]]:
+class _InlineExecutor(concurrent.futures.ThreadPoolExecutor):
+    """Runs each job before `submit` returns, so the worker finishes before its future is wrapped."""
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> concurrent.futures.Future[Any]:
+        done: concurrent.futures.Future[Any] = concurrent.futures.Future()
+        done.set_result(fn(*args, **kwargs))
+        return done
+
+
+def _translating(
+    conn: Any, payload: dict[str, Any], executor: concurrent.futures.Executor | None = None
+) -> list[dict[str, Any]]:
     """Dispatch, then wait for the translation the frame started."""
 
     async def run() -> None:
+        if executor is not None:
+            asyncio.get_running_loop().set_default_executor(executor)
         await conn.dispatch(json.dumps(payload))
         await asyncio.gather(*(task for task, _stop in list(conn._recall_translates.values())))
 
@@ -328,6 +342,23 @@ def test_translation_streams_sealed_pieces_and_ends(monkeypatch: Any) -> None:
     assert pieces and {frame["type"] for frame in pieces} == {"recall_translate_piece"}
     wire = json.dumps(pieces, ensure_ascii=False)
     assert "会議" not in wire and "Thursday" not in wire
+    text = "".join(json.loads(decrypt_message(_EK, frame["content"]))["text"] for frame in pieces)
+    assert text == "会議は木曜日です。"
+    assert end == {"id": "t", "type": "recall_translate_end", "ok": True}
+
+
+def test_translation_sends_every_piece_when_the_worker_finishes_first(monkeypatch: Any) -> None:
+    from mordred_hermes.recall import translate as translate_mod
+
+    def fake(text: str, language: str, *, on_piece: Any, cancelled: Any) -> str | None:
+        for piece in ("会議は", "木曜日です。"):
+            on_piece(piece)
+        return None
+
+    monkeypatch.setattr(translate_mod, "translate_selection", fake)
+    payload = {"id": "t", "type": "recall_translate", "text": _sealed("The meeting is on Thursday."), "language": "ja"}
+    *pieces, end = _translating(_conn(_FakeRecall()), payload, _InlineExecutor())
+    assert {frame["type"] for frame in pieces} == {"recall_translate_piece"}
     text = "".join(json.loads(decrypt_message(_EK, frame["content"]))["text"] for frame in pieces)
     assert text == "会議は木曜日です。"
     assert end == {"id": "t", "type": "recall_translate_end", "ok": True}
