@@ -1,4 +1,4 @@
-"""Mordred browser-extension WebSocket API (ws://127.0.0.1:7788/ext).
+"""Mordred browser-extension WebSocket API (ws://127.0.0.1:47711/ext).
 
 Ported from the full-Hermes gateway layer into the mordred_hermes package so
 the extension server ships with the plugin bundle. Hermes-runtime imports

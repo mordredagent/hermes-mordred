@@ -44,19 +44,28 @@ def recheck_seconds() -> float:
 
 
 class Authority:
-    """One checked root/generation lifetime; fresh acquisition always loads native."""
+    """One checked root/generation lifetime; the native key loads on first use.
+
+    Acquisition takes the shared lease and checks the marker against the native
+    source, which needs no hardware authentication. The key itself is unwrapped
+    (Secure Enclave, possibly Touch ID) only when a connection first needs it,
+    so a process that never opens a database never asks for it.
+    """
 
     def __init__(
         self,
         domain: CheckedDatabaseDomain,
         snapshot: NativeSnapshot,
-        key: DatabaseKey,
+        key: DatabaseKey | None,
         lease: RuntimeLease,
         resources: ExitStack,
     ) -> None:
         self._domain = domain
         self._snapshot = snapshot
         self._key: DatabaseKey | None = key
+        #: Serialises the one native unwrap without holding ``_lock``, so
+        #: revocation never waits behind an authentication prompt.
+        self._load_lock = threading.Lock()
         self._lease = lease
         self._resources = resources
         self._pid = os.getpid()
@@ -72,7 +81,7 @@ class Authority:
 
     @classmethod
     def acquire(cls, home: Path) -> Authority:
-        """Load only existing native root custody under preceding shared exclusion."""
+        """Admit existing native root custody under preceding shared exclusion; no unwrap yet."""
         domain = resolve_database_domain(home)
         with ExitStack() as resources:
             lease = resources.enter_context(acquire_runtime(domain.root))
@@ -85,8 +94,7 @@ class Authority:
             snapshot = observe_database_source(root=domain.root)
             if marker.snapshot != snapshot:
                 raise DatabaseRefused("database marker and native source disagree")
-            material = load_database_source(root=domain.root, expected=snapshot)
-            result = cls(domain, snapshot, derive(material), lease, resources.pop_all())
+            result = cls(domain, snapshot, None, lease, resources.pop_all())
             try:
                 result.check()
             except BaseException:
@@ -114,9 +122,36 @@ class Authority:
     def key(self) -> DatabaseKey:
         self.check()
         with self._lock:
-            if self._key is None:
+            if self._terminal:
                 raise DatabaseRefused("database runtime authority is terminal")
-            return self._key
+            if self._key is not None:
+                return self._key
+        return self._load_key()
+
+    def _load_key(self) -> DatabaseKey:
+        """Unwrap the native source once, against the snapshot admitted at acquisition."""
+        with self._load_lock:
+            with self._lock:
+                if self._terminal:
+                    raise DatabaseRefused("database runtime authority is terminal")
+                if self._key is not None:
+                    return self._key
+            try:
+                key = derive(load_database_source(root=self.root, expected=self._snapshot))
+            except BaseException:
+                # As a failed acquisition did: refuse for good and release the lease.
+                self.invalidate("native database source unavailable")
+                raise
+            with self._lock:
+                # Revoked while authenticating: the key must not outlive the authority.
+                if self._terminal:
+                    raise DatabaseRefused("database runtime authority is terminal")
+                self._key = key
+                # Custody may have changed while the native load waited for
+                # authentication: observe it in full before the key is used.
+                self._observed_at = None
+            self.check()
+            return key
 
     def _check_pid(self) -> None:
         """Refuse inherited authority before touching any inherited lock."""

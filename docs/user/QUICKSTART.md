@@ -5,6 +5,48 @@
 > working from a checkout should use [`docs/dev/setup.md`](../dev/setup.md).
 > For every option and prompt, see [`USAGE.md`](./USAGE.md).
 
+## One-step install on a Mac (Apple silicon)
+
+On a Mac with Apple silicon, open **Mordred.pkg** and follow the installer.
+Nothing has to be installed first, and nothing is typed: when macOS asks,
+confirm with Touch ID. The installer runs for the person logged in at the
+screen and takes a few minutes. Its log is
+`~/Library/Logs/Mordred/install.log`.
+
+It puts everything in one folder, `~/.mordred-hermes`, that no other Hermes
+uses:
+
+- a Hermes Agent pinned to a commit Mordred is tested with (an existing
+  `~/.hermes`, Hermes Desktop, or `hermes` on `PATH` is left alone, and
+  `hermes update` is refused for this copy);
+- Mordred with the browser-extension server, and the Secure Enclave helper;
+- the local Bonsai models: the small one (about 1 GB, translation and
+  recommendations) always, the large one (about 8 GB, headlines and topics)
+  after a dialog asks. Models already in `~/models/bonsai/models` (the pinned
+  revisions) are used where they are, never downloaded again. Hermes's own chat
+  model is set to the small one.
+
+Then it creates the keys and turns on the encryption of `.env`, memory and the
+databases. The keys confirm with Touch ID when the servers start and for
+important operations. No passphrase is chosen: one is generated and saved,
+with the keyvault's backup, in **one file**,
+`~/Downloads/mordred-keyvault-backup.mrkv`. That file alone restores the
+keyvault on another Mac (`hermes-mordred keyvault recover --blob FILE` asks
+nothing), so whoever has the file has the keyvault: keep a copy somewhere other
+than the Mac, and keep it private. Last, the small model and the extension
+server are set to start at login.
+
+The package is not signed yet: macOS asks you to allow it once in System
+Settings > Privacy & Security ("Open Anyway").
+
+Developers can run the same installer from a checkout,
+`scripts/install-standalone.sh --from-source .` (`--help` lists the options:
+another folder, other ports, models from another folder, no login services),
+and build the package with `packaging/macos/build-pkg.sh` (see
+[`packaging/macos/README.md`](../../packaging/macos/README.md) for how the
+package works, how to check it and how to try it safely). The rest of this
+guide covers installing into an existing Hermes instead.
+
 ## What is Mordred?
 
 Mordred adds privacy controls to Hermes without modifying Hermes itself. It can

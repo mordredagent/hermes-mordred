@@ -90,6 +90,7 @@ struct Request: Decodable {
     let value_hex: String?
     let messages_hex: [String]?
     let reason: String?
+    let store: String?
 }
 
 struct HelperError: Error {
@@ -126,7 +127,12 @@ func hexEncode(_ d: Data) -> String {
 // This mirrors mordred_hermes._core._home.hermes_home so the SE blobs live under
 // the same keyvault tree the Python side uses for everything else.
 
+// An operation-window session names the store per request (PresenceSession.swift);
+// only its serial ECDH queue sets this, and only for the request it serves.
+var presenceStoreOverride: URL?
+
 func storeDir() -> URL {
+    if let override = presenceStoreOverride { return override }
     let env = ProcessInfo.processInfo.environment
     if let explicit = env["MORDRED_SEKEY_STORE"], !explicit.isEmpty {
         return URL(fileURLWithPath: (explicit as NSString).expandingTildeInPath, isDirectory: true)
@@ -801,9 +807,10 @@ func fail(_ message: String) -> Never {
 // MARK: - Main
 
 if CommandLine.arguments.count > 1 {
-    guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--presence-session",
-          let seconds = Int(CommandLine.arguments[2]) else { fail("invalid presence arguments") }
-    presenceSession(seconds: seconds)
+    guard let options = PresenceOptions(arguments: Array(CommandLine.arguments.dropFirst())) else {
+        fail("invalid presence arguments")
+    }
+    presenceSession(seconds: options.seconds, maxKeys: options.maxKeys, purpose: options.purpose, reason: options.reasonText)
 }
 
 let input = FileHandle.standardInput.readDataToEndOfFile()
@@ -833,7 +840,7 @@ do {
         }
         emit(["shared_hex": hexEncode(try ecdh(tagHex: requireTagHex(request), peerPub: peer))])
     case "capabilities":
-        emit(["presence_session": 1])
+        emit(["presence_session": 1, "presence_keys": 1, "presence_stores": 1, "presence_confirm": 1, "presence_reason": 1])
     case "probe":
         try probe()
         emit(["ok": true])

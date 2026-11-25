@@ -262,3 +262,34 @@ def test_the_working_folder_is_kept_and_a_store_without_places_is_read_once_more
     again = _run(Source.CLAUDE_CODE, store, tmp_path, root)
     assert (again["files_changed"], again["inserted"]) == (1, 0)
     assert store.meta_items("place.claude_code.")[place_key("claude_code", conv)] == "/Users/me/repos/fpga-project-002"
+
+
+def test_an_import_waits_for_the_topics_updaters_write(tmp_path: Path) -> None:
+    """The topics updater holds the write lock for seconds; an import waits instead of failing busy."""
+    import threading
+    import time
+
+    from mordred_hermes.imports.records import Source
+    from mordred_hermes.imports.store import WRITE_BUSY_TIMEOUT_S, ImportStore
+
+    store = ImportStore(tmp_path / "mordred.db", sqlite3.connect)
+    store.initialize(tmp_path)
+    holding = threading.Event()
+
+    def topics_updater() -> None:
+        conn = sqlite3.connect(tmp_path / "mordred.db", isolation_level=None)
+        conn.execute("BEGIN IMMEDIATE")
+        holding.set()
+        time.sleep(3)  # longer than the old 2 s wait
+        conn.execute("COMMIT")
+        conn.close()
+
+    writer = threading.Thread(target=topics_updater)
+    writer.start()
+    assert holding.wait(5)
+    try:
+        run_id = store.run_begin(Source.CLAUDE_CODE)
+    finally:
+        writer.join()
+    assert run_id
+    assert WRITE_BUSY_TIMEOUT_S >= 30

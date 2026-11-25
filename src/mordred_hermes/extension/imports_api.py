@@ -474,10 +474,13 @@ class ImportsApi:
             try:
                 result = await job.run_sync(run_local_import, source, home=home, progress=report)
             except LocalImportError as exc:
+                _log.warning("extension local import of %s refused (%s)", source, exc.code)
                 raise ImportsRefusal(exc.code) from None
             except Exception as exc:
-                _log.warning("extension local import failed (%s)", type(exc).__name__)
-                raise ImportsRefusal(_code_of(exc, "local_import_failed")) from None
+                code = _code_of(exc, "local_import_failed")
+                # The refusal code is a fixed, non-secret word (busy, no_key, ...).
+                _log.warning("extension local import of %s failed (%s: %s)", source, type(exc).__name__, code)
+                raise ImportsRefusal(code) from None
             job.progress = {"phase": "done", "result": result.as_dict()}
 
         return self._start(f"local_import_{source}", work)

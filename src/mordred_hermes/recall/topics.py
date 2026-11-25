@@ -1191,6 +1191,14 @@ def places(conn: sqlite3.Connection, chats: Sequence[tuple[str, str]]) -> dict[s
 RETRY_UNANSWERED_S: Final = 6 * 3600.0
 
 
+def _error_label(exc: BaseException) -> str:
+    """The exception's class, with its stable refusal code when it carries one (never its message)."""
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.replace("_", "").isalnum() and len(code) <= 40:
+        return f"{type(exc).__name__}({code})"
+    return type(exc).__name__
+
+
 class TopicsUpdater:
     """Rebuilds when the committed import runs change, then fills missing lines; one background thread."""
 
@@ -1274,7 +1282,7 @@ class TopicsUpdater:
             try:
                 self.run_once()
             except Exception as exc:  # keep the thread alive; the store may be locked or unkeyed for now
-                self._on_error(type(exc).__name__)
+                self._on_error(_error_label(exc))
             self._idle()
             self._stop.wait(self._interval)
         if self._writer is not None and hasattr(self._writer, "close"):

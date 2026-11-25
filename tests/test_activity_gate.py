@@ -56,6 +56,7 @@ def test_environment_provider_is_not_runtime_authority(protected_runtime, monkey
 def test_activity_uses_existing_runtime_one_unwrap(protected_runtime):
     root, provider, backend = protected_runtime
     authority = provider.authority
+    _ = authority.key  # the runtime's one unwrap (on first use, not at startup)
     calls = list(backend.calls)
     store = open_store(root)
     assert store.meta().profile_home == str(root)

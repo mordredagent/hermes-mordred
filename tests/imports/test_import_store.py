@@ -1023,6 +1023,7 @@ def test_missing_authority_refuses_both_paths_without_creating(protected_runtime
 def test_shared_writing_and_record_reading_reuse_runtime(protected_runtime, monkeypatch):
     home, provider, backend = protected_runtime
     authority = provider.authority
+    _ = authority.key  # the runtime's one unwrap (on first use, not at startup)
     calls = list(backend.calls)
     monkeypatch.delenv("HERMES_MEMORY_KEY", raising=False)
     store = open_import_store(home)

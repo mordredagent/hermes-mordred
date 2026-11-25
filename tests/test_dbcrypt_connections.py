@@ -934,6 +934,10 @@ def test_native_install_cannot_reacquire_or_rebind(native_root, monkeypatch):
     try:
         assert dbcrypt.install(home=root)
         assert dbcrypt._runtime._PROVIDER is provider
+        assert sum(op == "ecdh" for op, _ in backend.calls) == 0  # installing never authenticates
+        _ = provider()
+        assert dbcrypt.install(home=root)
+        _ = provider()
         assert sum(op == "ecdh" for op, _ in backend.calls) == 1
         with pytest.raises(DatabaseRefused):
             dbcrypt.install(home=root / "profiles/work")

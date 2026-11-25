@@ -1,0 +1,36 @@
+{
+  "button": {
+    "cancel": "Hủy",
+    "download": "Tải về",
+    "notNow": "Để sau",
+    "ok": "OK",
+    "showLog": "Hiển thị nhật ký",
+    "stopAndContinue": "Dừng và tiếp tục",
+    "tryAgain": "Thử lại"
+  },
+  "installer": {
+    "closeAndRetry": "Mordred vẫn đang chạy. Hãy đóng Mordred, sau đó mở lại trình cài đặt Mordred.",
+    "couldNotStop": "Không thể dừng Mordred. Hãy khởi động lại máy Mac, sau đó mở lại trình cài đặt Mordred.",
+    "done": "Mordred đã được cài đặt và sẽ khởi động khi bạn đăng nhập. Tệp sao lưu của Mordred là {path}: chỉ riêng tệp này là đủ để khôi phục các khóa của bạn trên một máy Mac khác, vì vậy hãy giữ một bản sao ở nơi an toàn và riêng tư.",
+    "downloadFailed": "Không tải về được {name}. Hãy kiểm tra kết nối mạng, sau đó mở lại trình cài đặt Mordred: trình cài đặt sẽ tiếp tục từ chỗ đã dừng.",
+    "downloadProgress": "Đang tải về {name}: đã xong {percent}%.",
+    "downloadStarted": "Đang tải về {name} (khoảng {size} MB). Trình cài đặt sẽ tự tiếp tục.",
+    "failed": "Không thể cài đặt Mordred: {reason}",
+    "fileInTheWay": "{path} đang cản trở và không phải do Mordred tạo ra. Hãy di chuyển mục này sang nơi khác, sau đó mở lại trình cài đặt Mordred.",
+    "largeModel": "Bạn có muốn tải về cả mô hình lớn (Bonsai 27B, khoảng 8 GB) không? Mô hình này viết tiêu đề và chủ đề cho lịch sử của bạn. Bạn có thể thêm sau bằng cách mở lại trình cài đặt Mordred.",
+    "needsTools": "Mordred cần Công cụ dòng lệnh của Apple. Hãy cài đặt trong cửa sổ vừa mở, sau đó mở lại trình cài đặt Mordred.",
+    "serverDidNotStop": "Máy chủ của Mordred chưa dừng. Hãy đợi một phút, sau đó mở lại trình cài đặt Mordred.",
+    "stillRunning": "Mordred vẫn đang chạy (từ lần cài đặt trước hoặc một cửa sổ Hermes). Dừng Mordred và tiếp tục?",
+    "touchIdNext": "Tiếp theo, hãy xác nhận bằng Touch ID: một lần ngay bây giờ để thiết lập các khóa của Mordred, và một lần nữa ngay sau đó khi Mordred khởi động. Nhấn OK, sau đó chạm vào cảm biến khi cửa sổ Touch ID xuất hiện.",
+    "touchIdNotConfirmed": "Touch ID chưa được xác nhận nên các khóa chưa được thiết lập. Hãy mở lại trình cài đặt Mordred.",
+    "touchIdRetry": "Touch ID chưa được xác nhận nên chưa có gì được thiết lập. Thử lại?",
+    "unexpected": "Một bước đã dừng bất ngờ (dòng {line}). Hãy mở nhật ký để xem đó là bước nào; sau đó mở lại trình cài đặt Mordred: trình cài đặt sẽ tiếp tục từ chỗ đã dừng.",
+    "unfinishedKeys": "Không thể xóa các khóa của lần thiết lập trước chưa hoàn tất. Hãy mở lại trình cài đặt Mordred."
+  },
+  "touchId": {
+    "approveBrowser": "Cho phép trình duyệt “{label}” kết nối với Mordred. Mã {code}",
+    "credentials": "Đọc thông tin đăng nhập Telegram hoặc email của Mordred",
+    "setup": "Thiết lập các khóa và mã hóa của Mordred",
+    "startup": "Mở kho bảo mật và cơ sở dữ liệu của Mordred"
+  }
+}

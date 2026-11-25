@@ -1,0 +1,36 @@
+{
+  "button": {
+    "cancel": "Cancel",
+    "download": "Download",
+    "notNow": "Not now",
+    "ok": "OK",
+    "showLog": "Show Log",
+    "stopAndContinue": "Stop and Continue",
+    "tryAgain": "Try Again"
+  },
+  "installer": {
+    "closeAndRetry": "Mordred is still running. Close it, then open the Mordred installer again.",
+    "couldNotStop": "Mordred could not be stopped. Restart the Mac, then open the Mordred installer again.",
+    "done": "Mordred is installed and starts when you log in. Its backup file is {path}: that file alone restores your keys on another Mac, so keep a copy somewhere safe and private.",
+    "downloadFailed": "{name} did not download. Check the network, then open the Mordred installer again: it continues where it stopped.",
+    "downloadProgress": "Downloading {name}: {percent}% done.",
+    "downloadStarted": "Downloading {name} (about {size} MB). The installer keeps going on its own.",
+    "failed": "Mordred could not be installed: {reason}",
+    "fileInTheWay": "{path} is in the way and was not made by Mordred. Move it elsewhere, then open the Mordred installer again.",
+    "largeModel": "Also download the large model (Bonsai 27B, about 8 GB)? It writes headlines and topics for your history. You can add it later by opening the Mordred installer again.",
+    "needsTools": "Mordred needs Apple's Command Line Tools. Install them in the window that just opened, then open the Mordred installer again.",
+    "serverDidNotStop": "Mordred's server did not stop. Wait a minute, then open the Mordred installer again.",
+    "stillRunning": "Mordred is still running (an earlier install, or a Hermes window). Stop it and continue?",
+    "touchIdNext": "Next, confirm with Touch ID: once now to set up Mordred's keys, and once more in a moment when Mordred starts. Press OK, then touch the sensor when the Touch ID window appears.",
+    "touchIdNotConfirmed": "Touch ID was not confirmed, so the keys were not set up. Open the Mordred installer again.",
+    "touchIdRetry": "Touch ID was not confirmed, so nothing was set up yet. Try again?",
+    "unexpected": "A step stopped unexpectedly (line {line}). Open the log to see which; then open the Mordred installer again: it continues where it stopped.",
+    "unfinishedKeys": "The keys of an earlier, unfinished setup could not be removed. Open the Mordred installer again."
+  },
+  "touchId": {
+    "approveBrowser": "Allow the browser “{label}” to connect to Mordred. Code {code}",
+    "credentials": "Read Mordred's Telegram or mail sign-in",
+    "setup": "Set up Mordred's keys and encryption",
+    "startup": "Open Mordred's vault and databases"
+  }
+}

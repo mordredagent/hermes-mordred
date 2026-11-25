@@ -1053,7 +1053,7 @@ vault       init | change-passphrase | recover | add | status | cat |
             disable-config-decrypt
 encryption  status | enable | disable | purge | change-passphrase
 plugins     list | migrate
-extension   agent | devices | serve
+extension   agent | browsers | devices | native-host | serve
 desktop     install | uninstall | status
 egress      status | set | block | unblock | block-tool | unblock-tool |
             taint

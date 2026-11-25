@@ -313,11 +313,14 @@ def test_cached_hardware_loss_differs_from_record_loss(native_root):
     root, backend, key, _ = native_root
     authority = Authority.acquire(root)
     try:
+        assert authority.key == derive(key)  # the first use unwraps and caches
         backend._keys.clear()
         assert authority.key == derive(key)
         authority.check()
+        second = Authority.acquire(root)  # admission needs no hardware
         with pytest.raises(DatabaseRefused):
-            Authority.acquire(root)
+            _ = second.key
+        assert second.terminal
         assert not authority.terminal
         (root / "mordred/memory-key.wrapped").unlink()
         with pytest.raises(DatabaseRefused):
@@ -436,8 +439,10 @@ def test_changed_marker_during_native_load_releases_failed_acquisition(native_ro
         return material
 
     monkeypatch.setattr(_authority, "load_database_source", change_after_load)
+    authority = _authority.Authority.acquire(root)  # admission alone does not unwrap
     with pytest.raises(DatabaseRefused):
-        _authority.Authority.acquire(root)
+        _ = authority.key
+    assert authority.terminal
     with acquire_exclusive(root):
         pass
 

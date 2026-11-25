@@ -304,6 +304,30 @@ def _validated_seed_and_pow(seed_phrase: str) -> tuple[str, bytes] | None:
     return normalized_seed, pow_bytes
 
 
+def _seed_from_backup_or_report(blob: bytes, passphrase: str) -> tuple[str, bytes] | None:
+    """``(seed phrase, PoW)`` read from the backup with the passphrase, or ``None`` (already reported)."""
+    from cryptography.exceptions import InvalidTag
+
+    from ..keyvault._backup_seed import NoSeedInBackup, seed_from_backup
+    from ..keyvault.backup import BackupCorrupt
+    from ..keyvault.digest import VerificationDigestMismatch
+
+    try:
+        return seed_from_backup(blob, passphrase)
+    except NoSeedInBackup:
+        _term.emit_error(
+            "This backup file does not hold the Seed Phrase (its keyvault kept it on paper only). "
+            "Re-run and type the 24 words."
+        )
+    except InvalidTag:
+        _term.emit_error("Wrong passphrase for this backup file. Nothing was written.")
+    except VerificationDigestMismatch:
+        _term.emit_error("The Seed Phrase in this backup file does not match it. Nothing was written.")
+    except BackupCorrupt as exc:
+        _term.emit_error(f"Backup file rejected: {_term.terminal_safe(str(exc))}")
+    return None
+
+
 def _import_backup_or_report(
     *,
     blob: bytes,
@@ -422,18 +446,38 @@ def recover(
         return 1
     _preflight_recovery_imports()
 
-    prompt_io = resolve_prompt_io(prompt_io)
-    # Security review H5: the Seed Phrase is the keyvault's root secret —
-    # collect it masked (ask_password), never with terminal echo
-    # (ask_text), so it does not land in scrollback or a shared TTY.
-    seed_phrase = prompt_io.ask_password("24-word Seed Phrase")
-    passphrase = prompt_io.ask_password("Passphrase")
+    from ..keyvault import _backup_file
 
-    validated = _validated_seed_and_pow(seed_phrase)
-    if validated is None:
+    try:
+        embedded, blob = _backup_file.unpack(blob)
+    except _backup_file.BackupFileCorrupt:
+        _term.emit_error("This backup file is damaged. Nothing was written.")
         return 1
-    normalized_seed, pow_bytes = validated
-    del validated  # the tuple would otherwise keep the normalized seed alive past the final del
+    prompt_io = resolve_prompt_io(prompt_io)
+    if embedded is not None:
+        # A self-contained backup (`setup --no-prompts`) holds its passphrase and the seed: ask nothing.
+        seed_phrase, passphrase = "", embedded
+    else:
+        # Security review H5: the Seed Phrase is the keyvault's root secret —
+        # collect it masked (ask_password), never with terminal echo
+        # (ask_text), so it does not land in scrollback or a shared TTY.
+        seed_phrase = prompt_io.ask_password("24-word Seed Phrase (press Enter if the backup file holds it)")
+        passphrase = prompt_io.ask_password("Passphrase")
+
+    if not seed_phrase.strip():
+        # A backup of a keyvault that stores its seed carries it: read it back.
+        from_backup = _seed_from_backup_or_report(blob, passphrase)
+        if from_backup is None:
+            return 1
+        seed_phrase, pow_bytes = from_backup
+        del from_backup
+        normalized_seed = ""
+    else:
+        validated = _validated_seed_and_pow(seed_phrase)
+        if validated is None:
+            return 1
+        normalized_seed, pow_bytes = validated
+        del validated  # the tuple would otherwise keep the normalized seed alive past the final del
 
     backend = resolve_backend(backend)
     sink = audit_sink if audit_sink is not None else _stderr_audit_sink
@@ -485,7 +529,11 @@ def cli_recover(args: argparse.Namespace) -> int:
 
 def cli_init(args: argparse.Namespace) -> int:
     """argparse handler for ``keyvault init`` (encrypted seed storage by default)."""
-    return init_keyvault(store_seed_for_hd=getattr(args, "store_seed_for_hd", True))
+    backup_file = getattr(args, "backup_file", None)
+    return init_keyvault(
+        store_seed_for_hd=getattr(args, "store_seed_for_hd", True),
+        backup_file=Path(backup_file) if backup_file else None,
+    )
 
 
 def cli_reset(args: argparse.Namespace) -> int:

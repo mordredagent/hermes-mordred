@@ -1,0 +1,36 @@
+{
+  "button": {
+    "cancel": "取消",
+    "download": "下载",
+    "notNow": "以后",
+    "ok": "好",
+    "showLog": "显示日志",
+    "stopAndContinue": "停止并继续",
+    "tryAgain": "重试"
+  },
+  "installer": {
+    "closeAndRetry": "Mordred 仍在运行。请将其关闭，然后再次打开 Mordred 安装器。",
+    "couldNotStop": "无法停止 Mordred。请重新启动 Mac，然后再次打开 Mordred 安装器。",
+    "done": "Mordred 已安装，登录时会自动启动。它的备份文件是 {path}：仅凭这个文件就能在另一台 Mac 上恢复你的密钥，请将副本保存在安全、私密的地方。",
+    "downloadFailed": "{name} 未能下载。请检查网络，然后再次打开 Mordred 安装器：它会从中断的地方继续。",
+    "downloadProgress": "正在下载 {name}：已完成 {percent}%。",
+    "downloadStarted": "正在下载 {name}（约 {size} MB）。安装器会自动继续进行。",
+    "failed": "无法安装 Mordred：{reason}",
+    "fileInTheWay": "{path} 已存在且并非由 Mordred 创建，因此无法继续。请将其移到别处，然后再次打开 Mordred 安装器。",
+    "largeModel": "要同时下载大模型（Bonsai 27B，约 8 GB）吗？它会为你的历史记录生成标题和主题。你也可以以后再次打开 Mordred 安装器来添加。",
+    "needsTools": "Mordred 需要 Apple 的命令行工具。请在刚刚打开的窗口中安装，然后再次打开 Mordred 安装器。",
+    "serverDidNotStop": "Mordred 的服务器未能停止。请等待一分钟，然后再次打开 Mordred 安装器。",
+    "stillRunning": "Mordred 仍在运行（之前的安装或某个 Hermes 窗口）。要停止它并继续吗？",
+    "touchIdNext": "接下来请使用 Touch ID 确认：现在一次，用于设置 Mordred 的密钥；稍后 Mordred 启动时再确认一次。请点按“好”，然后在 Touch ID 窗口出现时触碰传感器。",
+    "touchIdNotConfirmed": "Touch ID 未得到确认，因此未设置密钥。请再次打开 Mordred 安装器。",
+    "touchIdRetry": "Touch ID 未得到确认，因此尚未进行任何设置。要重试吗？",
+    "unexpected": "某个步骤意外停止（第 {line} 行）。打开日志可查看是哪一步；然后再次打开 Mordred 安装器：它会从中断的地方继续。",
+    "unfinishedKeys": "之前未完成的设置所留下的密钥无法移除。请再次打开 Mordred 安装器。"
+  },
+  "touchId": {
+    "approveBrowser": "允许浏览器“{label}”连接到 Mordred。代码 {code}",
+    "credentials": "读取 Mordred 的 Telegram 或邮件登录信息",
+    "setup": "设置 Mordred 的密钥和加密",
+    "startup": "打开 Mordred 的保险库和数据库"
+  }
+}

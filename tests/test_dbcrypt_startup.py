@@ -278,6 +278,7 @@ def announced(*args, **kwargs):
 
 _startup.runtime_lease = announced
 installed = dbcrypt.install(home=root)
+_runtime._PROVIDER()  # the first database use authenticates; startup itself does not
 print(json.dumps({
     "installed": installed,
     "shim": _shim.is_installed(),
@@ -388,6 +389,8 @@ def test_exclusive_lease_won_after_a_sibling_finished_makes_no_second_conversion
     monkeypatch.setattr(_maintenance, "convert_home", lambda *a, **k: pytest.fail("converted a finished home"))
     _record(root, "busy")
     assert dbcrypt.install(home=root) is True
+    assert sum(op == "ecdh" for op, _ in home.backend.calls) == 0, "startup admits without authenticating"
+    dbcrypt._runtime._PROVIDER()
     assert sum(op == "ecdh" for op, _ in home.backend.calls) == 1, "only the runtime authority authenticates"
     assert not (root / "mordred" / _startup.RECORD_NAME).exists()
 

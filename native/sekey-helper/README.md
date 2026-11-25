@@ -214,8 +214,31 @@ resignation, denial, cancellation, key replacement or protocol failure. The
 main run loop and independent timer remain responsive during authentication and
 pipe I/O. No socket, plaintext credential cache or shared-secret cache exists.
 
-Python enables this only for a matching Telegram/mail credential read inside
-an operation-local trusted host scope. The setting is:
+`--presence-session SECONDS --max-keys N --purpose setup|startup` (helpers
+whose `capabilities` also report `"presence_stores":1`) lets one session use up
+to N (1–8) distinct keys, each bound to the key file it first saw; `--purpose`
+only picks the prompt text. Each request of such a session may name its store
+(`"store"`: an absolute, normalised directory, validated like
+`MORDRED_SEKEY_STORE`), since one operation uses keys in several stores (the
+keyvault's and the vault's); a key is its store and tag. A single-key session
+refuses a `store`. Such a session also takes `{"cmd":"authenticate"}`
+(`capabilities`: `"presence_confirm":1`): it asks for Touch ID without using a
+key, so `setup --no-prompts` confirms before it creates anything and a missed
+or cancelled prompt leaves nothing half made (the command exits 75 and the
+installer offers to try again). `--reason TEXT` (`"presence_reason":1`) replaces the
+purpose's English Touch ID text with the user's language (one line, at most
+240 UTF-8 bytes, no control characters); Python picks it from
+`mordred_hermes/i18n/strings/<language>.json`. Without these options a
+session is the original single-key one with the credentials text. Python opens
+such a session only inside an *operation window* of Mordred's own operations —
+`setup --no-prompts` creating attended keys (300 seconds), and `extension serve`
+opening the vault and the databases at start (60 seconds, only for a home whose
+setup left `mordred/operation-presence`) — and never for Telegram or mail
+credential keys. The window's end kills the child, as do lock, sleep and the
+other revocations above.
+
+Python enables the single-key session only for a matching Telegram/mail
+credential read inside an operation-local trusted host scope. The setting is:
 
 ```yaml
 plugins:

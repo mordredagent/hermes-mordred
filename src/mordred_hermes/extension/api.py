@@ -1,6 +1,6 @@
 """Mordred Extension WebSocket API (gateway side).
 
-Serves ``ws://127.0.0.1:7788/ext`` for the browser extension. Localhost-only,
+Serves ``ws://127.0.0.1:47711/ext`` for the browser extension. Localhost-only,
 no TLS; an Origin check rejects connections from ordinary web pages (only
 ``chrome-extension://`` / ``moz-extension://`` / header-less clients pass).
 
@@ -146,7 +146,7 @@ _RECALL_UID_RE = re.compile(r"[^\x00-\x1f\x7f]{1,512}")
 _log = logging.getLogger(__name__)
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 7788
+DEFAULT_PORT = 47711
 
 # Must match Mordred-Extension's protocol.ts. Outbound history is projected to
 # the newest complete suffix that fits this raw text-frame ceiling.
@@ -242,8 +242,20 @@ _WEB_DIR = Path(__file__).resolve().parent / "web"
 
 
 def _is_extension_origin(origin: str | None) -> bool:
+    """A well-formed extension origin and, once the installer named the Mordred
+    extension's IDs (:mod:`.native_host`), one of those: no other extension."""
     if origin is None:
         return False
+    if not _well_formed_extension_origin(origin):
+        return False
+    from .._core._home import hermes_home
+    from . import native_host
+
+    allowed = native_host.allowed_extension_ids(Path(hermes_home()))
+    return allowed is None or native_host.extension_id_of(origin) in allowed
+
+
+def _well_formed_extension_origin(origin: str) -> bool:
     try:
         parsed = urlsplit(origin)
         return bool(
@@ -281,6 +293,21 @@ def _request_is_loopback(request: web.Request) -> bool:
     except ValueError:
         return False
     return hostname is not None and _is_loopback_host(hostname)
+
+
+def _enrollment_attested(origin: str, code: str, presented: object) -> bool:
+    """Whether a new browser may be approved: always without a native host, else only with its ticket."""
+    from .._core._home import hermes_home
+    from . import native_host
+
+    try:
+        secret = native_host.read_secret(Path(hermes_home()))
+    except (OSError, ValueError):
+        return False
+    if secret is None:
+        return True
+    extension_id = native_host.extension_id_of(origin)
+    return extension_id is not None and native_host.ticket_valid(secret, extension_id, code, presented)
 
 
 def _loopback_origin(host: str, port: int) -> str:
@@ -846,13 +873,22 @@ class _Connection:
         return state == "open"
 
     async def _on_device_enroll(self, msg: dict[str, Any]) -> None:
-        """Ask the owner at the Mac to approve the browser of the pending hello."""
+        """Ask the owner at the Mac to approve the browser of the pending hello.
+
+        Once the installer registered the native host, only a ticket from it
+        (for this connection's check code) raises the approval: another program
+        cannot ask the owner to approve itself.
+        """
         hello = self._hello
         if hello is None or self.authed or hello.code is None:
             await self._send({"type": "auth_fail", "reason": "no_pending_hello"})
             return
         if not self.client_origin or not _is_extension_origin(self.client_origin):
             await self._send({"type": "auth_fail", "reason": "extension_origin_required"})
+            return
+        if not await _in_executor(_enrollment_attested, self.client_origin, hello.code, msg.get("ticket")):
+            self._hello = None
+            await self._send({"type": "auth_fail", "reason": "attestation_required"})
             return
         try:
             await _in_executor(pairing.ensure_master)

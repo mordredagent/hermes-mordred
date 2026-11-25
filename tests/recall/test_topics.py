@@ -489,3 +489,16 @@ def test_a_branch_names_the_folder_its_session_worked_in(store: ImportStore) -> 
     found = topics.TopicIndex(store).events("FPGA", limit=3, suppressed=set())
     assert found.events[0].branches[0].folder == "/repos/fpga"
     assert found.events[0].as_dict()["branches"][0]["folder"] == "/repos/fpga"
+
+
+def test_an_updater_error_is_logged_with_its_refusal_code_and_never_its_message() -> None:
+    from mordred_hermes.imports.store import ImportRefused
+    from mordred_hermes.recall.topics import _error_label
+
+    assert _error_label(ImportRefused("not_armed")) == "ImportRefused(not_armed)"
+    assert _error_label(ValueError("secret text")) == "ValueError"
+
+    class Odd(Exception):
+        code = "has spaces and text"
+
+    assert _error_label(Odd()) == "Odd"

@@ -99,7 +99,9 @@ from pathlib import Path
 from typing import Any, Final, Protocol, TypeAlias
 from weakref import WeakKeyDictionary
 
+from ...activity.store import BUSY_TIMEOUT_S
 from ...keyvault._reset_authority import ResetAuthorization, check_reset_access
+from ..store import waiting_at_most
 from .imap import CancelToken, ImapError, ImapSession, ImapStopped, IoLimits
 from .secrets import MailCredentials, MailSecretsError, mail_dir
 from .source import MAX_MESSAGE_BYTES, TrustedBytes, TrustedMeta
@@ -684,7 +686,9 @@ class FetchLease:
             if time.monotonic() >= deadline:
                 return False
             try:
-                store.run_fail(run_id, ABANDONED_COUNTS)
+                # Each try waits as long as a write used to (BUSY_TIMEOUT_S), never past the deadline.
+                with waiting_at_most(min(BUSY_TIMEOUT_S, deadline - time.monotonic())):
+                    store.run_fail(run_id, ABANDONED_COUNTS)
             except Exception as exc:
                 code = getattr(exc, "code", None)
                 if code == "busy":
