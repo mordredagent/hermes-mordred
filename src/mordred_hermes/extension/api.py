@@ -1359,7 +1359,8 @@ class _Connection:
 
     async def _run_recall_translate(self, mid: str, text: str, language: str, ek: bytes, stop: threading.Event) -> None:
         loop = asyncio.get_running_loop()
-        pieces: asyncio.Queue[str] = asyncio.Queue()
+        pieces: asyncio.Queue[object] = asyncio.Queue()
+        finished = object()
 
         def on_piece(piece: str) -> None:
             loop.call_soon_threadsafe(pieces.put_nowait, piece)
@@ -1372,25 +1373,31 @@ class _Connection:
             except Exception:
                 _log.exception("recall translate failed")
                 return "recall_unavailable"
+            finally:
+                loop.call_soon_threadsafe(pieces.put_nowait, finished)
 
-        # The worker's pieces are queued before its result lands (both go through the loop in order).
+        # The end marker goes through the same queue as the pieces, so every piece is read before it.
+        # The executor future alone is not enough: it can be done while piece callbacks are still pending.
         work: asyncio.Future[str | None] = loop.run_in_executor(None, run)
         try:
-            while not work.done() or not pieces.empty():
-                getter: asyncio.Future[Any] = asyncio.ensure_future(pieces.get())
-                await asyncio.wait({getter, work}, return_when=asyncio.FIRST_COMPLETED)
-                if not getter.done():
-                    getter.cancel()
-                    continue
+            done = False
+            while not done:
+                item = await pieces.get()
+                if item is finished:
+                    break
                 # Pieces that arrived together leave as one frame.
-                piece = str(getter.result())
+                piece = str(item)
                 while not pieces.empty():
-                    piece += pieces.get_nowait()
+                    item = pieces.get_nowait()
+                    if item is finished:
+                        done = True
+                        break
+                    piece += str(item)
                 sealed = self._telegram_seal(ek, json.dumps({"text": piece}, ensure_ascii=False))
                 if not await self._send({"id": mid, "type": "recall_translate_piece", "content": sealed}):
                     stop.set()
                     return
-            error = work.result()
+            error = await work
             end: dict[str, Any] = {"id": mid, "type": "recall_translate_end", "ok": error is None}
             await self._send(end if error is None else {**end, "error": error})
         except asyncio.CancelledError:
