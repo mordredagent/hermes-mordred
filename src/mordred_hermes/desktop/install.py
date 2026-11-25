@@ -142,9 +142,10 @@ def ensure_page(home: Path | None = None) -> bool:
 def ensure_member(home: Path | None = None, *, force: bool = False) -> bool:
     """Keep one pm workspace member for Mordred across all homes (see :mod:`.member`).
 
-    The member goes in the first home, in pm's order, that enables Mordred, and
-    the other enabling homes lose theirs; with none enabled, or without pm, it
-    goes in ``<home>/plugins/mordred/``. Only on pm-managed Hermes installs
+    The member stays in the first enabling home, in pm's order, that already holds
+    a valid one, else goes in the first enabling home; the other enabling homes
+    lose theirs only once the target holds a valid member. With none enabled, or
+    without pm, it goes in ``<home>/plugins/mordred/``. Only on pm-managed Hermes installs
     (Hermes Desktop, source installs), where each update builds a fresh
     environment from its recorded inputs; a plain ``pip install hermes-agent``
     never rebuilds and needs no member. ``force`` skips that check
@@ -160,9 +161,13 @@ def ensure_member(home: Path | None = None, *, force: bool = False) -> bool:
     if not force and not managed:
         return False
     candidates = member.list_member_candidates(member.read_pm_selection(), PLUGIN_ID) if managed else []
-    target, duplicates = (candidates[0], candidates[1:]) if candidates else (plugin_dir(home or _home()), [])
-    removed = [member.remove_member(duplicate) for duplicate in duplicates]
-    return member.ensure_member(target) or any(removed)
+    target = member.select_member_target(candidates, member.member_status) or plugin_dir(home or _home())
+    changed = member.ensure_member(target)
+    if not member.member_status(target).get("valid"):
+        # A process running from pm's build of the member writes nothing; keep the duplicates.
+        return changed
+    removed = [member.remove_member(duplicate) for duplicate in candidates if duplicate != target]
+    return changed or any(removed)
 
 
 def _enable(home: Path) -> None:

@@ -494,10 +494,16 @@ def list_member_candidates(selection: Mapping[Path, Iterable[str]], plugin_id: s
     """Return ``<plugins dir>/<plugin_id>`` for every home that enables it, in pm's home order.
 
     pm builds one environment from every home's selection, and uv refuses two
-    workspace members with the same name, so only the first of these may hold
-    the member; the rest must not.
+    workspace members with the same name, so only one of these may hold the
+    member.
     """
     return [plugins_dir / plugin_id for plugins_dir, names in selection.items() if plugin_id in names]
+
+
+def select_member_target(candidates: Iterable[Path], read_status: Callable[[Path], Mapping[str, Any]]) -> Path | None:
+    """Return the first candidate that already holds a valid member, else the first candidate, else None."""
+    ordered = list(candidates)
+    return next((path for path in ordered if read_status(path).get("valid")), ordered[0] if ordered else None)
 
 
 def read_pm_selection() -> dict[Path, list[str]]:
