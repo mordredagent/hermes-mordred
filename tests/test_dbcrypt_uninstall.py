@@ -334,3 +334,30 @@ def test_uninstall_preflight_refuses_until_backup_recovered(native_root, monkeyp
             preflight(root, lease=lease, purge=False)
         assert _backup.recover_backups(root, lease=lease).outcome == "published"
         assert preflight(root, lease=lease, purge=False) is not None
+
+
+def test_preflight_accepts_wal_index_touched_by_its_own_read(tmp_path, monkeypatch):
+    from mordred_hermes.dbcrypt._uninstall import preflight
+
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    path = tmp_path / "state.db"
+    plain(path)
+    with contextlib.closing(sqlite3.connect(path)) as held:
+        held.execute("PRAGMA journal_mode=WAL")
+        held.execute("SELECT count(*) FROM messages").fetchall()
+        assert (tmp_path / "state.db-shm").exists()
+        with acquire_exclusive(tmp_path) as lease:
+            preflight(tmp_path, lease=lease, purge=True)
+
+
+def test_fingerprint_still_sees_a_committed_wal_write(tmp_path):
+    from mordred_hermes.keyvault._uninstall_authority import fingerprint
+
+    path = tmp_path / "state.db"
+    plain(path)
+    with contextlib.closing(sqlite3.connect(path)) as held:
+        held.execute("PRAGMA journal_mode=WAL")
+        before = fingerprint(tmp_path)
+        with held:
+            held.execute("INSERT INTO messages VALUES ('later')")
+        assert fingerprint(tmp_path) != before

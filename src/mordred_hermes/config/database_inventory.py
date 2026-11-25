@@ -10,3 +10,6 @@ CHROMIUM_SOCKET_LINK_NAME: Final = "SingletonSocket"
 CHROMIUM_PROCESS_LINK_NAMES: Final = frozenset(
     {"RunningChromeVersion", "SingletonCookie", "SingletonLock", CHROMIUM_SOCKET_LINK_NAME}
 )
+
+#: Suffix of SQLite's WAL index file; a read rewrites it, and it holds no committed data.
+SQLITE_WAL_INDEX_SUFFIX: Final = "-shm"
