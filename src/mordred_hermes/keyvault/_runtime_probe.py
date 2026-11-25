@@ -36,6 +36,7 @@ Heavy imports stay function-local; this module imports on any platform.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import re
@@ -46,7 +47,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Final, NamedTuple
+from typing import Final
 
 from .._core._home import hermes_home as _hermes_home
 
@@ -349,6 +350,32 @@ def _managed_runtime_python(home: Path) -> Path | None:
 _SITE_PACKAGES = re.compile(r"'(/[^']+/venv)/lib/python[0-9.]+/site-packages'")
 
 
+def _desktop_launcher_path(home: Path) -> Path:
+    """Return where Hermes Desktop's managed launcher for ``home`` lives (it may not exist)."""
+    return home / "hermes-agent" / ".hermes" / "bin" / "hermes"
+
+
+def _read_desktop_launcher_python(home: Path) -> Path | None:
+    """Return the absolute python path, unresolved, that the Desktop launcher's ``exec`` line runs, or ``None``.
+
+    Hermes writes this launcher as ``exec <store python> -I -c '<bootstrap>' "$@"``
+    (``hermes_cli/_launchers.py`` ``_mint_shell_launcher``). The quoted bootstrap
+    spans many lines, so only the first token after ``exec`` is lexed.
+    """
+    text = _read_file_head(_desktop_launcher_path(home), _LAUNCHER_READ_LIMIT)
+    match = None if text is None else re.search(r"^exec (.*)", text, re.MULTILINE | re.DOTALL)
+    if match is None:
+        return None
+    lexer = shlex.shlex(match.group(1), posix=True)
+    lexer.whitespace_split = True
+    try:
+        token = lexer.get_token()
+    except ValueError:
+        return None
+    python = None if token is None else Path(token)
+    return python if python is not None and python.is_absolute() and _PYTHON_BASENAME.match(python.name) else None
+
+
 def _desktop_runtime_python(home: Path) -> Path | None:
     """The venv python behind Hermes Desktop's managed launcher, if present.
 
@@ -358,7 +385,7 @@ def _desktop_runtime_python(home: Path) -> Path | None:
     exists. Ask the launcher itself: ``--run-module site`` prints ``sys.path``,
     which contains that environment's site-packages.
     """
-    launcher = home / "hermes-agent" / ".hermes" / "bin" / "hermes"
+    launcher = _desktop_launcher_path(home)
     if not launcher.is_file() or not os.access(launcher, os.X_OK):
         return None
     try:
@@ -461,15 +488,20 @@ _SHELL_BASENAMES = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
 _GATEWAY_MODULE_PREFIX = "hermes_cli"
 
 
-class GatewayRuntime(NamedTuple):
+@dataclasses.dataclass(frozen=True)
+class GatewayRuntime:
     """A live ``hermes … gateway run`` process and the interpreter running it.
 
     ``pid`` is ``None`` only if a row's pid could not be read (the interpreter is
     still actionable without it; the pid is diagnostic sugar for the operator).
+    ``python_is_argv0`` is true only when ``python`` is, verbatim, the first token
+    of the gateway's command line (not read from a launcher file, not a
+    ``/proc/<pid>/exe`` answer); it is not part of equality.
     """
 
     pid: int | None
     python: Path
+    python_is_argv0: bool = dataclasses.field(default=False, compare=False)
 
 
 def environment_key(python: Path) -> str:
@@ -722,13 +754,64 @@ def _collect_gateway_runtimes(home: Path) -> list[GatewayRuntime]:
     # Dedupe on (environment, interpreter name): two gateway processes from one
     # venv need one probe, while /usr/bin/python3.11 and /usr/bin/python3.13 share
     # a directory but not a site-packages and must stay separate candidates.
+    # A merged entry keeps python_is_argv0 only if every merged row had it with
+    # the same unresolved path as the kept python.
     found: dict[tuple[str, str], GatewayRuntime] = {}
     for pid, args in rows:
         python = _gateway_python_for_row(pid, args)
         if python is None:
             continue
-        found.setdefault((environment_key(python), python.name), GatewayRuntime(pid=pid, python=python))
+        key = (environment_key(python), python.name)
+        is_argv0 = _is_argv0_python(args, python)
+        kept = found.get(key)
+        found[key] = (
+            GatewayRuntime(pid=pid, python=python, python_is_argv0=is_argv0)
+            if kept is None
+            else dataclasses.replace(
+                kept,
+                python_is_argv0=kept.python_is_argv0 and is_argv0 and python == kept.python,
+            )
+        )
     return list(found.values())
+
+
+def _is_argv0_python(args: str, python: Path) -> bool:
+    """Whether ``python`` is, verbatim, the first token of the ``ps`` command line ``args``."""
+    tokens = args.split()
+    return bool(tokens) and tokens[0] == str(python)
+
+
+def _is_same_file(first: Path, second: Path) -> bool:
+    """Whether both paths resolve to one existing file; ``False`` when either cannot be resolved."""
+    try:
+        return first.resolve(strict=True) == second.resolve(strict=True)
+    except OSError:
+        return False
+
+
+def map_desktop_gateways_to_expected_runtime(
+    gateways: list[GatewayRuntime], home: Path, expected_runtime: Path
+) -> list[GatewayRuntime]:
+    """Return ``gateways`` with each Hermes Desktop standalone one reported as ``expected_runtime``; starts no process.
+
+    A gateway is replaced only when its ``python`` is its command line's first
+    token, equals (not resolved) the interpreter in this home's Desktop launcher
+    ``exec`` line, that interpreter is the file ``expected_runtime`` resolves to,
+    and ``expected_runtime`` passes :func:`_accept_interpreter`. Every other
+    gateway is returned unchanged; a missing or unreadable launcher maps nothing.
+    """
+    standalone = _read_desktop_launcher_python(home)
+    if standalone is None or not _is_same_file(expected_runtime, standalone):
+        return list(gateways)
+    accepted = _accept_interpreter(expected_runtime)
+    if accepted is None:
+        return list(gateways)
+    return [
+        dataclasses.replace(gateway, python=accepted, python_is_argv0=False)
+        if gateway.python_is_argv0 and gateway.python == standalone
+        else gateway
+        for gateway in gateways
+    ]
 
 
 def discover_running_gateway_runtimes(home: Path | None = None) -> list[GatewayRuntime]:

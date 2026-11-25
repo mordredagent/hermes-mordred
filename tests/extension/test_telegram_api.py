@@ -9,12 +9,12 @@ from typing import Any
 import pytest
 
 from mordred_hermes.extension import api as extension_api
-from mordred_hermes.extension import pairing
 from mordred_hermes.extension.crypto import decrypt_message, encrypt_message_v2, hkdf_subkey, key_id
 from mordred_hermes.extension.egress import EgressRoute
 from mordred_hermes.extension.telegram import secrets, service, store, venice
 from mordred_hermes.extension.telegram.ask import AskRequest
 from mordred_hermes.wizard import telegram_cli
+from tests.extension._trust_helpers import authenticate
 
 _AES = b"\x01" * 32
 _EK = hkdf_subkey(_AES, "mordred-extchat-v1", "extchat")
@@ -333,22 +333,12 @@ def test_cli_login_reads_api_credentials_from_env(monkeypatch):
 
 
 def _conn(svc: Any, *, page: bool = False) -> Any:
-    token = "telegram-test-token"
-    pairing._save_pairing(
-        pairing.Pairing(
-            aes_key=_AES,
-            ext_token=token,
-            ext_pubkey_b64="ext",
-            hermes_pubkey_b64="hermes",
-            paired_at=1.0,
-        )
-    )
     conn = extension_api._Connection(_FakeWS(), _no_chat, telegram_service=svc, page_token="p" if page else None)
-    conn.authed = True
     if page:
+        conn.authed = True
         conn._page_authenticated = True
     else:
-        conn._authentication_generation = pairing.authentication_generation_fingerprint(token)
+        authenticate(conn, _EK)
     return conn
 
 

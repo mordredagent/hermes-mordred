@@ -5,8 +5,10 @@
 the owner acknowledged it does ``/vault/{flow_id}/commit`` create the vault
 with THAT passphrase (``_vault_lifecycle.init`` reuses a passphrase remembered
 in the :class:`~..wizard._flow_session.FlowSession`, the CLI's typed-passphrase
-path), create an empty ``.env`` when there is none, and enroll ``.env``. A
-lost answer after commit therefore never loses the phrase. ``/memory/enable``
+path), create an empty ``.env`` when there is none and none is enrolled, and
+enroll ``.env``. With the opt-out marker present (``encryption disable env``)
+the commit turns ``.env`` encryption back on exactly as ``encryption enable env``
+does. A lost answer after commit therefore never loses the phrase. ``/memory/enable``
 is memory-only. Both workers run in a thread under the route's ceremony lock.
 
 Nothing here prints the passphrase, logs it, or puts it in a job or event; the
@@ -317,20 +319,24 @@ def commit(
     flows: VaultFlows,
     unattended: bool | None,
 ) -> dict[str, Any]:
-    """Create the vault with the prepared passphrase (or reuse the existing one) and enroll ``.env``."""
+    """Create the vault with the prepared passphrase (or reuse the existing one) and enroll ``.env``.
+
+    ``vault_exists`` when ``.env`` is enrolled and injected already. Under the
+    opt-out marker ``enable`` seals the on-disk ``.env`` (empty when absent) plus
+    the Mordred-owned keys only the enrolled copy has.
+    """
     from ..keyvault.vault import artifacts_present
     from ..wizard import env_decrypt_cli
 
     state = facts(home, root, platform=platform)
-    if state["optout"]:
-        return {"ok": False, "error": "env_optout"}
-    if state["exists"] and state["env_enrolled"]:
+    if state["exists"] and state["env_enrolled"] and not state["optout"]:
         flows.discard(flow.flow_id)
         return {"ok": False, "error": "vault_exists"}
     stale = _stale_before_wizard(root)
     if stale is not None:
         return stale
-    _ensure_env_file(home)
+    if not state["env_enrolled"]:  # an enrolled copy is never replaced by a file created here
+        _ensure_env_file(home)
     session = _commit_session(unattended, flow.passphrase)
     try:
         with session as active, captured_output():
@@ -385,10 +391,8 @@ def enable_memory(*, home: Path, root: Path, platform: str, active: Callable[[],
 
 
 def prepare_answer(flows: VaultFlows, state: Mapping[str, Any]) -> dict[str, Any]:
-    """``/vault/prepare``: a passphrase for a new vault, a reuse flow for an existing one without ``.env``."""
-    if state["optout"]:
-        return {"ok": False, "error": "env_optout"}
-    if state["exists"] and state["env_enrolled"]:
+    """``/vault/prepare``: a passphrase for a new vault, a reuse flow for one without ``.env`` or opted out."""
+    if state["exists"] and state["env_enrolled"] and not state["optout"]:
         return {"ok": False, "error": "vault_exists"}
     flow = flows.prepare(reuse=bool(state["exists"]))
     words = None if flow.passphrase is None else flow.passphrase.split()

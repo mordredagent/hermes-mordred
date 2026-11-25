@@ -756,7 +756,7 @@ def test_a_kept_login_error_holds_no_password(case: str) -> None:
         lambda c: c.uid("SEARCH", "UID", "1:*\r\nZ4 STORE 1 +FLAGS (\\Seen)"),
         lambda c: c.uid("SEARCH", "UID", "1:*", "SINCE", "1-Oct-2026\x00"),
         lambda c: c.uid("FETCH", "1", "(UID)\nZ5 EXPUNGE"),
-        lambda c: c.authenticate("PLAIN", lambda _challenge: b"\0user\0pass"),  # LOGIN is the only mechanism
+        lambda c: c.authenticate("PLAIN", lambda _challenge: b"\0user\0pass"),  # LOGIN or XOAUTH2 only
     ],
 )
 def test_framing_injection_and_unlisted_arguments_never_leave_the_process(call: Any, connected: Any) -> None:

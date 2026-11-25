@@ -25,12 +25,14 @@ from mordred_hermes.imports.records import (
     content_digest,
 )
 from mordred_hermes.imports.store import (
+    TELEGRAM_RETIRED_ACCOUNT,
     ImportRefused,
     ImportStore,
     WriteResult,
     open_import_store,
     open_import_store_readonly,
 )
+from mordred_hermes.keyvault import _storage as keyvault_storage
 from tests._activity_protection import native_root as native_root
 from tests._activity_protection import protected_runtime as protected_runtime
 
@@ -235,8 +237,8 @@ def test_conversation_messages_hydrate_one_committed_snapshot(tmp_path: Path, mo
     def change_after_selection(conn, uids):
         assert conn.in_transaction
         with sqlite3.connect(store.path) as writer:
+            # Stored text is written once; failing the run hides the conversation instead.
             writer.execute("UPDATE import_runs SET state = 'failed'")
-            writer.execute("UPDATE import_parts SET text = 'changed'")
         return hydrate(conn, uids)
 
     monkeypatch.setattr(store, "_hydrate", change_after_selection)
@@ -254,10 +256,11 @@ def test_initialize_creates_only_import_tables_bound_to_the_profile(tmp_path: Pa
 
     meta = store.initialize(tmp_path)
 
-    assert (meta.schema_version, meta.profile_home) == (2, str(tmp_path.resolve()))
+    assert (meta.schema_version, meta.profile_home) == (3, str(tmp_path.resolve()))
     names = {name for (name,) in rows(store, "SELECT name FROM sqlite_master WHERE type IN ('table', 'trigger')")}
     assert set(_schema.TABLES) | {"import_parts_fts"} <= names and "import_mail_refs" in names
-    assert {"import_parts_fts_insert", "import_parts_fts_delete", "import_parts_fts_update"} <= names
+    assert {"import_parts_fts_delete", "import_parts_text_immutable"} <= names
+    assert not {"import_parts_fts_insert", "import_parts_fts_update"} & names  # the store writes the index
     assert not any(name.startswith("activity_") for name in names)
     assert store.initialize(tmp_path) == meta == store.meta()
 
@@ -288,13 +291,13 @@ def test_a_store_bound_to_another_home_is_refused(tmp_path: Path) -> None:
 def test_a_newer_schema_is_refused_not_recreated(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     with store.connection() as conn:
-        conn.execute("UPDATE import_meta SET value = '3' WHERE key = 'schema_version'")
+        conn.execute("UPDATE import_meta SET value = '4' WHERE key = 'schema_version'")
 
     for call in (lambda: store.initialize(tmp_path), store.meta, store.status):
         with pytest.raises(ImportRefused) as caught:
             call()
         assert caught.value.code == "schema_newer"
-    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("3",)]
+    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("4",)]
 
 
 def test_a_store_without_a_schema_version_is_unavailable(tmp_path: Path) -> None:
@@ -309,13 +312,13 @@ def test_a_store_without_a_schema_version_is_unavailable(tmp_path: Path) -> None
 
 def test_an_older_schema_is_upgraded_through_migrations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = make_store(tmp_path)
-    monkeypatch.setattr(store_module, "SUPPORTED_SCHEMA_VERSION", 3)
+    monkeypatch.setattr(store_module, "SUPPORTED_SCHEMA_VERSION", 4)
     monkeypatch.setattr(
-        _schema, "MIGRATIONS", {**_schema.MIGRATIONS, 2: ("ALTER TABLE import_runs ADD COLUMN note TEXT",)}
+        _schema, "MIGRATIONS", {**_schema.MIGRATIONS, 3: ("ALTER TABLE import_runs ADD COLUMN note TEXT",)}
     )
 
-    assert store.initialize(tmp_path).schema_version == 3
-    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("3",)]
+    assert store.initialize(tmp_path).schema_version == 4
+    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("4",)]
     assert "note" in {row[1] for row in rows(store, "PRAGMA table_info(import_runs)")}
 
 
@@ -332,9 +335,9 @@ def test_a_v1_store_is_upgraded_in_place_to_v2(tmp_path: Path) -> None:
     commit(store, mail_conv(), [mail_message("m1@example.com", "kept across the upgrade")])
     _as_v1(store)
 
-    assert ImportStore(tmp_path / "mordred.db", plain_opener).initialize(tmp_path).schema_version == 2
+    assert ImportStore(tmp_path / "mordred.db", plain_opener).initialize(tmp_path).schema_version == 3
 
-    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("2",)]
+    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("3",)]
     names = {name for (name,) in rows(store, "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')")}
     assert {"import_mail_refs", "import_mail_refs_ref", "import_messages_message_id"} <= names
     assert rows(store, "SELECT count(*) FROM import_mail_refs") == [(0,)]
@@ -343,12 +346,56 @@ def test_a_v1_store_is_upgraded_in_place_to_v2(tmp_path: Path) -> None:
 
 def test_a_missing_migration_step_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = make_store(tmp_path)
-    monkeypatch.setattr(store_module, "SUPPORTED_SCHEMA_VERSION", 3)
+    monkeypatch.setattr(store_module, "SUPPORTED_SCHEMA_VERSION", 4)
 
     with pytest.raises(ImportRefused) as caught:
         store.initialize(tmp_path)
     assert caught.value.code == "store_unavailable"
-    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("2",)]
+    assert rows(store, "SELECT value FROM import_meta WHERE key = 'schema_version'") == [("3",)]
+
+
+#: The v1/v2 character-trigram index, as those schemas created it.
+_TRIGRAM_INDEX = (
+    "CREATE VIRTUAL TABLE import_parts_fts USING fts5("
+    "text, content = 'import_parts', content_rowid = 'id', tokenize = 'trigram')",
+    "INSERT INTO import_parts_fts (import_parts_fts, rank) VALUES ('secure-delete', 1)",
+    "CREATE TRIGGER import_parts_fts_insert AFTER INSERT ON import_parts BEGIN "
+    "INSERT INTO import_parts_fts (rowid, text) VALUES (new.id, new.text); END",
+    "CREATE TRIGGER import_parts_fts_delete AFTER DELETE ON import_parts BEGIN "
+    "INSERT INTO import_parts_fts (import_parts_fts, rowid, text) VALUES ('delete', old.id, old.text); END",
+    "CREATE TRIGGER import_parts_fts_update AFTER UPDATE ON import_parts BEGIN "
+    "INSERT INTO import_parts_fts (import_parts_fts, rowid, text) VALUES ('delete', old.id, old.text); "
+    "INSERT INTO import_parts_fts (rowid, text) VALUES (new.id, new.text); END",
+)
+
+
+def _as_v2(store: ImportStore) -> None:
+    """Swap a fresh store's term index for the v2 trigram index, rebuilt over the stored parts."""
+    with store.connection() as conn:
+        for name in ("import_parts_fts_delete", "import_parts_text_immutable"):
+            conn.execute(f"DROP TRIGGER {name}")
+        conn.execute("DROP TABLE import_parts_fts")
+        for statement in _TRIGRAM_INDEX:
+            conn.execute(statement)
+        conn.execute("INSERT INTO import_parts_fts (import_parts_fts) VALUES ('rebuild')")
+        conn.execute("UPDATE import_meta SET value = '2' WHERE key = 'schema_version'")
+
+
+def test_a_v2_store_gets_the_term_index_rebuilt_in_place(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    commit(store, tg_conv(), [authored(1, text="〆切は月末です"), authored(2, text="the pairing code")])
+    _as_v2(store)
+    matched = rows(store, "SELECT rowid FROM import_parts_fts WHERE import_parts_fts MATCH '\"air\"'")
+    assert len(matched) == 1  # the trigram index matched inside "pairing"
+
+    assert ImportStore(tmp_path / "mordred.db", plain_opener).initialize(tmp_path).schema_version == 3
+
+    names = {name for (name,) in rows(store, "SELECT name FROM sqlite_master WHERE type = 'trigger'")}
+    assert names == {"import_parts_fts_delete", "import_parts_text_immutable"}
+    assert "trigram" not in rows(store, "SELECT sql FROM sqlite_master WHERE name = 'import_parts_fts'")[0][0]
+    assert [hit.source_uid for hit in store.search("締め切り")] == [tg_uid(1)]
+    assert [hit.source_uid for hit in store.search("pair")] == [tg_uid(2)]
+    assert store.search("air") == []
 
 
 # --- write_thread: idempotency and revisions --------------------------------------------------------
@@ -571,11 +618,38 @@ def test_search_matches_japanese_substrings_through_the_index(archive: ImportSto
     assert uids(archive.search("LUNCH")) == [tg_uid(2)]
 
 
-def test_short_terms_match_by_like_and_wildcards_stay_literal(archive: ImportStore) -> None:
-    assert [(hit.source_uid, hit.rank) for hit in archive.search("田中")] == [(tg_uid(1), 0.0)]
+def test_short_words_match_through_the_index_and_symbols_match_nothing(archive: ImportStore) -> None:
+    [hit] = archive.search("田中")
+    assert hit.source_uid == tg_uid(1) and hit.rank < 0.0
     assert uids(archive.search("見積もり 件")) == [tg_uid(1)]
-    assert uids(archive.search("%")) == [tg_uid(3)]
+    assert archive.search("%") == []
     assert archive.search("_") == []
+
+
+def test_words_match_whole_terms_never_inside_a_longer_word(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    commit(
+        store,
+        tg_conv(),
+        [
+            authored(1, text="the pairing code is ready", sent_at=DAY1),
+            authored(2, text="Use AI privately", sent_at=DAY2),
+            authored(3, text="〆切を延ばした。打合せは来週", sent_at=DAY3),
+            authored(4, text="経費精算の締め切りは月末", sent_at=DAY3 + 1),
+        ],
+    )
+
+    assert uids(store.search("AI")) == [tg_uid(2)]  # not "pAIring"
+    assert uids(store.search("pair")) == [tg_uid(1)]  # stems meet: pair / pairing
+    assert uids(store.search("private")) == [tg_uid(2)]
+    assert store.search("lunc") == []
+    assert set(uids(store.search("締め切り"))) == {tg_uid(3), tg_uid(4)}  # 〆切 is normalised
+    assert uids(store.search("打ち合わせ")) == [tg_uid(3)]
+    assert uids(store.search("延ばす")) == [tg_uid(3)]  # the dictionary form of 延ばした
+    assert uids(store.search("精算")) == [tg_uid(4)]  # a part of a compound
+    assert uids(store.search("経費精算")) == [tg_uid(4)]
+    assert store.search("精算経費") == []  # a phrase keeps its order
+    assert store.search("は") == []  # a lone particle is no word
 
 
 @pytest.mark.parametrize("query", ['"見積もり" OR lunch', "NEAR(lunch tomorrow)", "text:lunch", "lun*", '"', "a\x00b'"])
@@ -605,7 +679,7 @@ def test_search_without_text_lists_the_newest_parts_first(archive: ImportStore) 
     [
         ("LUNCH", {}, [tg_uid(2)]),
         ("田中", {}, [tg_uid(1)]),
-        ("%", {}, [tg_uid(3)]),
+        ("%", {}, []),
         ("_", {}, []),
         ('"見積もり" OR lunch', {}, []),
         (None, {"conv_uids": [TG_CONV_UID, TG_CONV_UID]}, [tg_uid(3), tg_uid(2), tg_uid(1), tg_uid(4)]),
@@ -678,9 +752,7 @@ def test_search_with_parts_hydrates_one_snapshot_and_next_call_is_fresh(tmp_path
         if not changed:
             changed = True
             with sqlite3.connect(store.path) as writer:
-                writer.execute(
-                    "UPDATE import_parts SET text = 'budget changed' WHERE source_uid = ?", (first.source_uid,)
-                )
+                # Stored text is written once; a deleted message is the change to miss.
                 writer.execute("DELETE FROM import_parts WHERE source_uid = ?", (second.source_uid,))
                 writer.execute("DELETE FROM import_messages WHERE source_uid = ?", (second.source_uid,))
         return hydrate(conn, source_uids)
@@ -691,7 +763,7 @@ def test_search_with_parts_hydrates_one_snapshot_and_next_call_is_fresh(tmp_path
     assert {found.message for found in hydrated.values()} == {first, second}
     next_hits, next_parts = store.search_with_parts("budget")
     assert uids(next_hits) == [first.source_uid]
-    assert [found.part.text for found in next_parts.values()] == ["budget changed"]
+    assert [found.part.text for found in next_parts.values()] == ["budget original"]
 
 
 def test_search_with_parts_rolls_back_closes_and_sanitizes_hydration_failure(tmp_path, monkeypatch):
@@ -789,7 +861,7 @@ def test_status_reports_counts_and_the_latest_run_only(tmp_path: Path) -> None:
 
     status = store.status()
 
-    assert status["schema_version"] == 2
+    assert status["schema_version"] == 3
     assert status["sources"] == {
         "telegram": {"conversations": 1, "messages": 2, "parts": 2, "uncommitted_messages": 0},
         "mail": {"conversations": 1, "messages": 0, "parts": 0, "uncommitted_messages": 1},
@@ -804,7 +876,7 @@ def test_status_reports_counts_and_the_latest_run_only(tmp_path: Path) -> None:
 
 
 def test_an_empty_store_has_no_runs(tmp_path: Path) -> None:
-    assert make_store(tmp_path).status() == {"schema_version": 2, "sources": {}, "runs": {}, "last_run": None}
+    assert make_store(tmp_path).status() == {"schema_version": 3, "sources": {}, "runs": {}, "last_run": None}
 
 
 def test_sources_count_committed_messages_only(tmp_path: Path) -> None:
@@ -833,8 +905,8 @@ def test_meta_markers_round_trip(tmp_path: Path) -> None:
     store.delete_meta(key)
     store.delete_meta(key)  # absent is fine
     assert store.get_meta(key) is None
-    assert store.get_meta("schema_version") == "2"  # reserved keys stay readable
-    assert store.meta() == store_module.ImportMeta(2, str(tmp_path.resolve()))
+    assert store.get_meta("schema_version") == "3"  # reserved keys stay readable
+    assert store.meta() == store_module.ImportMeta(3, str(tmp_path.resolve()))
 
 
 @pytest.mark.parametrize("key", sorted(store_module.RESERVED_META_KEYS))
@@ -846,7 +918,7 @@ def test_reserved_meta_keys_are_never_settable(tmp_path: Path, key: str) -> None
             change()
         assert raised.value.code == "reserved_meta_key"
     assert rows(store, "SELECT key, value FROM import_meta ORDER BY key") == before
-    assert store.meta().schema_version == 2
+    assert store.meta().schema_version == 3
 
 
 @pytest.mark.parametrize(
@@ -905,6 +977,35 @@ def test_opener_failures_become_content_free_refusals(tmp_path: Path, error: Bas
     assert "import store" in caught.value.refusal.detail
 
 
+def _pend_reset(home: Path) -> None:
+    """Any entry at the reset journal path fences the profile (``assert_keyvault_active``)."""
+    journal = keyvault_storage.reset_journal_path(home / "mordred" / "keyvault")
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_bytes(b"pending")
+
+
+def test_a_pending_keyvault_reset_is_a_store_refusal(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    _pend_reset(tmp_path)
+
+    for call in (lambda: store.initialize(tmp_path), lambda: store.set_meta(TELEGRAM_RETIRED_ACCOUNT, "99")):
+        with pytest.raises(ImportRefused) as caught:
+            call()
+        assert caught.value.code == "store_unavailable"
+        assert caught.value.__cause__ is None and caught.value.__suppress_context__
+        assert str(tmp_path) not in str(caught.value) + caught.value.refusal.detail
+    assert store.get_meta(TELEGRAM_RETIRED_ACCOUNT) is None
+
+
+def test_a_pending_keyvault_reset_refuses_before_creating_a_store(tmp_path: Path) -> None:
+    _pend_reset(tmp_path)
+
+    with pytest.raises(ImportRefused) as caught:
+        ImportStore(tmp_path / "mordred.db", plain_opener).initialize(tmp_path)
+    assert caught.value.code == "store_unavailable"
+    assert not (tmp_path / "mordred.db").exists()
+
+
 # --- shared runtime protection (fake custody, real SQLCipher) -------------------------------------
 
 
@@ -922,6 +1023,7 @@ def test_missing_authority_refuses_both_paths_without_creating(protected_runtime
 def test_shared_writing_and_record_reading_reuse_runtime(protected_runtime, monkeypatch):
     home, provider, backend = protected_runtime
     authority = provider.authority
+    _ = authority.key  # the runtime's one unwrap (on first use, not at startup)
     calls = list(backend.calls)
     monkeypatch.delenv("HERMES_MEMORY_KEY", raising=False)
     store = open_import_store(home)

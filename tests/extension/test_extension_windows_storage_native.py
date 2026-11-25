@@ -1,4 +1,4 @@
-"""Actual NTFS admission for extension pairing/history storage (Windows hosts only)."""
+"""Actual NTFS admission for extension master-key/history storage (Windows hosts only)."""
 
 from __future__ import annotations
 
@@ -14,11 +14,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from mordred_hermes._private_fs import open_private_directory
 from mordred_hermes.extension import _windows_storage as storage
-from mordred_hermes.extension import crypto as xc
 from mordred_hermes.extension import history, pairing
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="actual Windows extension storage admission")
@@ -29,7 +27,7 @@ def icacls(path: Path) -> bytes:
 
 
 def contents(directory: Path) -> dict[str, str]:
-    """File digests only: never place PEM/aes_key/ext_token bytes in assert operands."""
+    """File digests only: never place aes_key bytes in assert operands."""
     return {
         entry.name: hashlib.sha256(entry.read_bytes()).hexdigest()
         for entry in sorted(directory.iterdir())
@@ -49,34 +47,35 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     pairing._invalidate_state_cache()
 
 
+# A master that differs from the fixture's, for the write paths.
+REPLACEMENT = pairing.Pairing(
+    aes_key=b"\x01" * 32, ext_token="", ext_pubkey_b64="", hermes_pubkey_b64="", paired_at=1.0
+)
+
+
 @pytest.fixture
-def paired(home: Path) -> str:
-    code, _expires = pairing.generate_code()
-    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
-    result = pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x11" * 32))
+def paired(home: Path) -> pairing.Pairing:
+    master = pairing.ensure_master()
     history.save_messages([{"role": "user", "content": "hello"}])
-    return str(result["ext_token"])
+    return master
 
 
 def refused_operations() -> list[Callable[[], object]]:
     return [
-        pairing.generate_code,
+        pairing.ensure_master,
         pairing.load_pairing,
-        pairing.attest_pubkey_spki_b64,
-        lambda: pairing.code_consumed("MORT-AAAAAAAA-BBBBBBBB"),
-        lambda: pairing.claim_e2e_replay_identities(("c" * 64,)),
+        lambda: pairing._save_pairing(REPLACEMENT),
         history.load_history,
         history.clear,
         pairing.clear_pairing,
     ]
 
 
-def test_native_round_trip_keeps_exact_private_descriptors(paired: str, home: Path) -> None:
-    valid = pairing.validate_token(paired)
-    assert valid
+def test_native_round_trip_keeps_exact_private_descriptors(paired: pairing.Pairing, home: Path) -> None:
+    assert pairing.load_pairing() == paired
     assert history.projected_history().turns == [{"role": "user", "content": "hello"}]
     names = sorted(entry.name for entry in (home / "extension").iterdir())
-    assert names == [".mordred-fs.lock", "attest_key.pem", "history.enc", "pending.json", "state.json"]
+    assert names == [".mordred-fs.lock", "history.enc", "state.json"]
     # The foundation's exact-private admission re-checks every stored file.
     with open_private_directory(home / "extension") as checked:
         assert all(checked.stat(name).size > 0 for name in names[1:])
@@ -93,8 +92,8 @@ def test_native_inherited_extension_directory_is_refused_without_repair(home: Pa
     assert list(directory.iterdir()) == []
 
 
-@pytest.mark.parametrize("target", ["extension", "state.json", "pending.json", "attest_key.pem", ".mordred-fs.lock"])
-def test_native_broadened_acl_refuses_without_repair(paired: str, home: Path, target: str) -> None:
+@pytest.mark.parametrize("target", ["extension", "state.json", "history.enc", ".mordred-fs.lock"])
+def test_native_broadened_acl_refuses_without_repair(paired: pairing.Pairing, home: Path, target: str) -> None:
     directory = home / "extension"
     path = directory if target == "extension" else directory / target
     subprocess.run(["icacls.exe", str(path), "/grant", "*S-1-1-0:(R)"], check=True, capture_output=True)
@@ -102,8 +101,7 @@ def test_native_broadened_acl_refuses_without_repair(paired: str, home: Path, ta
     checks = {
         "extension": pairing.load_pairing,
         "state.json": pairing.load_pairing,
-        "pending.json": pairing.generate_code,
-        "attest_key.pem": pairing.attest_pubkey_spki_b64,
+        "history.enc": history.load_history,
         ".mordred-fs.lock": pairing.load_pairing,
     }
     with pytest.raises(storage.ExtensionStorageError):
@@ -112,17 +110,17 @@ def test_native_broadened_acl_refuses_without_repair(paired: str, home: Path, ta
     assert contents(directory) == before
 
 
-def test_native_hardlinked_state_refuses_without_change(paired: str, home: Path) -> None:
+def test_native_hardlinked_state_refuses_without_change(paired: pairing.Pairing, home: Path) -> None:
     directory = home / "extension"
     os.link(directory / "state.json", directory / "alias")
     before = contents(directory)
-    for operation in (pairing.load_pairing, lambda: pairing.save_channel_key("C1", b"\x01" * 32)):
+    for operation in (pairing.load_pairing, lambda: pairing._save_pairing(REPLACEMENT)):
         with pytest.raises(storage.ExtensionStorageError):
             operation()
     assert contents(directory) == before
 
 
-def test_native_extension_junction_is_refused_without_touching_target(paired: str, home: Path) -> None:
+def test_native_extension_junction_is_refused_without_touching_target(paired: pairing.Pairing, home: Path) -> None:
     directory = home / "extension"
     target = home / "junction target"
     directory.rename(target)
@@ -136,8 +134,7 @@ def test_native_extension_junction_is_refused_without_touching_target(paired: st
     finally:
         directory.rmdir()
         target.rename(directory)
-    valid = pairing.validate_token(paired)
-    assert valid
+    assert pairing.load_pairing() == paired
 
 
 _HOLDER = """
@@ -149,7 +146,7 @@ with open_private_directory(sys.argv[1]) as directory, directory.transaction():
 """
 
 
-def test_native_lock_held_by_another_process_serializes_mutation(paired: str, home: Path) -> None:
+def test_native_lock_held_by_another_process_serializes_mutation(paired: pairing.Pairing, home: Path) -> None:
     holder = subprocess.Popen(
         [sys.executable, "-u", "-c", _HOLDER, str(home / "extension")],
         stdin=subprocess.PIPE,
@@ -163,7 +160,7 @@ def test_native_lock_held_by_another_process_serializes_mutation(paired: str, ho
 
         def mutate() -> None:
             try:
-                done.put(pairing.generate_code())
+                done.put(pairing._save_pairing(REPLACEMENT))
             except BaseException as exc:  # pragma: no cover - reported through the queue
                 done.put(exc)
 
@@ -175,5 +172,6 @@ def test_native_lock_held_by_another_process_serializes_mutation(paired: str, ho
         with contextlib.suppress(Exception):
             holder.communicate("release\n", timeout=20)
     outcome: Any = done.get(timeout=20)
-    assert isinstance(outcome, tuple) and outcome[0].startswith("MORT-")
+    assert not isinstance(outcome, BaseException)
+    assert pairing.load_pairing() == REPLACEMENT
     assert holder.returncode == 0

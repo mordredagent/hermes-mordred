@@ -172,7 +172,7 @@ def _mail_runs(conn: sqlite3.Connection) -> tuple[dict[str, int], dict[str, Any]
         str(state): int(count)
         for state, count in conn.execute(
             "SELECT state, count(*) FROM import_runs WHERE source = ? GROUP BY state ORDER BY state", (_SOURCE,)
-        )
+        ).fetchall()
     }
     last = conn.execute(
         "SELECT state, started_at, finished_at, counts_json FROM import_runs WHERE source = ? "
@@ -199,7 +199,7 @@ def mail_store_status(store: ImportStore) -> dict[str, Any]:
             for account, raw in conn.execute(
                 "SELECT account, own_addresses_json FROM import_accounts WHERE source = ? ORDER BY account",
                 (_SOURCE,),
-            )
+            ).fetchall()
         }
     return {
         "schema_version": summary["schema_version"],

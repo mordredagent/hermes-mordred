@@ -133,7 +133,10 @@ class _Recorder:
 
     def execute(self, sql: str, *_args: Any) -> Any:
         self.queries.append(sql)
-        return iter(())
+        return self
+
+    def fetchall(self) -> list[Any]:
+        return []
 
 
 def test_without_exclusions_the_check_reads_only_the_markers() -> None:

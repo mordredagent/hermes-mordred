@@ -94,6 +94,11 @@ MAIL_SETUP_FALLBACK: Final = "mail_setup_failed"
 #: ``imap_sync.ERROR_CODES`` (a test pins that every one of them is here) plus the route's refusals.
 MAIL_FETCH_CODES: Final = frozenset(
     {
+        # Gmail signed in with Google (imports/mail/oauth.py): the access token could not be had.
+        "gmail_oauth_unconfigured",
+        "gmail_oauth_expired",
+        "gmail_oauth_unreachable",
+        "gmail_oauth_failed",
         "unsupported_platform",
         "mail_not_configured",
         "memory_encryption_required",

@@ -627,7 +627,9 @@ class TestResetConfirmation:
         assert prompt.asked
         assert root.exists()  # nothing deleted on abort
         assert _deleted(backend) == set()
-        assert "aborted" in capsys.readouterr().out.lower()
+        out = capsys.readouterr().out
+        assert "Reset aborted — nothing was deleted." in out
+        assert "reset journal" not in out
 
     def test_correct_phrase_proceeds(self, tmp_path: Path) -> None:
         root = _build_keyvault(tmp_path, ["default"])
@@ -678,6 +680,11 @@ class TestResetConfirmation:
         assert _storage.reset_journal_path(root).is_file()
         assert _storage.read_generation_epoch(root) == epoch_before
         assert "\x1b" not in captured.out + captured.err
+        assert (
+            "Reset aborted — earlier progress is kept in the reset journal; nothing further was deleted."
+            in captured.out
+        )
+        assert "nothing was deleted" not in captured.out
         assert key_id not in captured.err
         assert "payments\\n\\x1b[2Jowned" in captured.err
 

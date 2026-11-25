@@ -1,0 +1,36 @@
+{
+  "button": {
+    "cancel": "Annuler",
+    "download": "Télécharger",
+    "notNow": "Plus tard",
+    "ok": "OK",
+    "showLog": "Afficher le journal",
+    "stopAndContinue": "Arrêter et continuer",
+    "tryAgain": "Réessayer"
+  },
+  "installer": {
+    "closeAndRetry": "Mordred est toujours en cours d’exécution. Fermez-le, puis ouvrez à nouveau le programme d’installation de Mordred.",
+    "couldNotStop": "Impossible d’arrêter Mordred. Redémarrez le Mac, puis ouvrez à nouveau le programme d’installation de Mordred.",
+    "done": "Mordred est installé et s’ouvre lorsque vous vous connectez. Son fichier de sauvegarde est {path} : ce fichier suffit à lui seul pour restaurer vos clés sur un autre Mac, alors conservez-en une copie dans un endroit sûr et privé.",
+    "downloadFailed": "{name} n’a pas pu être téléchargé. Vérifiez le réseau, puis ouvrez à nouveau le programme d’installation de Mordred : il reprendra là où il s’est arrêté.",
+    "downloadProgress": "Téléchargement de {name} : {percent} % effectué.",
+    "downloadStarted": "Téléchargement de {name} (environ {size} MB). Le programme d’installation continue tout seul.",
+    "failed": "Impossible d’installer Mordred : {reason}",
+    "fileInTheWay": "{path} gêne l’installation et n’a pas été créé par Mordred. Déplacez-le ailleurs, puis ouvrez à nouveau le programme d’installation de Mordred.",
+    "largeModel": "Télécharger aussi le grand modèle (Bonsai 27B, environ 8 GB) ? Il rédige des titres et des sujets pour votre historique. Vous pourrez l’ajouter plus tard en ouvrant à nouveau le programme d’installation de Mordred.",
+    "needsTools": "Mordred a besoin des outils de ligne de commande d’Apple. Installez-les dans la fenêtre qui vient de s’ouvrir, puis ouvrez à nouveau le programme d’installation de Mordred.",
+    "serverDidNotStop": "Le serveur de Mordred ne s’est pas arrêté. Patientez une minute, puis ouvrez à nouveau le programme d’installation de Mordred.",
+    "stillRunning": "Mordred est toujours en cours d’exécution (une installation précédente ou une fenêtre Hermes). L’arrêter et continuer ?",
+    "touchIdNext": "Ensuite, confirmez avec Touch ID : une fois maintenant pour configurer les clés de Mordred, et une fois encore dans un instant, au démarrage de Mordred. Cliquez sur OK, puis touchez le capteur lorsque la fenêtre Touch ID apparaît.",
+    "touchIdNotConfirmed": "Touch ID n’a pas été confirmé, les clés n’ont donc pas été configurées. Ouvrez à nouveau le programme d’installation de Mordred.",
+    "touchIdRetry": "Touch ID n’a pas été confirmé, rien n’a donc encore été configuré. Réessayer ?",
+    "unexpected": "Une étape s’est arrêtée de façon inattendue (ligne {line}). Ouvrez le journal pour voir laquelle, puis ouvrez à nouveau le programme d’installation de Mordred : il reprendra là où il s’est arrêté.",
+    "unfinishedKeys": "Les clés d’une configuration précédente inachevée n’ont pas pu être supprimées. Ouvrez à nouveau le programme d’installation de Mordred."
+  },
+  "touchId": {
+    "approveBrowser": "Autoriser le navigateur « {label} » à se connecter à Mordred. Code {code}",
+    "credentials": "Lire l’identifiant Telegram ou de messagerie de Mordred",
+    "setup": "Configurer les clés et le chiffrement de Mordred",
+    "startup": "Ouvrir le coffre et les bases de données de Mordred"
+  }
+}

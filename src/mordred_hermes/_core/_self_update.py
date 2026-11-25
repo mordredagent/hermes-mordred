@@ -408,12 +408,31 @@ def auto_check_enabled(home: Path | None = None) -> bool:
     """Hermes's ``plugins.auto_update_check_hours: 0`` also opts out of our check.
 
     Read the way Hermes does (``float(value)``): a quoted ``"0"`` disables too.
-    """
-    from ._yaml_io import load_yaml_mapping
 
-    config = load_yaml_mapping((home or hermes_home()) / "config.yaml")
-    plugins = config.get("plugins")
-    if not isinstance(plugins, dict) or "auto_update_check_hours" not in plugins:
+    Only a missing ``config.yaml`` means "no setting" (enabled, as in Hermes).
+    Anything else that hides the setting fails closed — the opt-out cannot be
+    ruled out, so no PyPI request: a file (or its directory) that cannot be
+    read, a parse or decode error, a top level that is not a mapping (an empty
+    or comment-only file included, matching the Windows checked snapshot), or
+    a ``plugins`` value that is not a mapping. Absence is decided by the read
+    itself, never a separate ``exists()`` probe, which reports an unsearchable
+    directory as "missing" on newer Pythons and races with deletion.
+    """
+    from ruamel.yaml.error import YAMLError
+
+    try:
+        config = _read_config_mapping((home or hermes_home()) / "config.yaml")
+    except (OSError, ValueError, YAMLError) as exc:
+        _LOG.debug("update check skipped: config.yaml unreadable (%s)", type(exc).__name__)
+        return False
+    if "plugins" not in config:
+        return True
+    plugins = config["plugins"]
+    if plugins is None:
+        return True
+    if not isinstance(plugins, dict):
+        return False
+    if "auto_update_check_hours" not in plugins:
         return True
     hours = plugins.get("auto_update_check_hours")
     if isinstance(hours, bool):
@@ -424,6 +443,32 @@ def auto_check_enabled(home: Path | None = None) -> bool:
         return float(str(hours).strip()) > 0
     except ValueError:
         return True
+
+
+def _read_config_mapping(path: Path) -> dict[str, Any]:
+    """Strictly read ``config.yaml``: ``{}`` only when it is absent, else raise.
+
+    Windows canonical config goes through the checked snapshot, which reports
+    checked absence (of the file or of the home) as ``{}`` and raises
+    ``ValueError`` for a non-mapping top level. Elsewhere the tolerant
+    :func:`load_yaml_mapping` would collapse every failure to ``{}``, so parse
+    with the same safe loader directly.
+    """
+    from . import _yaml_io
+
+    if _yaml_io._platform == "nt":
+        return _yaml_io.load_yaml_mapping(path, catch=())
+    from ruamel.yaml import YAML
+
+    try:
+        f = path.open(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    with f:
+        data = _yaml_io._parse_yaml(YAML(typ="safe", pure=True), f)
+    if not isinstance(data, dict):
+        raise ValueError("config YAML must contain a mapping")
+    return data
 
 
 def _cache_path(home: Path) -> Path:

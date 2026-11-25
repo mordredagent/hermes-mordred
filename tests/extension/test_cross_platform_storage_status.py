@@ -532,3 +532,26 @@ def test_mail_tool_visibility_never_authenticates_or_opens_sql(
     assert provider.current_authority is None
     assert backend.calls == native_calls
     assert _snapshot(home) == before
+
+
+def test_status_reads_counts_while_the_key_is_held_and_never_acquires_it(
+    protected_runtime: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mordred_hermes.dbcrypt._authority import Authority
+    from mordred_hermes.desktop import _status_v4
+    from mordred_hermes.imports.store import open_import_store
+
+    root, provider, backend = protected_runtime
+    assert _status_v4.imports_sections(root, "darwin")["imports"]["code"] == "store_unavailable"
+    assert provider.current_authority is None  # a cold poll left the key where it was
+    open_import_store(root)  # the foreground acquires the key and creates the store
+    calls = list(backend.calls)
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("a status poll never acquires the key")
+
+    monkeypatch.setattr(Authority, "acquire", forbidden)
+    imports = _status_v4.imports_sections(root, "darwin")["imports"]
+    assert imports["available"] is True and imports["code"] is None
+    assert set(imports["sources"]) == {"telegram", "mail"}
+    assert backend.calls == calls

@@ -203,7 +203,7 @@ def forget_telegram_storage(*, home: Path, remove_records: bool) -> int:
             str(row[0])
             for row in conn.execute(
                 "SELECT DISTINCT source_account FROM import_conversations WHERE source = 'telegram'"
-            )
+            ).fetchall()
         }
     valid = account is not None and account.isascii() and account.isdecimal() and int(account) > 0
     if not valid:

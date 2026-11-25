@@ -484,7 +484,7 @@ def _sites(conn: sqlite3.Connection, ids: Sequence[str]) -> dict[str, list[str]]
         "(PARTITION BY episode_id, site ORDER BY observed_at, receipt) AS nth FROM activity_events "
         f"WHERE site IS NOT NULL AND episode_id IN ({_in(ids)})) WHERE nth = 1 ORDER BY observed_at, receipt",
         tuple(ids),
-    )
+    ).fetchall()
     sites: dict[str, list[str]] = {}
     for episode_id, site in rows:
         sites.setdefault(str(episode_id), []).append(str(site))
@@ -514,7 +514,7 @@ def _hidden(
         f"SELECT DISTINCT episode_id, route, query, target, {_MARKED_SQL} FROM activity_events "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         f"WHERE episode_id IN ({_in(rest)}) AND {where}",
         tuple(rest),
-    )
+    ).fetchall()
     for episode_id, route, query, target, marked in rows:
         if str(episode_id) in hidden:
             continue
@@ -534,7 +534,7 @@ def _user_texts(conn: sqlite3.Connection, ids: Sequence[str]) -> dict[str, list[
         f"SELECT episode_id, text FROM activity_events WHERE text IS NOT NULL AND {USER_TEXT_SQL} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         f"AND episode_id IN ({_in(ids)}) ORDER BY receipt",
         tuple(ids),
-    )
+    ).fetchall()
     for episode_id, text in rows:
         texts.setdefault(str(episode_id), []).append(str(text))
     return texts
@@ -549,7 +549,7 @@ def _page_fields(conn: sqlite3.Connection, ids: Sequence[str]) -> dict[str, list
         f"SELECT episode_id, {column} FROM activity_events WHERE {column} IS NOT NULL AND episode_id IN ({_in(ids)})"  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         for column in ("page_title", "route", "query")
     )
-    for episode_id, value in conn.execute(union, tuple(ids) * 3):
+    for episode_id, value in conn.execute(union, tuple(ids) * 3).fetchall():
         fields.setdefault(str(episode_id), []).append(str(value))
     return fields
 
@@ -658,7 +658,7 @@ def _with_work(conn: sqlite3.Connection, heads: list[_Head], sites: Mapping[str,
         f"SELECT DISTINCT episode_id FROM activity_events WHERE episode_id IN ({_in(siteless)}) "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
         f"AND phase IN ({_in(_RAN_PHASES)}) AND result_status NOT IN ({_in(_FAILED_RESULTS)})",
         (*siteless, *_RAN_PHASES, *_FAILED_RESULTS),
-    )
+    ).fetchall()
     worked = {str(row[0]) for row in rows}
     return [head for head in heads if sites.get(head.episode_id) or head.episode_id in worked]
 
@@ -681,7 +681,7 @@ def _not_own(conn: sqlite3.Connection, heads: list[_Head], session: HermesSessio
         "AND p.hermes_session_id IS NOT NULL AND p.session_ref_state = 'bound' AND EXISTS (SELECT 1 "
         "FROM activity_events e WHERE e.episode_id = p.episode_id AND +e.peer_id = ? AND e.hermes_session_id = ?)",
         (*ids, session.peer_id, session.session_id),
-    )
+    ).fetchall()
     own = {str(row[0]) for row in rows}
     return [head for head in heads if head.episode_id not in own]
 
@@ -827,7 +827,7 @@ def read_meta(store: ActivityStore) -> dict[str, str]:
         exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'activity_meta'").fetchone()
         if exists is None:
             return {}
-        return {str(key): str(value) for key, value in conn.execute("SELECT key, value FROM activity_meta")}
+        return {str(key): str(value) for key, value in conn.execute("SELECT key, value FROM activity_meta").fetchall()}
 
 
 def episode_detail(
@@ -913,7 +913,7 @@ def latest_page_text(
                 "SELECT site, substr(page_text, 1, ?) FROM activity_events WHERE episode_id = ? "
                 "AND page_text IS NOT NULL AND site IS NOT NULL ORDER BY observed_at DESC, receipt DESC LIMIT 50",
                 (max(0, chars), episode_id),
-            )
+            ).fetchall()
             for event_site, text in rows:
                 if text and site_matches(site, str(event_site)):
                     excerpts[episode_id] = str(text)

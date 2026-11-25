@@ -19,6 +19,9 @@ import threading
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from ..recall.turn_context import set_note_after_block
+from . import answer_guard
+
 logger = logging.getLogger(__name__)
 
 # One conversation for the extension popup. Multi-account is out of scope (§1.1).
@@ -34,6 +37,36 @@ _PUT_TIMEOUT = 60.0
 # not an agent-idle timeout): turns may legitimately run for minutes, but a
 # hung turn must not hold the shared lock forever and block every client.
 _DEFAULT_TURN_TIMEOUT = 900.0
+
+# The extension chat's toolsets when ``platform_toolsets`` has no ``extension`` entry:
+# the user's memory and lookups, nothing that acts on the machine. Every registered
+# tool (terminal, files, browser, messaging, ...) used to be offered, which buried a
+# small local model's prompt (16k tokens) and the memory Mordred adds to each turn
+# (mordred_hermes.recall.turn_context), after which the session is a reader session
+# where those tools are refused anyway.
+# Skills are not offered either: their three tools were 1.3k of a 3.5k-token prompt
+# for a 2B model, which called them for unrelated questions.
+DEFAULT_TOOLSETS: tuple[str, ...] = ("mordred_recall", "mordred_telegram", "mordred_activity", "web")
+
+# Appended to Hermes's system prompt for the extension chat. Written for any
+# language: the reply follows the user's, and nothing here assumes one.
+EXTENSION_RULES = """How to answer in this chat:
+- Reply in the language of the user's latest message.
+- You can act only through the tools listed. When asked for something none of them does \
+(running commands, changing files, sending messages, ...), say plainly that you cannot do it \
+here. Never write output, results or confirmations for something no tool did.
+- Answer from this conversation, the memory and the tool results you were given. If none of \
+them holds the answer, say you could not find it; do not guess names, numbers or dates.
+- Keep the answer short."""
+
+# Corrections asked of the model per turn when its answer fails a check
+# (mordred_hermes.extension.answer_guard): each one is a short extra model call.
+MAX_REPAIRS = 2
+
+# The model is sent the last turns only. A small local model loses the question in a
+# long transcript (21-25k tokens per turn on a dev Hermes, most of it history); the
+# store keeps every turn, they are just not sent.
+HISTORY_TURNS = 6
 
 # Keep strong references to detached-turn drainer tasks (RUF006): a task held
 # only by the event loop can be garbage-collected mid-flight.
@@ -64,30 +97,49 @@ def make_gateway_chat_handler(
             # Encrypted-at-rest history is the source of truth: it persists across
             # restarts and is shared by every paired surface (§ chat persistence).
             history = extension_history.load_messages()
-            fut, queue, done = _spawn_turn(agent, message, history, loop)
+            sent = model_history(history)
+            plan = answer_guard.plan_turn(content, getattr(agent, "valid_tool_names", None) or (), sent)
+            note = answer_guard.note(plan)
+            set_note_after_block(_EXT_SESSION_ID, note)
+            fut, queue, done = _spawn_turn(agent, message + note, sent, loop, persist=message)
 
             deadline = loop.time() + turn_timeout
-            streamed_any = False
+            # The answer is checked before it is shown, so it is collected, not streamed.
+            parts: list[str] = []
             try:
                 while (item := await _next_item(queue, deadline, loop)) is not done:
-                    streamed_any = True
-                    yield item
+                    parts.append(item)
             except TimeoutError:
-                _abandon_turn(state, queue, done, fut, extension_history, history)
+                _abandon_turn(state, queue, done, fut, extension_history, history, sent)
                 logger.warning(
                     "extension chat: turn %d timed out after %.0fs; agent will be rebuilt", turn, turn_timeout
                 )
                 raise RuntimeError(f"turn_timeout: no completion within {turn_timeout:.0f}s") from None
-            except GeneratorExit:
-                # Consumer closed us mid-stream (client disconnected). The
-                # worker thread can't be killed, so the turn finishes detached:
-                # its reply stays recoverable via history_get after reconnect.
-                _abandon_turn(state, queue, done, fut, extension_history, history)
+            except (GeneratorExit, asyncio.CancelledError):
+                # The consumer is gone (client disconnected, its task cancelled). The
+                # worker thread can't be killed, so the turn finishes detached: its
+                # reply stays recoverable via history_get after reconnect (unchecked:
+                # a correction needs the model, and nobody is waiting for it).
+                _abandon_turn(state, queue, done, fut, extension_history, history, sent)
                 logger.info("extension chat: client disconnected mid-turn %d; turn continues detached", turn)
                 raise
 
             result = await fut  # propagate any exception from the agent run
-            final = _persist_and_final(result, extension_history, streamed_any, history)
+            if _transient_failure(result):
+                result = await _run_again(agent, message + note, message, sent, loop, deadline, result)
+            answer = (result.get("final_response") if isinstance(result, dict) else "") or "".join(parts)
+            try:
+                checked = await _checked_answer(
+                    agent, plan, content, answer, result, sent, loop, deadline, page=bool(context.get("selection"))
+                )
+            except asyncio.CancelledError:
+                # Gone while a correction ran: keep the turn as the model first answered it.
+                _persist_and_final(result, extension_history, False, history, sent)
+                raise
+            if isinstance(result, dict) and checked != (result.get("final_response") or ""):
+                # A corrected answer, or one only the stream carried.
+                result = _with_answer(result, checked)
+            final = _persist_and_final(result, extension_history, False, history, sent)
             if final:
                 yield final
 
@@ -95,7 +147,7 @@ def make_gateway_chat_handler(
 
 
 def _spawn_turn(
-    agent: Any, message: str, history: list[Any], loop: asyncio.AbstractEventLoop
+    agent: Any, message: str, history: list[Any], loop: asyncio.AbstractEventLoop, persist: str | None = None
 ) -> tuple[asyncio.Future[Any], asyncio.Queue[Any], object]:
     """Run one agent turn on a worker thread, streaming deltas into a bounded
     queue. The returned ``done`` sentinel is enqueued when the run finishes."""
@@ -119,7 +171,9 @@ def _spawn_turn(
             gave_up.set()
 
     def run() -> Any:
-        return agent.run_conversation(message, conversation_history=history, stream_callback=stream_cb)
+        return agent.run_conversation(
+            message, conversation_history=history, stream_callback=stream_cb, persist_user_message=persist
+        )
 
     fut = loop.run_in_executor(None, run)
     # put() (vs put_nowait) so a momentarily-full queue can't drop the
@@ -136,6 +190,161 @@ async def _next_item(queue: asyncio.Queue[Any], deadline: float, loop: asyncio.A
     return await asyncio.wait_for(queue.get(), timeout=remaining)
 
 
+async def _checked_answer(
+    agent: Any,
+    plan: Any,
+    question: str,
+    answer: str,
+    result: Any,
+    sent: list[Any],
+    loop: asyncio.AbstractEventLoop,
+    deadline: float,
+    *,
+    page: bool = False,
+) -> str:
+    """``answer`` after the guard's checks: corrected by the model, else repaired in Python.
+
+    The model sees the question as it did the first time (with the memory block, from
+    the turn's ``api_content``) followed by its answer and what to fix, and nothing of
+    the earlier conversation. A correction is kept only when it has fewer problems than
+    the answer it replaces.
+    """
+    if isinstance(result, dict) and result.get("failed"):
+        return answer  # a failed turn's text is the error, not an answer to check or replace
+    turn_msgs = result.get("messages") if isinstance(result, dict) else None
+    asked = _turn_user_message(turn_msgs, question)
+    api_copy = str(asked.get("api_content") or "")
+    tools = _tool_texts(turn_msgs)
+    if (
+        not plan.action
+        and answers_from_sources_only(agent)
+        and not answer_guard.has_source(question, plan, memory_entries(api_copy), tools, page, bool(sent))
+    ):
+        # A small local model with nothing to answer from answers from what it half knows.
+        logger.info("extension chat: nothing to answer from; saying so instead of the model's answer")
+        return answer_guard.no_source_reply(plan)
+    sources = [question, *(_text(m) for m in sent), api_copy, *tools]
+    problems = answer_guard.review(answer, plan, sources)
+    for attempt in range(MAX_REPAIRS):
+        if not problems or loop.time() >= deadline:
+            break
+        logger.info("extension chat: answer fails %s; asking for a correction", [p.kind for p in problems])
+        # Only this exchange: the question as first sent (memory block included) and the
+        # answer. A long conversation here made a 2B model translate an older message.
+        shown = {k: v for k, v in asked.items() if k in ("role", "content", "api_content")}
+        fut, queue, done = _spawn_turn(
+            agent,
+            answer_guard.repair_request(problems, plan, attempt),
+            [shown, {"role": "assistant", "content": answer}],
+            loop,
+        )
+        try:
+            while await _next_item(queue, deadline, loop) is not done:
+                pass
+            fixed = await fut
+        except TimeoutError:
+            break
+        text = (fixed.get("final_response") if isinstance(fixed, dict) else "") or ""
+        # Drop sentences about the answer ("this is the translation") the request was echoed into.
+        text = answer_guard.without_meta(text) or text
+        if not text.strip():
+            break
+        found = answer_guard.review(text, plan, sources)
+        if any(p.kind == "number" for p in found):
+            # A correction may fix the language and miscopy a number; fix the number here.
+            text = answer_guard.fix_numbers(text, found)
+            found = answer_guard.review(text, plan, sources)
+        if len(found) < len(problems):
+            answer, problems = text, found
+    return answer_guard.last_resort(answer, problems, plan) if problems else answer
+
+
+#: Errors a model's server returns now and accepts on the next try.
+_TRANSIENT_ERRORS = ("Invalid structured outputs",)
+
+
+async def _run_again(
+    agent: Any,
+    message: str,
+    persist: str,
+    sent: list[Any],
+    loop: asyncio.AbstractEventLoop,
+    deadline: float,
+    failed: Any,
+) -> Any:
+    """The turn run once more after a transient refusal; ``failed`` when there is no time for it.
+
+    Venice sometimes refuses a request it accepts the next time ("Invalid structured
+    outputs"), and Hermes does not retry an HTTP 400.
+    """
+    if loop.time() >= deadline:
+        return failed
+    logger.info("extension chat: the model's server refused the turn transiently; running it again")
+    fut, queue, done = _spawn_turn(agent, message, sent, loop, persist=persist)
+    try:
+        while await _next_item(queue, deadline, loop) is not done:
+            pass
+    except TimeoutError:
+        return failed
+    return await fut
+
+
+def _transient_failure(result: Any) -> bool:
+    """Whether the run failed with an error worth one more try."""
+    if not isinstance(result, dict) or not result.get("failed"):
+        return False
+    error = str(result.get("error") or "")
+    return any(marker in error for marker in _TRANSIENT_ERRORS)
+
+
+def answers_from_sources_only(agent: Any) -> bool:
+    """Whether the chat's model is a local one, which answers only from the user's sources.
+
+    A small model on this machine (a loopback server) knows too little to answer
+    general questions; a larger model the user chose ("upgrade the chat AI") does.
+    """
+    from urllib.parse import urlparse
+
+    host = urlparse(str(getattr(agent, "base_url", "") or "")).hostname or ""
+    return host in {"127.0.0.1", "localhost", "::1"} or host.endswith(".localhost")
+
+
+def memory_entries(api_copy: str) -> str:
+    """The memory block's entries in the model's copy of the question (without its header)."""
+    from ..recall.turn_context import FOOTER
+
+    start = api_copy.find("[Mordred memory")
+    if start < 0:
+        return ""
+    end = api_copy.find(FOOTER, start)
+    block = api_copy[start : end if end >= 0 else len(api_copy)]
+    return block.split("\n", 1)[1] if "\n" in block else ""
+
+
+def _turn_user_message(msgs: Any, question: str) -> dict[str, Any]:
+    """This turn's user message in the run's transcript (it carries ``api_content``)."""
+    for msg in reversed(msgs if isinstance(msgs, list) else []):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            return msg
+    return {"role": "user", "content": question}
+
+
+def _tool_texts(msgs: Any) -> list[str]:
+    return [
+        _text(m) for m in (msgs if isinstance(msgs, list) else []) if isinstance(m, dict) and m.get("role") == "tool"
+    ]
+
+
+def _with_answer(result: dict[str, Any], answer: str) -> dict[str, Any]:
+    """``result`` with its final answer (and the transcript's last reply) replaced by ``answer``."""
+    msgs = list(result.get("messages") or [])
+    for i in range(len(msgs) - 1, -1, -1):
+        if isinstance(msgs[i], dict) and msgs[i].get("role") == "assistant" and not msgs[i].get("tool_calls"):
+            msgs[i] = {**msgs[i], "content": answer}
+            break
+    return {**result, "messages": msgs, "final_response": answer}
+
+
 def _abandon_turn(
     state: dict[str, Any],
     queue: asyncio.Queue[Any],
@@ -143,6 +352,7 @@ def _abandon_turn(
     fut: asyncio.Future[Any],
     extension_history: Any,
     history_base: list[Any],
+    sent: list[Any] | None = None,
 ) -> None:
     """Detach a turn whose consumer is gone (timeout or client disconnect).
 
@@ -172,7 +382,7 @@ def _abandon_turn(
             logger.warning("extension chat: detached turn failed: %s", exc)
             return
         try:
-            _persist_and_final(f.result(), extension_history, True, history_base)
+            _persist_and_final(f.result(), extension_history, True, history_base, sent)
         except Exception:
             logger.exception("extension chat: failed to persist detached turn history")
 
@@ -202,7 +412,43 @@ def _messages_added_this_turn(history_base: list[Any], msgs: list[Any]) -> list[
     return msgs[common:]
 
 
-def _persist_and_final(result: Any, extension_history: Any, streamed_any: bool, history_base: list[Any]) -> str:
+def model_history(history: list[Any]) -> list[Any]:
+    """What the model is sent of ``history``: the last :data:`HISTORY_TURNS` exchanges.
+
+    Earlier turns keep their words only: their tool calls and tool results are
+    left out, and a search screen's block stays only in the newest message that
+    has one (the one a follow-up is about).
+    """
+    from ..recall.turn_context import strip_search_block
+
+    starts = [i for i, m in enumerate(history) if isinstance(m, dict) and m.get("role") == "user"]
+    if not starts:
+        return []
+    window = history[starts[-HISTORY_TURNS] if len(starts) > HISTORY_TURNS else starts[0] :]
+    with_search = [
+        i for i, m in enumerate(window) if m.get("role") == "user" and strip_search_block(_text(m)) != _text(m)
+    ]
+    out: list[Any] = []
+    for i, msg in enumerate(window):
+        role = msg.get("role")
+        if role == "user":
+            content = msg.get("content")
+            if isinstance(content, str) and with_search and i != with_search[-1]:
+                content = strip_search_block(content)
+            out.append({"role": "user", "content": content})
+        elif role == "assistant" and _text(msg).strip():
+            out.append({"role": "assistant", "content": msg.get("content")})
+    return out
+
+
+def _text(msg: dict[str, Any]) -> str:
+    content = msg.get("content")
+    return content if isinstance(content, str) else ""
+
+
+def _persist_and_final(
+    result: Any, extension_history: Any, streamed_any: bool, history_base: list[Any], sent: list[Any] | None = None
+) -> str:
     """Persist the run's message history and return the final response to emit
     when nothing was streamed. Returns "" when there's nothing left to yield.
 
@@ -211,18 +457,24 @@ def _persist_and_final(result: Any, extension_history: Any, streamed_any: bool, 
     saved verbatim. If the store moved while the turn ran (a detached turn
     finished late, or this turn was itself detached and superseded), a plain
     overwrite would drop the other turn's exchange — append only this turn's
-    new messages instead.
+    new messages instead. ``sent`` is the part of the history the model was
+    given (:func:`model_history`); the store keeps all of it.
     """
     if not isinstance(result, dict):
         return ""
     msgs = result.get("messages")
     if isinstance(msgs, list):
         current = extension_history.load_messages()
-        if current == history_base:
+        if current == history_base and sent is None:
             extension_history.save_messages(msgs)
         else:
-            extension_history.save_messages([*current, *_messages_added_this_turn(history_base, msgs)])
-            logger.info("extension chat: merged turn history over a concurrent update")
+            # Only this turn's messages are added: to the whole history when the model
+            # was sent a window of it, to the newer store when another turn moved it.
+            added = _messages_added_this_turn(history_base if sent is None else sent, msgs)
+            moved = current != history_base
+            extension_history.save_messages([*(current if moved else history_base), *added])
+            if moved:
+                logger.info("extension chat: merged turn history over a concurrent update")
     if streamed_any:
         return ""
     return result.get("final_response") or ""
@@ -240,6 +492,21 @@ def _augment_with_context(content: str, context: dict[str, Any]) -> str:
     return "\n\n".join(parts)
 
 
+def extension_toolsets() -> list[str]:
+    """The toolsets offered to the extension chat: ``platform_toolsets.extension``, else :data:`DEFAULT_TOOLSETS`."""
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import _get_platform_tools
+
+        config = load_config()
+        named = config.get("platform_toolsets")
+        if isinstance(named, dict) and "extension" in named:
+            return sorted(_get_platform_tools(config, "extension"))
+    except Exception:
+        logger.warning("extension chat: platform_toolsets unreadable; using the default toolsets")
+    return list(DEFAULT_TOOLSETS)
+
+
 def _ensure_agent(runner: Any, state: dict[str, Any]) -> Any:
     """Build (or reuse) the extension's AIAgent via the gateway's own routing."""
     from gateway.run import _resolve_gateway_model, _resolve_runtime_agent_kwargs
@@ -255,18 +522,47 @@ def _ensure_agent(runner: Any, state: dict[str, Any]) -> Any:
         except Exception:  # noqa: S110 - optional default-model lookup; absence handled below
             pass
 
-    sig = (model, tuple(sorted((k, str(v)) for k, v in runtime.items() if k != "api_key")))
+    from . import chat_model
+
+    toolsets = extension_toolsets()
+    choice = chat_model.load()
+    sig = (
+        model,
+        tuple(sorted((k, str(v)) for k, v in runtime.items() if k != "api_key")),
+        tuple(toolsets),
+        (choice.backend, choice.model, choice.sealed_key) if choice else None,
+    )
     if state["agent"] is not None and state["sig"] == sig:
         return state["agent"]
 
+    if choice is not None:
+        # The user upgraded the chat AI: a Venice model Venice labels private (checked when
+        # chosen, and again before each turn's memory and each reader tool), with its key
+        # from the keyvault. Mordred's reader checks see this model, not config.yaml's.
+        endpoint: dict[str, Any] = {
+            "provider": "venice",
+            "base_url": choice.base_url,
+            "api_key": chat_model.api_key(choice),
+            "api_mode": "chat_completions",
+        }
+        if runtime.get("max_tokens"):
+            endpoint["max_tokens"] = runtime["max_tokens"]
+        model = choice.model
+        chat_model.set_active(choice.model, choice.base_url)
+    else:
+        endpoint = runtime
+        chat_model.set_active(None, None)
+
     agent = AIAgent(
         model=model,
-        **runtime,
+        **endpoint,
+        enabled_toolsets=toolsets,
         max_iterations=int(getattr(runner, "_max_iterations", 0) or 90),
         quiet_mode=True,
         verbose_logging=False,
         session_id=_EXT_SESSION_ID,
         platform="extension",
+        ephemeral_system_prompt=EXTENSION_RULES,
         gateway_session_key=_EXT_SESSION_ID,
         session_db=getattr(runner, "_session_db", None),
         fallback_model=getattr(runner, "_fallback_model", None),
@@ -274,5 +570,7 @@ def _ensure_agent(runner: Any, state: dict[str, Any]) -> Any:
     state["agent"] = agent
     state["sig"] = sig
     state["history"] = []
-    logger.info("extension chat: built agent (model=%s)", model or "<provider-default>")
+    logger.info(
+        "extension chat: built agent (model=%s, toolsets=%s)", model or "<provider-default>", ",".join(toolsets)
+    )
     return agent

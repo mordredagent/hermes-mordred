@@ -981,6 +981,8 @@ class TestKeyvaultStep:
                 "store_seed_for_hd": False,
                 "unattended": True,
                 "flow_session": None,
+                "backup_file": None,
+                "embed_passphrase": False,
             }
         ]
 
@@ -1388,3 +1390,35 @@ class TestCliSetupAdapter:
         assert options.unattended_keys is True
         assert options.store_seed_for_hd is False
         assert isinstance(captured["policy_writer"], PolicyWriter)
+
+
+def test_a_missed_first_touch_id_stops_setup_before_any_step(tmp_path, monkeypatch, capsys):
+    import sys as _sys
+
+    from mordred_hermes.keyvault import _presence
+    from mordred_hermes.keyvault._seckey_errors import _OpsError
+    from mordred_hermes.wizard import setup_cli
+
+    if _sys.platform != "darwin":
+        pytest.skip("macOS Touch ID window")
+
+    def missed():
+        raise _OpsError(-25293, "OSStatus", "authentication denied or cancelled")
+
+    monkeypatch.setattr(_presence, "confirm_window", missed)
+    options = setup_cli.SetupOptions(no_prompts=True, backup_file=tmp_path / "backup.mrkv")
+    with setup_cli._setup_window(home=tmp_path, options=options) as confirmed:
+        assert confirmed is False
+    assert "Touch ID was not confirmed, so nothing was set up" in capsys.readouterr().err
+    assert _presence._window is None  # the window closed with the run
+    assert setup_cli.PRESENCE_NOT_CONFIRMED == 75  # the installer's retry status
+
+
+def test_unattended_keys_skip_the_first_touch_id(tmp_path, monkeypatch):
+    from mordred_hermes.keyvault import _presence
+    from mordred_hermes.wizard import setup_cli
+
+    monkeypatch.setattr(_presence, "confirm_window", lambda: pytest.fail("no Touch ID for unattended keys"))
+    options = setup_cli.SetupOptions(no_prompts=True, unattended_keys=True, backup_file=tmp_path / "b.mrkv")
+    with setup_cli._setup_window(home=tmp_path, options=options) as confirmed:
+        assert confirmed is True

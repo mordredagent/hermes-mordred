@@ -60,7 +60,8 @@ def test_reset_removes_credentials_through_authenticated_custody(tmp_path, monke
 def test_reset_erases_all_accounts_in_profile_cipher_database(native_root):
     from mordred_hermes.dbcrypt._authority import Authority
     from mordred_hermes.dbcrypt._connection import open_protected
-    from mordred_hermes.imports import _schema
+    from mordred_hermes.imports import _schema, analysis
+    from mordred_hermes.imports.store import _index_parts
 
     home, _, _, _ = native_root
     root = _build_keyvault(home, ["default"])
@@ -109,6 +110,7 @@ def test_reset_erases_all_accounts_in_profile_cipher_database(native_root):
                 (account, account, token),
             )
             conn.execute("INSERT INTO import_mail_refs VALUES (?,?)", (account, "ref-" + account))
+        _index_parts(conn, "1", ())  # the store, not a trigger, writes the term index
         conn.execute("CREATE TABLE activity_kept (body TEXT)")
         conn.execute("INSERT INTO activity_kept VALUES ('KEEP ACTIVITY')")
         conn.commit()
@@ -131,7 +133,7 @@ def test_reset_erases_all_accounts_in_profile_cipher_database(native_root):
         assert conn.execute("SELECT text FROM import_parts").fetchall() == [("keepother",)]
         for token, count in [("erasemail", 0), ("erasetelegram", 0), ("keepother", 1)]:
             assert conn.execute(
-                "SELECT count(*) FROM import_parts_fts WHERE import_parts_fts MATCH ?", (token,)
+                "SELECT count(*) FROM import_parts_fts WHERE import_parts_fts MATCH ?", (analysis.phrase(token),)
             ).fetchone() == (count,)
         assert conn.execute("SELECT source FROM import_conversations").fetchall() == [("other",)]
         assert dict(conn.execute("SELECT key, value FROM import_meta")) == {
@@ -149,7 +151,7 @@ def test_reset_erases_all_accounts_in_profile_cipher_database(native_root):
 def test_pending_reset_blocks_import_writes(native_root):
     from mordred_hermes.dbcrypt._authority import Authority
     from mordred_hermes.dbcrypt._connection import open_protected
-    from mordred_hermes.imports.store import ImportStore
+    from mordred_hermes.imports.store import ImportRefused, ImportStore
 
     home = native_root[0]
     root = _build_keyvault(home, ["default"])
@@ -161,8 +163,12 @@ def test_pending_reset_blocks_import_writes(native_root):
         store.initialize(home)
         with _storage.keyvault_lifecycle_lock(root):
             _storage.write_reset_journal(root, b"pending")
-        with pytest.raises(Exception, match="reset"):
+        with pytest.raises(ImportRefused) as refused:
             store.set_meta("telegram.retired_account", "99")
+        assert refused.value.code == "store_unavailable"
+        with pytest.raises(ImportRefused) as refused:
+            store.initialize(home)
+        assert refused.value.code == "store_unavailable"
         assert store.get_meta("telegram.retired_account") is None
     finally:
         authority.close()

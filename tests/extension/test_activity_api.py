@@ -15,12 +15,10 @@ from typing import Any
 
 import aiohttp
 import pytest
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from mordred_hermes.activity.contracts import PeerPrincipal
-from mordred_hermes.extension import activity_api, extension_api
-from mordred_hermes.extension import extension_crypto as xc
-from mordred_hermes.extension import extension_pairing as pairing
+from mordred_hermes.extension import activity_api, extension_api, trust
+from tests.extension._trust_helpers import Browser, with_test_root
 
 
 class FakeReceiver:
@@ -75,28 +73,17 @@ def _run(scenario: Scenario, receiver: Any = None, **server_kwargs: Any) -> Any:
     return asyncio.run(main())
 
 
-async def _extension_pair_and_auth(ws: aiohttp.ClientWebSocketResponse) -> dict[str, Any]:
-    """Pair the browser extension, authenticate the socket with its ext_token and return ``auth_ok``."""
-    challenge = await _recv(ws)
-    assert challenge["type"] == "auth_challenge"
-    code, _ = await asyncio.to_thread(pairing.generate_code)
-    ext_priv = X25519PrivateKey.generate()
-    await ws.send_str(
-        json.dumps(
-            {
-                "id": "p1",
-                "type": "pair_init",
-                "code": code,
-                "ext_pubkey": xc.b64u_encode(xc.x25519_public_raw(ext_priv)),
-                "challenge": xc.b64u_encode(b"\x07" * 32),
-            }
-        )
-    )
-    complete = await _recv(ws)
-    assert complete["type"] == "pair_complete", complete
-    await ws.send_str(json.dumps({"type": "auth", "ext_token": complete["ext_token"]}))
-    auth_ok = await _recv(ws)
-    assert auth_ok["type"] == "auth_ok", auth_ok
+@pytest.fixture(autouse=True)
+def _trust_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    with_test_root(monkeypatch)
+
+
+async def _extension_pair_and_auth(
+    ws: aiohttp.ClientWebSocketResponse, browser: Browser | None = None
+) -> dict[str, Any]:
+    """Approve the browser extension's device key over auth v2 and return ``auth2_ok``."""
+    auth_ok = await (browser or Browser()).connect(ws)
+    assert auth_ok["type"] == "auth2_ok", auth_ok
     return auth_ok
 
 
@@ -146,16 +133,16 @@ def test_receiver_refusal_is_passed_through():
     assert len(receiver.calls) == 1
 
 
-def test_extension_repairing_revokes_activity_submission_mid_session():
+def test_removing_the_extension_device_revokes_activity_submission_mid_session():
     receiver = FakeReceiver()
+    browser = Browser()
 
     async def scenario(session, url, _server):
         async with session.ws_connect(url, headers=_EXTENSION_ORIGIN) as ws:
-            await _extension_pair_and_auth(ws)
+            await _extension_pair_and_auth(ws, browser)
             first = await _send_batch(ws)
-            # A new pairing replaces the extension token the first socket authenticated with.
-            async with session.ws_connect(url, headers=_EXTENSION_ORIGIN) as other:
-                await _extension_pair_and_auth(other)
+            # Removing the device revokes the endorsement the socket authenticated with.
+            assert await asyncio.to_thread(trust.store().remove, trust.device_id_of(browser.spki))
             changed = await _send_batch(ws, mid="b2")
             after = await _send_batch(ws, mid="b3")
             return first, changed, after
@@ -265,6 +252,24 @@ def test_malformed_batch_and_failing_receiver_are_content_free_refusals():
     malformed, exploded = _run(scenario, Exploding())
     assert malformed == {"id": "b1", "type": "activity_refused", "reason": "malformed"}
     assert exploded == {"id": "b2", "type": "activity_refused", "reason": "store_unavailable"}
+
+
+def test_approved_extension_batch_uses_the_extension_principal(monkeypatch):
+    with_test_root(monkeypatch)
+    receiver = FakeReceiver({"type": "activity_refused", "reason": "collection_disabled"})
+    browser = Browser()
+
+    async def scenario(session, url, _server):
+        async with session.ws_connect(url, headers={"Origin": browser.origin}) as ws:
+            auth_ok = await browser.connect(ws)
+            return auth_ok, await _send_batch(ws)
+
+    auth_ok, reply = _run(scenario, receiver)
+    assert "activity_batch_v1" in auth_ok["capabilities"]
+    assert reply == {"id": "b1", "type": "activity_refused", "reason": "collection_disabled"}
+    [(principal, _batch)] = receiver.calls
+    assert principal.peer_id == "extension"
+    assert principal.kind == "browser"
 
 
 @pytest.mark.parametrize("value", [10, 10**9])

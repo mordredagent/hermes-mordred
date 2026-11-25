@@ -30,6 +30,12 @@ dependencies = [
   # Version/requirement parsing for the in-place updater and the Desktop
   # package-manager member; hermes-agent declares it only on Python 3.14+.
   "packaging>=23",
+  # Search index of the import store (mordred.db): Japanese morphological
+  # analysis (Sudachi, split mode A, with its core dictionary) and English
+  # stemming (Snowball). See mordred_hermes/imports/analysis.py.
+  "sudachipy>=0.6.8",
+  "sudachidict-core>=20240409",
+  "snowballstemmer>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -100,13 +106,6 @@ ethereum = [
   # module imports them at call time.
   "eth-account>=0.13",
   "rlp>=4",
-]
-messaging = [
-  # Terminal QR-code rendering for `hermes-mordred extension pair`. Optional
-  # (the command already falls back to printing the code as plain text when
-  # this isn't installed) — was referenced in a comment as living in this
-  # extra before the extra itself existed.
-  "qrcode>=7.4",
 ]
 tor-control = [
   "stem>=1.8.0,<2",
@@ -402,7 +401,7 @@ warn_redundant_casts = true
 # llm_guard.local_adapter subclasses ``providers.base.ProviderProfile`` to
 # register the ``mordred-local`` synthetic provider.
 [[tool.mypy.overrides]]
-module = ["hermes_cli", "hermes_cli.*", "hermes_constants", "providers", "providers.*"]
+module = ["hermes_cli", "hermes_cli.*", "hermes_constants", "pm", "pm.*", "providers", "providers.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
 
@@ -414,11 +413,9 @@ follow_imports = "skip"
 # - objc (pyobjc) is the macOS-only Security/CoreFoundation bridge used by
 #   keyvault/_seckey_ctypes.py; it ships no py.typed marker and is absent on the
 #   Linux runner entirely.
-# - qrcode lives in the optional `messaging` extra (also not installed for the
-#   mypy job); the extension-pair CLI imports it lazily.
 # - gateway is a repo-root top-level package (not under mordred-hermes/src), so
-#   it isn't importable from the mordred-hermes mypy run; the extension-pair CLI
-#   only imports it lazily at runtime.
+#   it isn't importable from the mordred-hermes mypy run; the extension egress,
+#   RPC and Discord context modules only import it lazily at runtime.
 # Treat all as untyped so `mypy --strict src` resolves cross-platform.
 [[tool.mypy.overrides]]
 module = [
@@ -432,8 +429,6 @@ module = [
     "rlp.*",
     "eth_hash",
     "eth_hash.*",
-    "qrcode",
-    "qrcode.*",
     # run_agent is a repo-root top-level Hermes module (like gateway); the
     # extension chat bridge imports AIAgent from it lazily at runtime.
     "run_agent",
@@ -443,6 +438,11 @@ module = [
     "requests",
     "requests.*",
     "objc",
+    # sudachipy and snowballstemmer (import-store search index) ship no py.typed marker.
+    "sudachipy",
+    "sudachipy.*",
+    "snowballstemmer",
+    "snowballstemmer.*",
     # stem lives in the optional `tor-control` extra. CI does not install it, so
     # `paths/tor.py`'s lazy `from stem.control import Controller` is an
     # unresolvable import there (import-not-found) — but a DEV box synced with
@@ -462,6 +462,12 @@ module = [
     # guarded imports, without installing this optional, untyped dependency.
     "sqlcipher3",
     "sqlcipher3.*",
+    # PDFKit through pyobjc (the macos extra) reads PDF mail attachments
+    # (imports/mail/attachments.py); untyped, and absent on the Linux runner.
+    "Foundation",
+    "Foundation.*",
+    "Quartz",
+    "Quartz.*",
 ]
 ignore_missing_imports = true
 
@@ -535,6 +541,14 @@ ignore_imports = [
   "mordred_hermes.imports.mail.imap_sync -> mordred_hermes.extension.telegram.hardening",
   "mordred_hermes.imports.legacy_enc -> mordred_hermes.extension.telegram.store",
   "mordred_hermes.imports.mail.imap -> mordred_hermes.extension.egress",
+  "mordred_hermes.imports.mail.oauth -> mordred_hermes.extension.egress",
+  # --- extension -> desktop: the browser extension serves the Desktop ---
+  # plugin's import status, jobs and mail setup flows (lazy imports) ---
+  "mordred_hermes.extension.health -> mordred_hermes.desktop._status_v4",
+  "mordred_hermes.extension.imports_api -> mordred_hermes.desktop.api",
+  "mordred_hermes.extension.imports_api -> mordred_hermes.desktop._projections",
+  "mordred_hermes.extension.imports_api -> mordred_hermes.desktop._jobs",
+  "mordred_hermes.extension.imports_api -> mordred_hermes.desktop._status_v4",
   # --- baseline: extension -> wizard, wizard -> desktop / plugin -----------
   "mordred_hermes.extension.telegram.memory_guard -> mordred_hermes.wizard._windows_status",
   "mordred_hermes.extension.telegram.memory_guard -> mordred_hermes.wizard._windows_memory",

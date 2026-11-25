@@ -147,8 +147,9 @@ Every ``_probe_*`` function in this module:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -218,6 +219,11 @@ class SetupOptions:
     #: ``None`` = not specified on the CLI; resolved by :func:`_resolve_unattended_keys`.
     unattended_keys: bool | None = None
     store_seed_for_hd: bool = True
+    #: ``--backup-file``: the keyvault's recovery is this file (no seed on screen, no offline step).
+    backup_file: Path | None = None
+    #: ``--no-prompts``: nothing is asked in the terminal (Touch ID dialogs still appear). A new
+    #: keyvault gets a generated passphrase, saved inside ``backup_file`` (required).
+    no_prompts: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,6 +801,8 @@ def _run_keyvault_init(
     store_seed_for_hd: bool,
     unattended: bool | None,
     flow_session: FlowSession | None = None,
+    backup_file: Path | None = None,
+    embed_passphrase: bool = False,
 ) -> int:
     """Run the keyvault ceremony. Thin seam over ``_keyvault_init.init_keyvault``."""
     from ._keyvault_init import init_keyvault
@@ -805,10 +813,12 @@ def _run_keyvault_init(
         store_seed_for_hd=store_seed_for_hd,
         unattended=unattended,
         flow_session=flow_session,
+        backup_file=backup_file,
+        embed_passphrase=embed_passphrase,
     )
 
 
-def _keyvault_preflight(*, home: Path) -> int | None:
+def _keyvault_preflight(*, home: Path, backup_file: Path | None = None) -> int | None:
     """Thin seam over ``_keyvault_init._preflight_or_refuse``'s fail-closed guards.
 
     Runs the exact same pre-ceremony checks ``init_keyvault`` itself runs first
@@ -825,7 +835,14 @@ def _keyvault_preflight(*, home: Path) -> int | None:
     internally when the ceremony actually starts -- that duplication is
     intentional defense in depth (see the module docstring's "Keyvault
     preflight gate" section), not redundant plumbing to remove.
+
+    With ``backup_file`` the seed is never shown, so there is no air-gap or
+    stdout check: the backup flow's own guards (re-init, output path) run.
     """
+    if backup_file is not None:
+        from ._keyvault_init_backup import _refusal
+
+        return _refusal(home, backup_file.expanduser())
     from ._keyvault_init import _preflight_or_refuse
 
     return _preflight_or_refuse(home=home, blackout_assert=None, surface=None)
@@ -873,7 +890,7 @@ def _resolve_step_keyvault(
     # while the host is still online) means the ceremony cannot proceed no
     # matter how that question is answered, so there is no point asking it
     # first only to discover this afterward.
-    if _keyvault_preflight(home=home) is not None:
+    if _keyvault_preflight(home=home, backup_file=options.backup_file) is not None:
         return StepResult(
             _STEP_KEYVAULT,
             "manual",
@@ -902,6 +919,8 @@ def _resolve_step_keyvault(
         store_seed_for_hd=options.store_seed_for_hd,
         unattended=resolved_unattended,
         flow_session=flow_session,
+        backup_file=options.backup_file,
+        embed_passphrase=options.no_prompts,
     )
     if rc != 0:
         return StepResult(_STEP_KEYVAULT, "failed", "keyvault init failed (see errors above)")
@@ -1292,17 +1311,98 @@ def run_setup(
     module docstring). It is closed before this function returns.
     """
     with FlowSession(unattended=options.unattended_keys) as session:
-        return _run_steps(
-            home=home,
-            root=root,
-            platform=platform,
-            workspace=workspace,
-            prompt_io=prompt_io,
-            policy_writer=policy_writer,
-            setup_runner=setup_runner,
-            options=options,
-            session=session,
-        )
+        if options.no_prompts and _seed_no_prompt_passphrase(home=home, options=options, session=session) is not None:
+            return 1
+        with _setup_window(home=home, options=options) as confirmed:
+            if not confirmed:
+                return PRESENCE_NOT_CONFIRMED
+            code = _run_steps(
+                home=home,
+                root=root,
+                platform=platform,
+                workspace=workspace,
+                prompt_io=prompt_io,
+                policy_writer=policy_writer,
+                setup_runner=setup_runner,
+                options=options,
+                session=session,
+            )
+            if code == 0 and options.no_prompts:
+                code = _encrypt_databases(home)
+        if code == 0 and _attended_no_prompt_run(options):
+            from ..keyvault import _presence
+
+            _presence.enable_operation_presence(home)
+        return code
+
+
+# ``setup --no-prompts`` exit status when its first Touch ID was missed or
+# cancelled: nothing was changed, so the installer offers to try again.
+PRESENCE_NOT_CONFIRMED = 75
+
+
+def _attended_no_prompt_run(options: SetupOptions) -> bool:
+    """``--no-prompts`` creating keys that confirm with Touch ID (macOS)."""
+    return options.no_prompts and options.unattended_keys is not True and sys.platform == "darwin"
+
+
+@contextlib.contextmanager
+def _setup_window(*, home: Path, options: SetupOptions) -> Iterator[bool]:
+    """One Touch ID for the whole ``--no-prompts`` run instead of one per key use.
+
+    Only for attended keys: unattended ones never prompt, and a window would.
+    The Touch ID is asked first, before any step changes anything: yields
+    ``False`` (reported) when it was missed or cancelled, so the run can stop
+    and simply be run again.
+    """
+    if not _attended_no_prompt_run(options):
+        yield True
+        return
+    from ..keyvault import _presence
+    from ..keyvault._seckey_errors import _OpsError
+
+    with _presence.operation_window(home, "setup"):
+        try:
+            _presence.confirm_window()
+        except _OpsError:
+            _term.emit_error("Touch ID was not confirmed, so nothing was set up. Run the setup again.")
+            yield False
+            return
+        yield True
+
+
+def _encrypt_databases(home: Path) -> int:
+    """``--no-prompts`` (the one-step installer) also encrypts the databases, inside the run's window."""
+    from .databases_cli import databases_encrypt
+
+    print("\nEncrypting Mordred's databases.")
+    return databases_encrypt(home=home)
+
+
+def _seed_no_prompt_passphrase(*, home: Path, options: SetupOptions, session: FlowSession) -> int | None:
+    """``--no-prompts``: give the run its passphrase without asking; 1 (reported) when it cannot.
+
+    A keyvault this run creates gets a generated passphrase, saved inside the
+    backup file. A later run reads it back from that file, for a vault still
+    to be created. Without either, the session stays empty: a step that needs
+    the passphrase then meets the refusing prompt and is reported as manual.
+    """
+    from ..keyvault import _backup_file
+
+    if _probe_keyvault(home=home)[0] == "absent":
+        session.remember_passphrase(_backup_file.generate_passphrase())
+        return None
+    path = options.backup_file.expanduser() if options.backup_file is not None else None
+    if path is None or not path.is_file():
+        return None
+    try:
+        passphrase, _blob = _backup_file.unpack(path.read_bytes())
+    except (OSError, _backup_file.BackupFileCorrupt):
+        _term.emit_error(f"cannot read the backup file {_term.terminal_safe(str(path))}.")
+        return 1
+    if passphrase is not None:
+        session.remember_passphrase(passphrase)
+    return None
 
 
 def _run_steps(
@@ -1375,14 +1475,23 @@ def cli_setup(args: argparse.Namespace) -> int:
     needs a prompt aborts cleanly instead of blocking.
     """
     non_interactive = bool(getattr(args, "non_interactive", False))
+    no_prompts = bool(getattr(args, "no_prompts", False))
+    if no_prompts and not getattr(args, "backup_file", None):
+        _term.emit_error("--no-prompts needs --backup-file: the backup file holds the generated passphrase.")
+        return 2
+    unattended_keys = getattr(args, "unattended_keys", None)
+    if no_prompts and unattended_keys is None:
+        unattended_keys = False  # Touch ID for the keys, never a question
     options = SetupOptions(
         non_interactive=non_interactive,
         with_hermes_setup=bool(getattr(args, "with_hermes_setup", False)),
         skip_hermes_setup=bool(getattr(args, "skip_hermes_setup", False)),
-        unattended_keys=getattr(args, "unattended_keys", None),
+        unattended_keys=unattended_keys,
         store_seed_for_hd=bool(getattr(args, "store_seed_for_hd", True)),
+        backup_file=Path(args.backup_file) if getattr(args, "backup_file", None) else None,
+        no_prompts=no_prompts,
     )
-    prompt_io: PromptIO = _RefusingPromptIO() if non_interactive else resolve_prompt_io(None)
+    prompt_io: PromptIO = _RefusingPromptIO() if non_interactive or no_prompts else resolve_prompt_io(None)
     from ._windows_gates import host_platform
 
     return run_setup(

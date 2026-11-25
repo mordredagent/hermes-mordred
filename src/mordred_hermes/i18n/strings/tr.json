@@ -1,0 +1,36 @@
+{
+  "button": {
+    "cancel": "Vazgeç",
+    "download": "İndir",
+    "notNow": "Şimdi Değil",
+    "ok": "Tamam",
+    "showLog": "Günlüğü Göster",
+    "stopAndContinue": "Durdur ve Devam Et",
+    "tryAgain": "Yeniden Dene"
+  },
+  "installer": {
+    "closeAndRetry": "Mordred hâlâ çalışıyor. Mordred'i kapatın, ardından Mordred yükleyicisini yeniden açın.",
+    "couldNotStop": "Mordred durdurulamadı. Mac'i yeniden başlatın, ardından Mordred yükleyicisini yeniden açın.",
+    "done": "Mordred yüklendi ve oturum açtığınızda başlar. Yedek dosyası: {path}. Anahtarlarınızı başka bir Mac'te geri yüklemek için tek başına bu dosya yeterlidir; bu yüzden bir kopyasını güvenli ve gizli bir yerde saklayın.",
+    "downloadFailed": "{name} indirilemedi. Ağ bağlantısını denetleyin, ardından Mordred yükleyicisini yeniden açın: kaldığı yerden devam eder.",
+    "downloadProgress": "{name} indiriliyor: %{percent} tamamlandı.",
+    "downloadStarted": "{name} indiriliyor (yaklaşık {size} MB). Yükleyici kendi kendine devam eder.",
+    "failed": "Mordred yüklenemedi: {reason}",
+    "fileInTheWay": "{path} engel oluşturuyor ve Mordred tarafından oluşturulmadı. Başka bir yere taşıyın, ardından Mordred yükleyicisini yeniden açın.",
+    "largeModel": "Büyük model de (Bonsai 27B, yaklaşık 8 GB) indirilsin mi? Geçmişiniz için başlıklar ve konular yazar. Mordred yükleyicisini yeniden açarak daha sonra da ekleyebilirsiniz.",
+    "needsTools": "Mordred, Apple'ın Komut Satırı Araçları'na ihtiyaç duyar. Az önce açılan pencereden yükleyin, ardından Mordred yükleyicisini yeniden açın.",
+    "serverDidNotStop": "Mordred'in sunucusu durmadı. Bir dakika bekleyin, ardından Mordred yükleyicisini yeniden açın.",
+    "stillRunning": "Mordred hâlâ çalışıyor (önceki bir yükleme veya bir Hermes penceresi). Durdurulup devam edilsin mi?",
+    "touchIdNext": "Sırada Touch ID ile onaylama var: Mordred'in anahtarlarını ayarlamak için şimdi bir kez, Mordred başlarken de birazdan bir kez daha. Tamam'ı tıklayın, ardından Touch ID penceresi göründüğünde sensöre dokunun.",
+    "touchIdNotConfirmed": "Touch ID onaylanmadığı için anahtarlar ayarlanmadı. Mordred yükleyicisini yeniden açın.",
+    "touchIdRetry": "Touch ID onaylanmadığı için henüz hiçbir şey ayarlanmadı. Yeniden denensin mi?",
+    "unexpected": "Bir adım beklenmedik şekilde durdu (satır {line}). Hangisi olduğunu görmek için günlüğü açın; ardından Mordred yükleyicisini yeniden açın: kaldığı yerden devam eder.",
+    "unfinishedKeys": "Önceki, tamamlanmamış bir kurulumun anahtarları kaldırılamadı. Mordred yükleyicisini yeniden açın."
+  },
+  "touchId": {
+    "approveBrowser": "“{label}” tarayıcısının Mordred'e bağlanmasına izin ver. Kod {code}",
+    "credentials": "Mordred'in Telegram veya posta oturum açma bilgilerini oku",
+    "setup": "Mordred'in anahtarlarını ve şifrelemesini ayarla",
+    "startup": "Mordred'in kasasını ve veritabanlarını aç"
+  }
+}

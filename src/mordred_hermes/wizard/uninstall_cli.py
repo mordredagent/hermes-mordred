@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import functools
 import shutil
 import sys
 from collections.abc import Callable
@@ -681,13 +682,26 @@ def _remove_helpers(
                 _term.emit_warn(f"kept {helper.path}: {helper.reason}.")
 
 
-def _default_telegram_forget() -> object:
+def _default_telegram_forget(home: Path) -> object:
+    """Revoke and forget the Telegram session of ``home`` (the root or one profile).
+
+    On POSIX the credential store is bound to ``home`` explicitly: the default
+    store would always resolve to the root home, so a profile's session would
+    never be revoked. The Windows route keeps its own ceremony unchanged.
+    """
     from . import _windows_telegram
     from .telegram_cli import _telegram_logout_result, telegram_logout
 
     if _windows_telegram.routed():
         return telegram_logout(forget=True, force=True)
-    return _telegram_logout_result(forget=True, force=True)
+    return _telegram_logout_result(forget=True, force=True, store=_telegram_store(home))
+
+
+def _telegram_store(home: Path) -> object:
+    """The POSIX Telegram credential store bound to ``home`` (its hardware backend is profile-bound too)."""
+    from ..extension.telegram.tee import TeeSecretStore
+
+    return TeeSecretStore(home / "mordred/telegram")
 
 
 def _delete_vault_keys(
@@ -759,7 +773,8 @@ def _forget_telegram_for_uninstall(ctx: UninstallContext) -> None:
     from .._core._database_contracts import DatabaseRefused
     from .telegram_cli import _TelegramLogoutOutcome
 
-    forget = ctx.telegram_forget or _default_telegram_forget
+    # Bind the default to this purge target: the root or one profile home.
+    forget: Callable[[], object] = ctx.telegram_forget or functools.partial(_default_telegram_forget, ctx.home)
     try:
         outcome = forget()
     except Exception as exc:

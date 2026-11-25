@@ -22,7 +22,6 @@ Current contract:
 | `pre_tool_call` | `tool_name` | Privacy and network generic tool guards |
 | `post_tool_call` | `tool_name`, `args`, `result`, `session_id`, `task_id`, `tool_call_id` (`turn_id` and `status` only when present; hermes-agent 0.13.0 passes neither) | Recording Hermes's own browser calls (activity) |
 | `pre_api_request` | `provider`, `base_url` | LLM and network egress policy |
-| `pre_gateway_dispatch` | `event`, `gateway` | Mandatory gateway E2E |
 | `pre_llm_call` | `user_message`, `session_id`, `platform` (`task_id` and `turn_id` only when present; hermes-agent 0.13.0 passes neither) | Turn-start browser history and the turn record for capture and chat corrections (activity); dbcrypt's per-turn database check reads nothing |
 | `post_llm_call` | `session_id` (`task_id` and `turn_id` only when present; hermes-agent 0.13.0 passes neither) | The end of a turn: Hermes's capture writes the turn's held task start or correction (activity) |
 | `transform_tool_result` | `tool_name`, `args`, `result`, `session_id`, `task_id` | Browser history block in navigation results (activity) |
@@ -197,17 +196,11 @@ turn than the held text's leaves it for that turn). A turn that gets no
 `post_llm_call` has its text written by the session's next `pre_llm_call`. The
 callback catches every `Exception` and returns `None`.
 
-## 6. `pre_gateway_dispatch` payload and return action shape
+## 6. `pre_gateway_dispatch` (no longer consumed)
 
-The e2e component reads `event` and `gateway` to authenticate `ENC:v3`, bind channel
-keys to the routed destination, install reply-in-kind protection, and skip
-plaintext or invalid mandatory-platform events before agent dispatch.
-
-The callback returns the Hermes-supported allow/rewrite/skip action. Failure to
-resolve the adapter, channel key, authenticated context, replay store, or
-outbound protection is fail-closed for encrypted or mandatory-E2E traffic.
-
-See [`SLACK_E2E.md`](./SLACK_E2E.md) for the wire contract.
+The e2e component used this hook for the Slack/Discord `ENC:v3` transport. That
+transport was removed, and Mordred no longer registers `pre_gateway_dispatch`.
+[`SLACK_E2E.md`](./SLACK_E2E.md) keeps the former wire contract.
 
 ## 7. `pre_approval_request` / `post_approval_response` payload
 

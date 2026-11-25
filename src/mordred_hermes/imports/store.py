@@ -1,4 +1,4 @@
-"""``ImportStore``: imported conversations, messages and parts in ``mordred.db`` (``import_*`` v2).
+"""``ImportStore``: imported conversations, messages and parts in ``mordred.db`` (``import_*`` v3).
 
 Mirrors :class:`mordred_hermes.activity.store.ActivityStore`: :func:`open_import_store`
 runs the activity protection gate and passes the gate's keyed opener; tests pass
@@ -109,6 +109,7 @@ keeps a revised row and the merged metadata unpublished until the batch is.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import os
 import re
@@ -121,7 +122,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final, NamedTuple
+from typing import Any, Final, NamedTuple, TypeVar
 
 from .._core._database_contracts import DatabaseRefused
 from ..activity._gate import (
@@ -133,7 +134,8 @@ from ..activity._gate import (
     runtime_authority,
 )
 from ..activity.store import BUSY_TIMEOUT_S, _db_errors
-from . import _mail_reconcile, _schema
+from ..keyvault._storage import KeyvaultResetInProgressError
+from . import _mail_reconcile, _schema, analysis
 from .records import (
     ConversationKind,
     ImportConversation,
@@ -175,11 +177,33 @@ __all__ = [
 ]
 
 SUPPORTED_SCHEMA_VERSION: Final = _schema.SCHEMA_VERSION
+
+#: How long an import's writes wait for the database. The recall topics updater
+#: rewrites its tables in one transaction (5-10 s measured with ~19k parts); an
+#: import that waited only BUSY_TIMEOUT_S was refused as busy while it wrote.
+WRITE_BUSY_TIMEOUT_S: Final = 30.0
+_WAIT_LIMIT: contextvars.ContextVar[float | None] = contextvars.ContextVar("import_store_wait_limit", default=None)
+
+
+@contextlib.contextmanager
+def waiting_at_most(seconds: float) -> Iterator[None]:
+    """Bound this context's waits for the database (a revocation keeps its own deadline)."""
+    token = _WAIT_LIMIT.set(max(0.0, seconds))
+    try:
+        yield
+    finally:
+        _WAIT_LIMIT.reset(token)
+
+
+def _write_wait() -> float:
+    limit = _WAIT_LIMIT.get()
+    return WRITE_BUSY_TIMEOUT_S if limit is None else min(WRITE_BUSY_TIMEOUT_S, limit)
+
+
 MAX_SEARCH_LIMIT: Final = 500
 MAX_NEIGHBORS: Final = 50
-#: FTS5 ``trigram`` needs three characters to match; shorter terms fall back to ``LIKE``.
-_TRIGRAM: Final = 3
 _MAX_TERMS: Final = 32
+_A = TypeVar("_A")
 _CHUNK: Final = 500  # bound on ``IN (...)`` parameters per statement
 _COUNT_KEY_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _WRITES: Final = frozenset({"inserted", "revised"})
@@ -377,6 +401,8 @@ def _refusing() -> Iterator[None]:
     except ActivityRefused as exc:  # the gate's opener refused an unkeyed connection
         raise ImportRefused(exc.code) from None
     except DatabaseRefused:
+        raise ImportRefused("store_unavailable") from None
+    except KeyvaultResetInProgressError:  # a pending keyvault reset fences every write (an OSError, not SQLite's)
         raise ImportRefused("store_unavailable") from None
     except _db_errors() as exc:
         raise ImportRefused(_classify(exc)) from None
@@ -585,18 +611,23 @@ def _terms(query: str | None) -> list[str]:
     return list(dict.fromkeys(word for word in words if word))[:_MAX_TERMS]
 
 
-def _phrase(term: str) -> str:
-    """An FTS5 string literal: the term can never become an operator, column filter or prefix query."""
-    return '"' + term.replace('"', '""') + '"'
+def _analysed(run: Callable[[], _A]) -> _A:
+    """``run`` with an unavailable analyser (a broken install) refused like any other store failure."""
+    try:
+        return run()
+    except analysis.AnalyzerUnavailable:
+        raise ImportRefused("store_unavailable") from None
 
 
-def _like(term: str) -> str:
-    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%{escaped}%"
+def _index_parts(conn: sqlite3.Connection, where: str, params: Sequence[Any]) -> None:
+    """Write the term-index rows of the parts selected by ``where`` (they have none yet)."""
+    rows = conn.execute(f"SELECT id, text FROM import_parts WHERE {where}", params).fetchall()  # noqa: S608 - only placeholders and fixed identifiers are interpolated; values are bound
+    entries = _analysed(lambda: [(part_id, analysis.index_text(text)) for part_id, text in rows])
+    conn.executemany("INSERT INTO import_parts_fts (rowid, terms) VALUES (?, ?)", entries)
 
 
 def _search_sql(
-    terms: Sequence[str],
+    match: str | None,
     *,
     conv_uids: Sequence[str] | None,
     since: int | None,
@@ -604,21 +635,16 @@ def _search_sql(
     source: str | None,
     limit: int,
 ) -> tuple[str, list[Any]]:
-    indexed = [term for term in terms if len(term) >= _TRIGRAM]
     params: list[Any] = []
     where: list[str] = []
-    if indexed:
+    if match is not None:
         tables = f"import_parts_fts JOIN import_parts p ON p.id = import_parts_fts.rowid {_MESSAGE_OF_PART}"
         score, order = "bm25(import_parts_fts)", "score, m.sent_at DESC, p.part_uid"
         where.append("import_parts_fts MATCH ?")
-        params.append(" AND ".join(_phrase(term) for term in indexed))
+        params.append(match)
     else:
         tables = _COMMITTED_PARTS
         score, order = "0.0", "m.sent_at IS NULL, m.sent_at DESC, p.part_uid"
-    for term in terms:
-        if len(term) < _TRIGRAM:
-            where.append("p.text LIKE ? ESCAPE '\\'")
-            params.append(_like(term))
     if conv_uids is not None:
         where.append(f"m.conv_uid IN ({_marks(len(conv_uids))})")
         params.extend(conv_uids)
@@ -662,7 +688,7 @@ class ImportStore:
             conn = self._opener(self.path)
             try:
                 conn.isolation_level = None  # explicit BEGIN / COMMIT below
-                conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_S * 1000)}")
+                conn.execute(f"PRAGMA busy_timeout = {int(_write_wait() * 1000)}")
                 yield conn
             finally:
                 conn.close()
@@ -703,7 +729,7 @@ class ImportStore:
         exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'import_meta'").fetchone()
         if exists is None:
             return None
-        return {str(key): str(value) for key, value in conn.execute("SELECT key, value FROM import_meta")}
+        return {str(key): str(value) for key, value in conn.execute("SELECT key, value FROM import_meta").fetchall()}
 
     def initialize(self, profile_home: Path) -> ImportMeta:
         """Create the ``import_*`` schema bound to ``profile_home``, or verify an existing one.
@@ -713,7 +739,8 @@ class ImportStore:
         bound = os.path.realpath(profile_home)
         from ..keyvault._reset_authority import check_reset_access
 
-        check_reset_access(Path(bound))
+        with _refusing():
+            check_reset_access(Path(bound))
         with self._transaction() as conn:
             meta = self._read_meta(conn)
             if meta is None:
@@ -735,8 +762,12 @@ class ImportStore:
         if any(step not in _schema.MIGRATIONS for step in steps):
             raise ImportRefused("store_unavailable")
         for step in steps:
+            if step in _schema.REINDEX_AFTER:
+                conn.execute("PRAGMA secure_delete = ON")  # the dropped index's pages are zeroed
             for statement in _schema.MIGRATIONS[step]:
                 conn.execute(statement)
+            if step in _schema.REINDEX_AFTER:
+                _index_parts(conn, "1", ())
         conn.execute("UPDATE import_meta SET value = ? WHERE key = 'schema_version'", (str(SUPPORTED_SCHEMA_VERSION),))
         return replace(meta, schema_version=SUPPORTED_SCHEMA_VERSION)
 
@@ -1171,6 +1202,7 @@ class ImportStore:
         conn.execute("DELETE FROM import_parts WHERE source_uid = ?", (msg.source_uid,))
         rows = [_values(part, _PART_FIELDS) for part in msg.parts]
         conn.executemany(f"INSERT INTO import_parts ({_PART_COLUMNS}) VALUES ({_marks(len(rows[0]))})", rows)  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
+        _index_parts(conn, "source_uid = ?", (msg.source_uid,))
 
     def delete_source(
         self, source: Source | str, source_account: str, *, expected_retired_account: str | None = None
@@ -1269,7 +1301,7 @@ class ImportStore:
                     f"SELECT m.conv_uid, count(*), max(m.sent_at) FROM {_COMMITTED_MESSAGES} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                     f"WHERE m.conv_uid IN ({_marks(len(chunk))}) GROUP BY m.conv_uid",
                     chunk,
-                ):
+                ).fetchall():
                     stats[str(conv_uid)] = (int(count), None if last is None else int(last))
         return stats
 
@@ -1297,7 +1329,7 @@ class ImportStore:
                     "JOIN import_parts p ON p.source_uid = m.source_uid "
                     f"WHERE m.conv_uid IN ({_marks(len(chunk))}){clauses}"
                 )
-                source_uids.extend(str(row[0]) for row in conn.execute(sql, [*chunk, *values]))
+                source_uids.extend(str(row[0]) for row in conn.execute(sql, [*chunk, *values]).fetchall())
             hydrated = self._hydrate(conn, source_uids)
             for msg in sorted((msg for _conv, msg in hydrated.values()), key=_reading_order):
                 by_conv.setdefault(msg.conv_uid, []).append(msg)
@@ -1348,7 +1380,7 @@ class ImportStore:
             uids: set[str] = set()
             for chunk in chunks:
                 clause = f" AND m.message_id IN ({_marks(len(chunk))})" if chunk else ""
-                uids.update(str(row[0]) for row in conn.execute(sql + clause, [*params, *chunk]))
+                uids.update(str(row[0]) for row in conn.execute(sql + clause, [*params, *chunk]).fetchall())
             hydrated = self._hydrate(conn, sorted(uids))
         found = sorted(
             hydrated.values(),
@@ -1366,12 +1398,14 @@ class ImportStore:
         source: Source | str | None = None,
         limit: int = 20,
     ) -> list[SearchHit]:
-        """Parts matching every term of ``query`` (all parts without one), filtered in SQL.
+        """Parts matching every word of ``query`` (all parts without one), filtered in SQL.
 
-        Terms of three or more characters match through the trigram FTS index
-        (substring, case-insensitive) and rank by ``bm25``; shorter terms
-        match by ``LIKE``. ``since <= sent_at < until`` (unix seconds) excludes
-        unknown dates. Without indexed terms the newest parts come first.
+        Each whitespace-separated word is analysed like the stored text
+        (:mod:`.analysis`) and must match as a phrase of whole terms; hits rank
+        by ``bm25``. A word with no content term (a lone particle) is ignored,
+        and a query with none matches nothing. ``since <= sent_at < until``
+        (unix seconds) excludes unknown dates. Without a query the newest
+        parts come first.
         """
         hits, _ = self.search_with_parts(
             query, conv_uids=conv_uids, since=since, until=until, source=source, limit=limit, parts_limit=0
@@ -1397,8 +1431,12 @@ class ImportStore:
         """
         if limit <= 0 or (conv_uids is not None and not conv_uids):
             return [], {}
+        words = _terms(query)
+        match = _analysed(lambda: analysis.match_query(words)) if words else None
+        if words and match is None:
+            return [], {}
         sql, params = _search_sql(
-            _terms(query),
+            match,
             conv_uids=None if conv_uids is None else list(dict.fromkeys(conv_uids)),
             since=since,
             until=until,
@@ -1417,6 +1455,27 @@ class ImportStore:
         return [
             SearchHit(str(part), str(source_uid), str(conv), float(score)) for part, source_uid, conv, score in rows
         ]
+
+    def document_frequencies(self, words: Sequence[str], *, cap: int = 10_000) -> tuple[dict[str, int], int]:
+        """Per word, the stored parts it matches as :meth:`search` would (at most ``cap``); and the part total.
+
+        A word with no content term counts 0. The counts are what an IDF weight needs.
+        """
+        phrases = _analysed(lambda: {word: analysis.phrase(word) for word in dict.fromkeys(words)})
+        counts: dict[str, int] = {}
+        with self._transaction(write=False) as conn:
+            total = int(conn.execute("SELECT count(*) FROM import_parts").fetchone()[0])
+            for word, found in phrases.items():
+                if found is None:
+                    counts[word] = 0
+                    continue
+                counts[word] = int(
+                    conn.execute(
+                        "SELECT count(*) FROM (SELECT 1 FROM import_parts_fts WHERE import_parts_fts MATCH ? LIMIT ?)",
+                        (found, cap),
+                    ).fetchone()[0]
+                )
+        return counts, total
 
     def parts_for(self, part_uids: Iterable[str]) -> dict[str, StoredPart]:
         """Hydrate ``part_uids`` (unknown or uncommitted ones are left out) with their message and conversation."""
@@ -1454,7 +1513,7 @@ class ImportStore:
             ).fetchone()
             if anchor is None:
                 return []
-            order = [str(row[0]) for row in conn.execute(_NEIGHBOR_SQL, (anchor[0], anchor[1], span, span))]
+            order = [str(row[0]) for row in conn.execute(_NEIGHBOR_SQL, (anchor[0], anchor[1], span, span)).fetchall()]
             hydrated = self._hydrate(conn, order)
         found = [hydrated[uid] for uid in order if uid in hydrated]
         return [StoredPart(conv, msg, part) for conv, msg in found for part in msg.parts]
@@ -1508,20 +1567,24 @@ class ImportStore:
                 empty = {"conversations": 0, "messages": 0, "parts": 0, "uncommitted_messages": 0}
                 sources.setdefault(source, empty)[key] += count
 
-            for source, count in conn.execute("SELECT source, count(*) FROM import_conversations GROUP BY source"):
+            for source, count in conn.execute(
+                "SELECT source, count(*) FROM import_conversations GROUP BY source"
+            ).fetchall():
                 add(str(source), "conversations", int(count))
             for source, committed, count in conn.execute(
                 "SELECT c.source, coalesce(r.state = 'committed', 0), count(*) FROM import_messages m "
                 "JOIN import_conversations c ON c.conv_uid = m.conv_uid "
                 "LEFT JOIN import_runs r ON r.run_id = m.run_id GROUP BY 1, 2"
-            ):
+            ).fetchall():
                 add(str(source), "messages" if committed else "uncommitted_messages", int(count))
             for source, count in conn.execute(
                 f"SELECT c.source, count(*) FROM {_COMMITTED_PARTS} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 "JOIN import_conversations c ON c.conv_uid = m.conv_uid GROUP BY 1"
-            ):
+            ).fetchall():
                 add(str(source), "parts", int(count))
-            runs = dict(conn.execute("SELECT state, count(*) FROM import_runs GROUP BY state ORDER BY state"))
+            runs = dict(
+                conn.execute("SELECT state, count(*) FROM import_runs GROUP BY state ORDER BY state").fetchall()
+            )
             last = conn.execute(
                 "SELECT run_id, source, state, started_at, finished_at, counts_json FROM import_runs "
                 "ORDER BY started_at DESC, rowid DESC LIMIT 1"
@@ -1557,7 +1620,7 @@ def open_import_store(home: Path) -> ImportStore:
             raise ImportRefused("store_unavailable") from None
 
         def opener(target: Path) -> sqlite3.Connection:
-            return _open_guarded(target, authority=authority, timeout=BUSY_TIMEOUT_S)
+            return _open_guarded(target, authority=authority, timeout=_write_wait())
 
         store = ImportStore(path, opener)
         store.initialize(Path(os.path.realpath(home)))

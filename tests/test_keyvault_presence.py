@@ -13,6 +13,8 @@ from mordred_hermes.keyvault._seckey_errors import _OpsError
 
 class Channel:
     def __init__(self, *args):
+        self.args = args
+        self.payloads = []
         self.calls = 0
         self.closed = False
         self.entered = threading.Event()
@@ -21,6 +23,7 @@ class Channel:
         self.fail = False
 
     def exchange(self, payload, timeout):
+        self.payloads.append(payload)
         self.calls += 1
         self.entered.set()
         assert self.release.wait(2)
@@ -291,3 +294,288 @@ def test_cancellation_is_confined_to_session_and_purpose(setup_pool, monkeypatch
         raise RuntimeError("cancelled")
     assert channels[0].closed
     assert not channels[1].closed and not channels[2].closed
+
+
+# --- operation windows: one prompt for an operation's own keys -----------------
+
+
+def test_a_window_admits_the_operations_keys_but_never_credential_keys(tmp_path, monkeypatch):
+    import sys
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS eligibility")
+    from mordred_hermes.keyvault._seckey_errors import _application_tag
+
+    monkeypatch.setattr(p, "_ensure_monitor", lambda: None)
+    vault, database = _application_tag("mordred-hermes.vault.0123"), _application_tag("default")
+    assert p.window_for(vault) is None
+    with p.operation_window(tmp_path, "setup"):
+        window = p.window_for(vault)
+        assert window is not None and window.seconds == 300 and window.scope.purpose == "setup"
+        assert p.window_for(database) is window
+        assert p.window_for(_application_tag("mordred-hermes.telegram.credentials.v1")) is None
+        assert p.window_for(_application_tag("mordred-hermes.mail.credentials.v1")) is None
+        with pytest.raises(_OpsError, match="already open"):
+            p.open_window(tmp_path, "startup")
+    assert p.window_for(vault) is None
+    with pytest.raises(KeyError):
+        p.open_window(tmp_path, "wallet")
+
+
+def test_one_window_helper_serves_several_keys_and_closes_with_the_window(tmp_path, monkeypatch):
+    import sys
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS eligibility")
+    from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps
+
+    made = []
+
+    def factory(*args, **kwargs):
+        channel = Channel(*args)
+        made.append((channel, kwargs))
+        return channel
+
+    pool = p._PresencePool(factory=factory)
+    monkeypatch.setattr(p, "_pool", pool)
+    monkeypatch.setattr(p, "_ensure_monitor", lambda: None)
+    calls = []
+    ops = _HelperSecKeyOps("helper")
+    capabilities = {"presence_session": 1, "presence_keys": 1, "presence_stores": 1}
+    ops._invoke = lambda payload: calls.append(payload["cmd"]) or capabilities
+    try:
+        with p.operation_window(tmp_path, "startup"):
+            for tag in (b"vault-key", b"database-key", b"vault-key"):
+                assert ops.key_exchange(tag, b"peer") == b"\xab" * 32
+            assert len(made) == 1
+            channel, kwargs = made[0]
+            assert kwargs == {"max_keys": p.WINDOW_KEYS, "purpose": "startup"}
+            assert channel.calls == 3
+            assert calls == ["capabilities"]
+        assert channel.closed  # the window's end kills its helper
+    finally:
+        pool.close()
+
+
+def test_one_window_helper_serves_keys_in_several_stores(tmp_path, monkeypatch):
+    import sys
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS eligibility")
+    from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps
+
+    made = []
+
+    def factory(*args, **kwargs):
+        made.append(Channel(*args))
+        return made[-1]
+
+    pool = p._PresencePool(factory=factory)
+    monkeypatch.setattr(p, "_pool", pool)
+    monkeypatch.setattr(p, "_ensure_monitor", lambda: None)
+    capabilities = {"presence_session": 1, "presence_keys": 1, "presence_stores": 1}
+    keyvault = _HelperSecKeyOps("helper")
+    keyvault._invoke = lambda payload: capabilities
+    vault_store = tmp_path / "mordred" / "vault" / "sekey"
+    vault = keyvault.with_store_override("MORDRED_SEKEY_STORE", vault_store)
+    vault._invoke = lambda payload: capabilities
+    linux = keyvault.with_store_override("MORDRED_TPMKEY_STORE", tmp_path / "tpm")
+    linux._invoke = lambda payload: capabilities if payload["cmd"] == "capabilities" else {"shared_hex": "cd" * 32}
+    try:
+        with p.operation_window(tmp_path, "setup"):
+            keyvault.key_exchange(b"keyvault-key", b"peer")
+            vault.key_exchange(b"vault-key", b"peer")
+            assert linux.key_exchange(b"tpm-key", b"peer") == b"\xcd" * 32  # not a Secure Enclave store: one-shot
+            assert len(made) == 1  # one helper, so one Touch ID, for both stores
+            (channel,) = made
+            assert channel.args[1] is None  # spawned for the default store; requests name any other
+            assert [payload.get("store") for payload in channel.payloads] == [None, str(vault_store)]
+    finally:
+        pool.close()
+
+
+def test_only_a_window_names_a_store(tmp_path, monkeypatch):
+    monkeypatch.setattr(p, "_ensure_monitor", lambda: None)
+    pool = p._PresencePool(factory=Channel)
+    credential = p._Scope(tmp_path, ("hermes", "session"), "telegram", lambda: True)
+    with pytest.raises(_OpsError):
+        pool.exchange(credential, "helper", None, b"telegram-key", b"peer", 300, "source", store="/elsewhere")
+    pool.close()
+
+
+def test_an_old_helper_keeps_one_prompt_per_key_inside_a_window(tmp_path, monkeypatch):
+    import sys
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS eligibility")
+    from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps
+
+    monkeypatch.setattr(p, "_ensure_monitor", lambda: None)
+    calls = []
+
+    def invoke(payload):
+        calls.append(payload["cmd"])
+        if payload["cmd"] == "capabilities":
+            return {"presence_session": 1}  # no presence_stores: no multi-key sessions
+        return {"shared_hex": "ab" * 32}
+
+    ops = _HelperSecKeyOps("helper")
+    ops._invoke = invoke
+    with p.operation_window(tmp_path, "setup"):
+        ops.key_exchange(b"vault-key", b"peer")
+        ops.key_exchange(b"database-key", b"peer")
+    assert calls == ["capabilities", "ecdh", "ecdh"]
+
+
+def test_operation_presence_is_opt_in(tmp_path):
+    (tmp_path / "mordred").mkdir()
+    assert not p.operation_presence_configured(tmp_path)
+    (tmp_path / "mordred" / p.OPERATION_PRESENCE_MARKER).symlink_to(tmp_path / "elsewhere")
+    assert not p.operation_presence_configured(tmp_path)  # a link is not the marker
+    (tmp_path / "mordred" / p.OPERATION_PRESENCE_MARKER).unlink()
+    p.enable_operation_presence(tmp_path)
+    p.enable_operation_presence(tmp_path)  # idempotent
+    assert p.operation_presence_configured(tmp_path)
+    assert (tmp_path / "mordred" / p.OPERATION_PRESENCE_MARKER).stat().st_mode & 0o777 == 0o600
+
+
+def test_creating_a_key_or_writing_config_keeps_a_window_but_ends_credential_sessions(tmp_path, monkeypatch):
+    import sys
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS eligibility")
+    from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps
+
+    made = []
+
+    def factory(*args, **kwargs):
+        made.append(Channel(*args))
+        return made[-1]
+
+    pool = p._PresencePool(factory=factory)
+    monkeypatch.setattr(p, "_pool", pool)
+    monkeypatch.setattr(p, "_ensure_monitor", lambda: None)
+    ops = _HelperSecKeyOps("helper")
+    ops._invoke = lambda payload: (
+        {"presence_session": 1, "presence_keys": 1, "presence_stores": 1}
+        if payload["cmd"] == "capabilities"
+        else {"public_key_hex": "04" + "ab" * 64}
+    )
+    credential = p._Scope(tmp_path, ("hermes", "session"), "telegram", lambda: True)
+    try:
+        with p.operation_window(tmp_path, "setup"):
+            ops.key_exchange(b"vault-key", b"peer")
+            pool.exchange(credential, "helper", None, b"telegram-key", b"peer", 300, "source")
+            window_channel, credential_channel = made
+            ops.create_keypair(b"new-key", "label")
+            (tmp_path / "config.yaml").write_text("changed: true\n")
+            pool.reap()
+            assert credential_channel.closed
+            assert not window_channel.closed
+            ops.key_exchange(b"new-key", b"peer")
+            assert len(made) == 2 and window_channel.calls == 2
+        assert window_channel.closed
+    finally:
+        pool.close()
+
+
+def _confirming_pool(monkeypatch, capabilities):
+    from mordred_hermes.keyvault import _seckey_helper
+
+    made = []
+
+    def factory(*args, **kwargs):
+        made.append(Channel(*args))
+        return made[-1]
+
+    pool = p._PresencePool(factory=factory)
+    monkeypatch.setattr(p, "_pool", pool)
+    monkeypatch.setattr(p, "_ensure_monitor", lambda: None)
+    monkeypatch.setattr(_seckey_helper, "find_sekey_helper", lambda: "helper")
+    monkeypatch.setattr(_seckey_helper, "_run_helper", lambda binary, payload, **kw: capabilities)
+    return pool, made
+
+
+def test_a_window_confirms_first_and_its_keys_reuse_that_touch_id(tmp_path, monkeypatch):
+    import sys
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS eligibility")
+    from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps
+
+    capabilities = {"presence_session": 1, "presence_keys": 1, "presence_stores": 1, "presence_confirm": 1}
+    pool, made = _confirming_pool(monkeypatch, capabilities)
+    ops = _HelperSecKeyOps("helper")
+    ops._invoke = lambda payload: capabilities
+    try:
+        with p.operation_window(tmp_path, "setup"):
+            made_before = list(made)
+            # The stand-in channel answers ``shared_hex``; a real helper answers ``ok``.
+            with pytest.raises(_OpsError):
+                p.confirm_window()
+            assert made_before == [] and len(made) == 1
+            assert made[0].payloads == [{"cmd": "authenticate"}]
+    finally:
+        pool.close()
+
+
+def test_a_confirmed_window_serves_the_keys_without_another_helper(tmp_path, monkeypatch):
+    import sys
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS eligibility")
+    from mordred_hermes.keyvault._seckey_helper import _HelperSecKeyOps
+
+    capabilities = {"presence_session": 1, "presence_keys": 1, "presence_stores": 1, "presence_confirm": 1}
+    pool, made = _confirming_pool(monkeypatch, capabilities)
+    original = Channel.exchange
+
+    def exchange(self, payload, timeout):
+        reply = original(self, payload, timeout)
+        return {"ok": True} if payload["cmd"] == "authenticate" else reply
+
+    monkeypatch.setattr(Channel, "exchange", exchange)
+    ops = _HelperSecKeyOps("helper")
+    ops._invoke = lambda payload: capabilities
+    try:
+        with p.operation_window(tmp_path, "setup"):
+            p.confirm_window()
+            ops.key_exchange(b"keyvault-key", b"peer")
+            assert len(made) == 1
+            assert [payload["cmd"] for payload in made[0].payloads] == ["authenticate", "ecdh"]
+    finally:
+        pool.close()
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [{"presence_session": 1, "presence_keys": 1, "presence_stores": 1}, {"presence_session": 1}],
+)
+def test_a_helper_that_cannot_confirm_ahead_asks_at_first_use(tmp_path, monkeypatch, capabilities):
+    import sys
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS eligibility")
+    pool, made = _confirming_pool(monkeypatch, capabilities)
+    try:
+        with p.operation_window(tmp_path, "setup"):
+            p.confirm_window()
+        assert made == []
+    finally:
+        pool.close()
+
+
+def test_confirming_needs_an_open_window(monkeypatch):
+    pool, made = _confirming_pool(monkeypatch, {"presence_confirm": 1, "presence_stores": 1})
+    p.confirm_window()
+    assert made == []
+    pool.close()
+
+
+def test_only_a_window_confirms_ahead(tmp_path, monkeypatch):
+    monkeypatch.setattr(p, "_ensure_monitor", lambda: None)
+    pool = p._PresencePool(factory=Channel)
+    credential = p._Scope(tmp_path, ("hermes", "session"), "telegram", lambda: True)
+    with pytest.raises(_OpsError):
+        pool.exchange(credential, "helper", None, b"telegram-key", b"peer", 300, "source", confirm=True)
+    pool.close()

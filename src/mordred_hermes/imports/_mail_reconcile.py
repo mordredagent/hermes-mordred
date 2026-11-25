@@ -136,7 +136,7 @@ def _linked_conversations(
                 f"SELECT DISTINCT m.conv_uid FROM import_messages m {_RUN_AND_CONV} "  # noqa: S608 - only identifiers/placeholders are interpolated; values are bound
                 f"WHERE {_IN_SCOPE} AND m.message_id IN ({', '.join('?' for _ in parents)})",
                 (*scope, *parents),
-            )
+            ).fetchall()
         )
     involved.update(
         str(found[0])
@@ -145,6 +145,6 @@ def _linked_conversations(
             f"JOIN import_messages m ON m.source_uid = f.source_uid {_RUN_AND_CONV} "
             f"WHERE f.ref_message_id = ? AND {_COMMITTED_SCOPE}",
             (message_id, source, account),
-        )
+        ).fetchall()
     )
     return conv_uid, involved, (source, account)

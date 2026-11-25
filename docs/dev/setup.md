@@ -122,10 +122,9 @@ The extras defined by `[project.optional-dependencies]` in `pyproject.toml`. `uv
 | `extension` | `aiohttp` + `cryptography` + `requests[socks]` + `urllib3` | Browser extension WebSocket gateway and Tor-routed wallet RPC (`extension serve`) |
 | `ethereum` | `eth-keys` / `eth-account` / `rlp` / `eth-hash` | keyvault signing feature (`extension_sign.py`) |
 | `tor-control` | `stem` (Tor ControlPort cookie auth + liveness probe) | Tor liveness in strict mode |
-| `messaging` | `qrcode` | Device QR display for `extension pair` (falls back to plaintext if absent) |
 | `integration` | SOCKS5h client library + provider SDK | `pytest -m integration` network verification suite |
 
-> **CI uses two dependency profiles**: the main strict lane intentionally runs with only `.[dev,keyvault,extension]`, while `feature-extras` installs `ethereum` / `messaging` / `tor-control`, requires their imports, and runs the focused feature suites so `importorskip` cannot hide missing coverage. Use `uv sync --all-extras` when developing those optional features, and also reproduce the main profile before pushing (see `CI.md`).
+> **CI uses two dependency profiles**: the main strict lane intentionally runs with only `.[dev,keyvault,extension]`, while `feature-extras` installs `ethereum` / `tor-control` / `telegram`, requires their imports, and runs the focused feature suites so `importorskip` cannot hide missing coverage. Use `uv sync --all-extras` when developing those optional features, and also reproduce the main profile before pushing (see `CI.md`).
 
 > **Verifying discovery**: older Hermes releases' `hermes plugins list` does not show entry-point plugins (their `_discover_all_plugins` scanned directory-based plugins only). The loader side (`PluginManager.discover_and_load`) performs discovery + `register()`. To confirm that the Mordred plugin is discovered (`hermes-mordred plugins list` also shows per-component status):
 > ```sh
@@ -200,7 +199,7 @@ released package:
 
 ```sh
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 \
-  --reinstall "hermes-mordred[macos,extension,ethereum]==0.3.0a6"
+  --reinstall "hermes-mordred[macos,extension,ethereum]==0.3.0a7"
 
 uv pip check --python ~/.hermes/hermes-agent/venv/bin/python3
 ~/.hermes/hermes-agent/venv/bin/python3 -c \

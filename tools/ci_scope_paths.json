@@ -194,15 +194,12 @@
       "extension"
     ],
     "src/mordred_hermes/extension/chat.py": [],
-    "src/mordred_hermes/extension/discord_context.py": [],
     "src/mordred_hermes/extension/egress.py": [],
     "src/mordred_hermes/extension/errors.py": [],
     "src/mordred_hermes/extension/gateway_plugin.py": [
       "floor"
     ],
     "src/mordred_hermes/extension/history.py": [],
-    "src/mordred_hermes/extension/outbound.py": [],
-    "src/mordred_hermes/extension/standalone_outbound.py": [],
     "src/mordred_hermes/extension/page_headers.py": [],
     "src/mordred_hermes/extension/telegram/__init__.py": [
       "features"
@@ -413,9 +410,6 @@
     "src/mordred_hermes/wizard/direct_tools_cli.py": [
       "extension"
     ],
-    "src/mordred_hermes/wizard/extension_pair_cli.py": [
-      "features"
-    ],
     "src/mordred_hermes/wizard/policy_explainer.py": [],
     "tests/_dbcrypt_support.py": [],
     "tests/_desktop_page.py": [
@@ -462,12 +456,9 @@
       "extension",
       "macos"
     ],
-    "tests/extension/test_discord_context.py": [],
     "tests/extension/test_extension_chat.py": [],
     "tests/extension/test_extension_history.py": [],
     "tests/extension/test_extension_history_frames.py": [],
-    "tests/extension/test_extension_outbound.py": [],
-    "tests/extension/test_standalone_outbound.py": [],
     "tests/extension/test_extension_page_headers.py": [],
     "tests/extension/test_extension_serve.py": [],
     "tests/extension/test_extension_serve_shutdown.py": [
@@ -733,9 +724,6 @@
       "privacy"
     ],
     "tests/test_wizard_defaults.py": [],
-    "tests/test_wizard_extension_pair_cli.py": [
-      "features"
-    ],
     "tests/test_wizard_term.py": [],
     "tools/_dbcrypt_acceptance_common.py": [],
     "tools/_dbcrypt_acceptance_evidence.py": [],

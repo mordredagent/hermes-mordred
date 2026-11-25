@@ -164,18 +164,23 @@ def test_a_vault_created_elsewhere_meanwhile_is_reported_as_reused(
     assert committed == {"ok": True, "passphrase_reused": True}
 
 
-def test_nothing_to_do_and_optout(ceremony: Any) -> None:
+def test_nothing_to_do(ceremony: Any) -> None:
     ceremony.root.mkdir(parents=True)
     (ceremony.root / "manifest.1.mvmf").write_bytes(b"m")
     ceremony.state["enrolled"] = True
     assert _prepare(ceremony) == {"ok": False, "error": "vault_exists"}
     flow = _seams.vault_flows().prepare(reuse=True)
     assert ceremony.desktop.post(f"/vault/{flow.flow_id}/commit", {}) == {"ok": False, "error": "vault_exists"}
-    (ceremony.home / "mordred" / "env-vault.optout").write_text("opt-out\n", encoding="utf-8")
-    assert _prepare(ceremony) == {"ok": False, "error": "env_optout"}
-    flow = _seams.vault_flows().prepare(reuse=True)
-    assert ceremony.desktop.post(f"/vault/{flow.flow_id}/commit", {}) == {"ok": False, "error": "env_optout"}
     assert ceremony.state["env"] == []
+
+
+def test_an_optout_marker_without_a_vault_gets_the_new_vault_flow(ceremony: Any) -> None:
+    (ceremony.home / "mordred").mkdir(parents=True, exist_ok=True)
+    (ceremony.home / "mordred" / "env-vault.optout").write_text("opt-out\n", encoding="utf-8")
+    prepared = _prepare(ceremony)
+    assert prepared["passphrase_reused"] is False and len(prepared["passphrase"]) == 8
+    committed = ceremony.desktop.post(f"/vault/{prepared['flow_id']}/commit", {})
+    assert committed == {"ok": True, "passphrase_reused": False}
 
 
 def test_vault_routes_are_macos_only(ceremony: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -639,6 +644,74 @@ def test_the_real_ceremony_creates_a_vault_that_the_prepared_phrase_recovers(
     assert _unlocks(backend) == 1  # memory is a separate ceremony: one hot-path open
     assert desktop.post("/memory/enable") == {"ok": True, "already": True}
     assert phrase not in json.dumps(desktop.events) + "\n".join(desktop.logs.lines)
+
+
+@pytest.fixture
+def opted_out(desktop: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A real vault with ``.env`` (``A=1``, ``B=2``, ``MORDRED_X=old``) enrolled, then ``encryption disable env``."""
+    from tests._keyvault_fakes import FakeAnchorStore
+    from tests.test_wizard_flow_session import _RecordingBackend, _stub_runtime_probes
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    _stub_runtime_probes(monkeypatch)
+    home = desktop.home
+    root = home / "mordred" / "vault"
+    (home / ".env").write_text("A=1\nB=2\nMORDRED_X=old\n", encoding="utf-8")
+    backend, store = _RecordingBackend(), FakeAnchorStore()
+    monkeypatch.setattr(_seams, "vault_root", lambda: root)
+    monkeypatch.setattr(vault_cli, "_resolve_root", lambda _r: root)
+    monkeypatch.setattr(
+        env_decrypt_cli, "enable", functools.partial(env_decrypt_cli.enable, backend=backend, store=store)
+    )
+    prepared = desktop.post("/vault/prepare", {})
+    assert desktop.post(f"/vault/{prepared['flow_id']}/commit", {"unattended": True})["ok"] is True
+    assert env_decrypt_cli.disable(home=home, root=root, backend=backend, store=store) == 0
+    marker = home / "mordred" / "env-vault.optout"
+    assert marker.exists() and (home / ".env").read_text(encoding="utf-8") == "A=1\nB=2\nMORDRED_X=old\n"
+
+    def vault_env() -> bytes:
+        with kv_vault.recover_vault(root, " ".join(prepared["passphrase"])) as opened:
+            return opened.read_file(".env")
+
+    return SimpleNamespace(desktop=desktop, home=home, marker=marker, vault_env=vault_env)
+
+
+def _reenable(o: Any) -> dict[str, Any]:
+    prepared = o.desktop.post("/vault/prepare", {})
+    assert prepared["ok"] is True and prepared["passphrase"] is None and prepared["passphrase_reused"] is True
+    return dict(o.desktop.post(f"/vault/{prepared['flow_id']}/commit", {"unattended": True}))
+
+
+def test_an_opted_out_env_is_enrolled_again_from_the_file_on_disk(opted_out: Any) -> None:
+    (opted_out.home / ".env").write_text("A=1\n", encoding="utf-8")  # the owner removed B and MORDRED_X meanwhile
+    assert _reenable(opted_out) == {"ok": True, "passphrase_reused": True}
+    assert opted_out.vault_env() == b"A=1\nMORDRED_X=old\n"
+    assert not opted_out.marker.exists() and not (opted_out.home / ".env").exists()
+    status = opted_out.desktop.get("/status?client_version=4")["vault"]
+    assert status["env_enrolled"] is True and status["env_injecting"] is True and status["optout"] is False
+
+
+def test_an_opted_out_env_without_a_plaintext_keeps_only_the_mordred_keys(opted_out: Any) -> None:
+    (opted_out.home / ".env").unlink()
+    assert _reenable(opted_out) == {"ok": True, "passphrase_reused": True}
+    assert opted_out.vault_env() == b"MORDRED_X=old\n"
+    assert not opted_out.marker.exists() and not (opted_out.home / ".env").exists()
+
+
+def test_a_mordred_key_on_disk_keeps_the_on_disk_value(opted_out: Any) -> None:
+    (opted_out.home / ".env").write_text("A=1\nMORDRED_X=new\n", encoding="utf-8")
+    assert _reenable(opted_out) == {"ok": True, "passphrase_reused": True}
+    assert opted_out.vault_env() == b"A=1\nMORDRED_X=new\n"
+
+
+def test_a_failed_reenable_keeps_the_plaintext_the_copy_and_the_marker(
+    opted_out: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (opted_out.home / ".env").write_text("A=1\n", encoding="utf-8")
+    monkeypatch.setattr(vault_cli, "_open_hot_path_or_report", lambda *_a, **_kw: None)
+    assert _reenable(opted_out) == {"ok": False, "error": "memory_encryption_failed"}
+    assert opted_out.vault_env() == b"A=1\nB=2\nMORDRED_X=old\n"
+    assert opted_out.marker.exists() and (opted_out.home / ".env").read_text(encoding="utf-8") == "A=1\n"
 
 
 def test_reaper_interval_is_thirty_seconds() -> None:

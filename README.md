@@ -31,7 +31,7 @@ The package registers one Hermes plugin, `mordred` (a single
 | `network` | Tor, VPN, and clearnet path management |
 | `privacy_check` | Skill-metadata policy enforcement and audit logging |
 | `dbcrypt` | SQLCipher encryption of Hermes's SQLite databases (macOS) |
-| `e2e` | Encrypted Slack and Discord gateway commands and replies |
+| `e2e` | Read-only Telegram tools for the Hermes agent |
 | `activity` | Encrypted record of browser activity for Hermes (preview) |
 | `wizard` | The `hermes-mordred` CLI |
 
@@ -140,7 +140,7 @@ guides:
 |---|---|---|
 | Users | [Quickstart](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/QUICKSTART.md) | Install and first protected setup |
 | Users | [Usage guide](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/USAGE.md) | Commands, ceremonies, troubleshooting, upgrades, removal |
-| Users | [Extension guide (preview)](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/EXTENSION.md) | Optional browser extension, E2E messaging, wallet bridge |
+| Users | [Extension guide (preview)](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/EXTENSION.md) | Optional browser extension, wallet bridge |
 | Users | [Telegram guide (preview)](https://github.com/mordredagent/hermes-mordred/blob/main/docs/user/TELEGRAM.md) | Read-only private questions, hardware-sealed credentials, platform limits, Venice/local only |
 | Developers | [Development setup](https://github.com/mordredagent/hermes-mordred/blob/main/docs/dev/setup.md) | Editable `.venv`, `HERMES_HOME` isolation, validation |
 | Developers | [Development index](https://github.com/mordredagent/hermes-mordred/blob/main/docs/dev/README.md) | Maintained sources of truth |

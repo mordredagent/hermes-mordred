@@ -81,7 +81,13 @@ def test_entry_points_resolve() -> None:
     assert callable(getattr(loaded, "register", None)), "entry point module must expose callable register()"
     components = [module for _component, module in loaded.COMPONENTS]
     assert sorted(components) == sorted(
-        [*PLUGINS, "mordred_hermes.dbcrypt", "mordred_hermes.extension.gateway_plugin", "mordred_hermes.activity"]
+        [
+            *PLUGINS,
+            "mordred_hermes.dbcrypt",
+            "mordred_hermes.extension.gateway_plugin",
+            "mordred_hermes.activity",
+            "mordred_hermes.recall.plugin",
+        ]
     )
 
 

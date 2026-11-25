@@ -148,24 +148,18 @@ jobs:
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'features') && matrix.python-version == needs.ci-policy.outputs.support_python
         run: |-
           python -m venv "$RUNNER_TEMP/mordred-ci-features"
-          "$RUNNER_TEMP/mordred-ci-features/bin/python" -m pip install -e ".[dev,keyvault,extension,ethereum,messaging,tor-control,telegram]"
+          "$RUNNER_TEMP/mordred-ci-features/bin/python" -m pip install -e ".[dev,keyvault,extension,ethereum,tor-control,telegram]"
       - name: Require and exercise every feature dependency
         run: |
           "$RUNNER_TEMP/mordred-ci-features/bin/python" - <<'PY'
-          import contextlib
-          import io
-
           import eth_account
           import eth_keys
-          import qrcode
           import requests
           import rlp
           import socks
           import telethon
           import urllib3
           from stem.control import Controller
-
-          from mordred_hermes.wizard.extension_pair_cli import _print_qr
 
           assert eth_account.Account
           assert eth_keys.keys.PrivateKey
@@ -175,16 +169,6 @@ jobs:
           assert urllib3.HTTPSConnectionPool
           assert callable(Controller.from_port)
           assert telethon.TelegramClient
-
-          qr = qrcode.QRCode(border=1)
-          qr.add_data("MORT-CI000000-CI000000")
-          qr.make(fit=True)
-          assert qr.get_matrix()
-
-          rendered = io.StringIO()
-          with contextlib.redirect_stdout(rendered):
-              _print_qr("MORT-CI000000-CI000000")
-          assert rendered.getvalue().strip(), "messaging extra did not render a QR"
           PY
         id: feature_imports
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'features') && matrix.python-version == needs.ci-policy.outputs.support_python
@@ -198,7 +182,6 @@ jobs:
             tests/test_wizard_keyvault_eth_cli.py \
             tests/extension/test_extension_sign_tx.py \
             tests/test_paths_tor.py \
-            tests/test_wizard_extension_pair_cli.py \
             tests/extension/test_telegram_import.py
         id: feature_tests
         if: contains(fromJSON(needs.ci-policy.outputs.linux_packs), 'features') && matrix.python-version == needs.ci-policy.outputs.support_python

@@ -99,7 +99,9 @@ from pathlib import Path
 from typing import Any, Final, Protocol, TypeAlias
 from weakref import WeakKeyDictionary
 
+from ...activity.store import BUSY_TIMEOUT_S
 from ...keyvault._reset_authority import ResetAuthorization, check_reset_access
+from ..store import waiting_at_most
 from .imap import CancelToken, ImapError, ImapSession, ImapStopped, IoLimits
 from .secrets import MailCredentials, MailSecretsError, mail_dir
 from .source import MAX_MESSAGE_BYTES, TrustedBytes, TrustedMeta
@@ -174,9 +176,27 @@ ERROR_CODES: Final = frozenset(
 class FetchStop(Exception):
     """Ends a fetch with a content-free ``code`` (an :data:`ERROR_CODES` member)."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, hint: str | None = None) -> None:
         super().__init__(code)
         self.code = code if code in ERROR_CODES else "fetch_failed"
+        #: The failing exception's class and place (``Type@file:line``), for ``hint_sink`` only.
+        self.hint = hint
+
+
+def _cause_hint() -> str | None:
+    """``Type@file:line`` of the exception being handled: the class and place only, never its text.
+
+    It becomes the ``run_failed`` stop's hint, which goes to ``FetchOptions.hint_sink``
+    only, like a refused login's hint.
+    """
+    import traceback
+
+    _exc_type, exc, tb = sys.exc_info()
+    if exc is None:
+        return None
+    where = traceback.extract_tb(tb)[-1] if tb is not None else None
+    place = f"{where.filename.rsplit('/', 1)[-1]}:{where.lineno}" if where else "?"
+    return f"{type(exc).__name__}@{place}"
 
 
 class _Partial(Exception):
@@ -666,7 +686,9 @@ class FetchLease:
             if time.monotonic() >= deadline:
                 return False
             try:
-                store.run_fail(run_id, ABANDONED_COUNTS)
+                # Each try waits as long as a write used to (BUSY_TIMEOUT_S), never past the deadline.
+                with waiting_at_most(min(BUSY_TIMEOUT_S, deadline - time.monotonic())):
+                    store.run_fail(run_id, ABANDONED_COUNTS)
             except Exception as exc:
                 code = getattr(exc, "code", None)
                 if code == "busy":
@@ -789,6 +811,17 @@ class FetchEnv:
     now: Callable[[], float] = time.time
     lock: WriterLock = fetch_lock
     harden: Callable[[], None] = field(default=lambda: None)
+    #: A Gmail signed in with Google: the access token for its sealed refresh token (:mod:`.oauth`).
+    access_token: Callable[[MailCredentials], str] = field(default=lambda creds: _oauth_access_token(creds))
+
+
+def _oauth_access_token(creds: MailCredentials) -> str:
+    from .oauth import OAuthError, access_token_for
+
+    try:
+        return access_token_for(creds.oauth_refresh_token)
+    except OAuthError as exc:
+        raise FetchStop(exc.code) from None
 
 
 def _default_connect(creds: MailCredentials, limits: IoLimits) -> ImapSession:
@@ -989,7 +1022,7 @@ class _Run:
         try:
             found = self.store.find_messages("mail", self.creds.account, message_ids=message_ids)
         except Exception:
-            raise FetchStop("run_failed") from None
+            raise FetchStop("run_failed", hint=_cause_hint()) from None
         return {item.message.message_id: item.conversation.conversation_id for item in found}
 
     def stored_copies(self, copies: Sequence[Any]) -> Mapping[str, str]:
@@ -997,7 +1030,7 @@ class _Run:
         try:
             return dict(self.store.classify_incoming(copies))
         except Exception:
-            raise FetchStop("run_failed") from None
+            raise FetchStop("run_failed", hint=_cause_hint()) from None
 
     def open_run(self) -> str:
         """A new ``open`` mail run, registered with the lease (:class:`_Abandoned` once the caller gave up)."""
@@ -1006,14 +1039,14 @@ class _Run:
             try:
                 return str(self.store.run_begin("mail"))
             except Exception:
-                raise FetchStop("run_failed") from None
+                raise FetchStop("run_failed", hint=_cause_hint()) from None
         with lease.writing():  # not even a run row once the caller has given this fetch up
             try:
                 run_id = str(self.store.run_begin("mail", guard=lease.check))
             except _Abandoned:
                 raise
             except Exception:
-                raise FetchStop("run_failed") from None
+                raise FetchStop("run_failed", hint=_cause_hint()) from None
             if lease.opened(self.store, run_id):
                 return run_id
         with contextlib.suppress(Exception):
@@ -1060,7 +1093,7 @@ class _Run:
             if lease is not None and lease.abandoned:
                 raise _Abandoned() from None  # the run was failed under it: the batch was refused
             if isinstance(exc, Exception):
-                raise FetchStop("run_failed") from None
+                raise FetchStop("run_failed", hint=_cause_hint()) from None
             raise
         finally:
             if lease is not None:
@@ -1210,7 +1243,10 @@ def _sync(store: Any, creds: MailCredentials, options: FetchOptions, env: FetchE
     try:
         run = _Run(store, session, creds, own, options, env, result, limits.deadline, options.max_messages)
         try:
-            session.login(creds.address, creds.app_password)
+            if creds.oauth_refresh_token:
+                session.authenticate_xoauth2(creds.address, env.access_token(creds))
+            else:
+                session.login(creds.address, creds.app_password)
             for role in roles:
                 run.check_time()
                 run.mailbox(role)
@@ -1305,6 +1341,9 @@ def _apply_failure(result: FetchResult, exc: BaseException, options: FetchOption
     """``exc`` as the result's code or partial reason (never stringified: the class name is not even kept)."""
     if isinstance(exc, FetchStop):
         result.error = exc.code
+        if exc.hint is not None and options.hint_sink is not None:
+            with contextlib.suppress(Exception):  # a caller's sink never changes the fetch's outcome
+                options.hint_sink(exc.hint)
     elif isinstance(exc, _Partial | ImapStopped):
         result.partial, result.partial_reason = True, exc.reason
     elif isinstance(exc, ImapError):

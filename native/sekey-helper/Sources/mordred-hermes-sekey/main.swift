@@ -20,6 +20,17 @@
 //   {"cmd":"anchor_add","account":"..","value_hex":".."}
 //   {"cmd":"anchor_set","account":"..","value_hex":".."}
 //   {"cmd":"anchor_delete","account":".."}
+//   {"cmd":"sign_generate","tag_hex":"..","unattended":false}
+//   {"cmd":"sign_public_key","tag_hex":".."}
+//   {"cmd":"sign","tag_hex":"..","messages_hex":[".."],"reason":".."}
+//
+// The sign_* commands manage SecureEnclave.P256.Signing keys, a separate key
+// type stored in the same blob store under their own tags. `sign` returns one
+// ECDSA P-256 / SHA-256 signature per message, each 64 raw bytes (r || s).
+// All messages share one authentication context, so an attended key asks for
+// one Touch ID touch (or the login password) per request: the system sheet
+// shows `reason` after this binary's name, and the request gives up after
+// signTimeoutSeconds without an answer.
 //
 // The anchor_* commands keep the vault's freshness anchor (a small non-secret
 // record) in a login-keychain generic-password item that THIS binary creates
@@ -38,6 +49,7 @@
 // key's dataRepresentation at generation time and cannot change afterward.
 // Success (stdout, exit 0):
 //   {"public_key_hex":"04.."}   {"shared_hex":".."}   {"ok":true}   {"value_hex":".."}
+//   {"signatures_hex":[".."]}
 // Failure (stdout, exit 1):
 //   {"error":{"domain":"OSStatus","status":-25300,"message":".."}}
 //
@@ -76,6 +88,9 @@ struct Request: Decodable {
     let unattended: Bool?
     let account: String?
     let value_hex: String?
+    let messages_hex: [String]?
+    let reason: String?
+    let store: String?
 }
 
 struct HelperError: Error {
@@ -112,7 +127,12 @@ func hexEncode(_ d: Data) -> String {
 // This mirrors mordred_hermes._core._home.hermes_home so the SE blobs live under
 // the same keyvault tree the Python side uses for everything else.
 
+// An operation-window session names the store per request (PresenceSession.swift);
+// only its serial ECDH queue sets this, and only for the request it serves.
+var presenceStoreOverride: URL?
+
 func storeDir() -> URL {
+    if let override = presenceStoreOverride { return override }
     let env = ProcessInfo.processInfo.environment
     if let explicit = env["MORDRED_SEKEY_STORE"], !explicit.isEmpty {
         return URL(fileURLWithPath: (explicit as NSString).expandingTildeInPath, isDirectory: true)
@@ -561,6 +581,61 @@ func ecdh(tagHex: String, peerPub: Data, authenticationContext: LAContext? = nil
     return shared.withUnsafeBytes { Data($0) }
 }
 
+// MARK: - Signing keys
+
+// Below the Python side's 120 s subprocess deadline, so an untouched sheet is
+// withdrawn by the helper itself and reported as an error, not a killed process.
+let signTimeoutSeconds = 100.0
+let signMaxMessageBytes = 16384
+let signMaxMessages = 4
+let signMaxReasonBytes = 512
+
+func loadSigningKey(tagHex: String, context: LAContext? = nil) throws -> SecureEnclave.P256.Signing.PrivateKey {
+    let blob = try readBlob(tagHex: tagHex)
+    do {
+        return try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob, authenticationContext: context)
+    } catch {
+        throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "failed to load enclave signing key: \(error.localizedDescription)")
+    }
+}
+
+func signGenerate(tagHex: String, unattended: Bool) throws -> Data {
+    // Same store lock and no-replace publication as generate().
+    return try withStoreLock {
+        if try pathExistsNoFollow(blobURL(tagHex: tagHex)) {
+            throw HelperError(domain: "OSStatus", status: errDuplicateItem, message: "key already exists for tag")
+        }
+        let access = try makeAccessControl(biometry: !unattended)
+        let key: SecureEnclave.P256.Signing.PrivateKey
+        do {
+            key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: access)
+        } catch {
+            throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "SecureEnclave signing key generation failed: \(error.localizedDescription)")
+        }
+        try writeBlob(key.dataRepresentation, tagHex: tagHex)
+        return key.publicKey.x963Representation
+    }
+}
+
+func signPublicKey(tagHex: String) throws -> Data {
+    try loadSigningKey(tagHex: tagHex).publicKey.x963Representation
+}
+
+func sign(tagHex: String, messages: [Data], reason: String) throws -> [Data] {
+    let context = LAContext()
+    context.localizedReason = reason
+    DispatchQueue.global().asyncAfter(deadline: .now() + signTimeoutSeconds) { context.invalidate() }
+    let key = try loadSigningKey(tagHex: tagHex, context: context)
+    do {
+        // The authorization boundary for an attended key: Touch ID or the
+        // login password at the system sheet, once for the whole request.
+        return try messages.map { try key.signature(for: $0).rawRepresentation }
+    } catch {
+        let ns = error as NSError
+        throw HelperError(domain: ns.domain, status: ns.code, message: "signing failed: \(error.localizedDescription)")
+    }
+}
+
 func probe() throws {
     guard SecureEnclave.isAvailable else {
         throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "Secure Enclave not available")
@@ -732,9 +807,10 @@ func fail(_ message: String) -> Never {
 // MARK: - Main
 
 if CommandLine.arguments.count > 1 {
-    guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--presence-session",
-          let seconds = Int(CommandLine.arguments[2]) else { fail("invalid presence arguments") }
-    presenceSession(seconds: seconds)
+    guard let options = PresenceOptions(arguments: Array(CommandLine.arguments.dropFirst())) else {
+        fail("invalid presence arguments")
+    }
+    presenceSession(seconds: options.seconds, maxKeys: options.maxKeys, purpose: options.purpose, reason: options.reasonText)
 }
 
 let input = FileHandle.standardInput.readDataToEndOfFile()
@@ -764,10 +840,29 @@ do {
         }
         emit(["shared_hex": hexEncode(try ecdh(tagHex: requireTagHex(request), peerPub: peer))])
     case "capabilities":
-        emit(["presence_session": 1])
+        emit(["presence_session": 1, "presence_keys": 1, "presence_stores": 1, "presence_confirm": 1, "presence_reason": 1])
     case "probe":
         try probe()
         emit(["ok": true])
+    case "sign_generate":
+        emit(["public_key_hex": hexEncode(try signGenerate(tagHex: requireTagHex(request), unattended: request.unattended ?? false))])
+    case "sign_public_key":
+        emit(["public_key_hex": hexEncode(try signPublicKey(tagHex: requireTagHex(request)))])
+    case "sign":
+        guard let hexes = request.messages_hex, !hexes.isEmpty, hexes.count <= signMaxMessages else {
+            fail("missing or invalid messages_hex")
+        }
+        let messages: [Data] = hexes.map { hex in
+            guard let message = hexDecode(hex), !message.isEmpty, message.count <= signMaxMessageBytes else {
+                fail("missing or invalid messages_hex")
+            }
+            return message
+        }
+        guard let reason = request.reason, !reason.isEmpty, reason.utf8.count <= signMaxReasonBytes else {
+            fail("missing or invalid reason")
+        }
+        let signatures = try sign(tagHex: requireTagHex(request), messages: messages, reason: reason)
+        emit(["signatures_hex": signatures.map(hexEncode)])
     case "anchor_get":
         emit(["value_hex": hexEncode(try anchorGet(account: requireAccount(request)))])
     case "anchor_add":

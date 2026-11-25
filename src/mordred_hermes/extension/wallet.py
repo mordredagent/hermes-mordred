@@ -40,7 +40,7 @@ _ACCOUNT_BOUND_METHODS = frozenset({"personal_sign", "eth_signTypedData_v4"})
 # a refusal: caching is precisely what stops the repeated prompts, and it leaks
 # nothing across principals because every principal that reaches this handler is
 # entitled to the same value. The window mirrors
-# ``gateway_plugin._NEEDS_KEY_RATE_LIMIT_SECONDS`` (PR #93).
+# the former Slack/Discord needs-key notice limit (PR #93).
 _ACCOUNT_SNAPSHOT_TTL_SECONDS = 60.0
 _clock: Callable[[], float] = time.monotonic
 _account_snapshot_lock = threading.Lock()

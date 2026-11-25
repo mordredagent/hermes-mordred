@@ -1,0 +1,36 @@
+{
+  "button": {
+    "cancel": "Avbryt",
+    "download": "Hämta",
+    "notNow": "Inte nu",
+    "ok": "OK",
+    "showLog": "Visa logg",
+    "stopAndContinue": "Stoppa och fortsätt",
+    "tryAgain": "Försök igen"
+  },
+  "installer": {
+    "closeAndRetry": "Mordred körs fortfarande. Stäng Mordred och öppna sedan installationsprogrammet för Mordred igen.",
+    "couldNotStop": "Mordred kunde inte stoppas. Starta om din Mac och öppna sedan installationsprogrammet för Mordred igen.",
+    "done": "Mordred är installerat och startar när du loggar in. Säkerhetskopieringsfilen är {path}: enbart den filen återställer dina nycklar på en annan Mac, så spara en kopia på ett säkert och privat ställe.",
+    "downloadFailed": "{name} hämtades inte. Kontrollera nätverket och öppna sedan installationsprogrammet för Mordred igen: det fortsätter där det stannade.",
+    "downloadProgress": "Hämtar {name}: {percent} % klart.",
+    "downloadStarted": "Hämtar {name} (cirka {size} MB). Installationsprogrammet fortsätter på egen hand.",
+    "failed": "Mordred kunde inte installeras: {reason}",
+    "fileInTheWay": "{path} är i vägen och skapades inte av Mordred. Flytta det någon annanstans och öppna sedan installationsprogrammet för Mordred igen.",
+    "largeModel": "Vill du även hämta den stora modellen (Bonsai 27B, cirka 8 GB)? Den skriver rubriker och ämnen för din historik. Du kan lägga till den senare genom att öppna installationsprogrammet för Mordred igen.",
+    "needsTools": "Mordred behöver Apples kommandoradsverktyg. Installera dem i fönstret som just öppnades och öppna sedan installationsprogrammet för Mordred igen.",
+    "serverDidNotStop": "Mordreds server stoppades inte. Vänta en minut och öppna sedan installationsprogrammet för Mordred igen.",
+    "stillRunning": "Mordred körs fortfarande (en tidigare installation eller ett Hermes-fönster). Vill du stoppa det och fortsätta?",
+    "touchIdNext": "Bekräfta sedan med Touch ID: en gång nu för att konfigurera Mordreds nycklar, och en gång till om en stund när Mordred startar. Klicka på OK och rör sedan vid sensorn när Touch ID-fönstret visas.",
+    "touchIdNotConfirmed": "Touch ID bekräftades inte, så nycklarna konfigurerades inte. Öppna installationsprogrammet för Mordred igen.",
+    "touchIdRetry": "Touch ID bekräftades inte, så ingenting har konfigurerats än. Vill du försöka igen?",
+    "unexpected": "Ett steg avbröts oväntat (rad {line}). Öppna loggen för att se vilket; öppna sedan installationsprogrammet för Mordred igen: det fortsätter där det stannade.",
+    "unfinishedKeys": "Nycklarna från en tidigare, ofullständig konfiguration kunde inte tas bort. Öppna installationsprogrammet för Mordred igen."
+  },
+  "touchId": {
+    "approveBrowser": "Tillåt webbläsaren ”{label}” att ansluta till Mordred. Kod {code}",
+    "credentials": "Läs Mordreds inloggning för Telegram eller e-post",
+    "setup": "Konfigurera Mordreds nycklar och kryptering",
+    "startup": "Öppna Mordreds valv och databaser"
+  }
+}

@@ -87,6 +87,20 @@ def find_sekey_helper() -> str | None:
     return _find_named_helper("MORDRED_SEKEY_HELPER", _HELPER_NAME)
 
 
+def find_sekey_sign_helper() -> str | None:
+    """The helper used for Secure Enclave signing keys.
+
+    ``MORDRED_SEKEY_SIGN_HELPER`` lets a development Hermes try a newer helper
+    for signing alone, while vault unwrapping and the Keychain anchor keep the
+    installed binary their items trust. Unset, this is :func:`find_sekey_helper`,
+    so a home whose ``MORDRED_SEKEY_HELPER`` names its own helper signs with
+    that helper too, never with an older one in ``~/.local/bin``.
+    """
+    if os.environ.get("MORDRED_SEKEY_SIGN_HELPER"):
+        return _find_named_helper("MORDRED_SEKEY_SIGN_HELPER", _HELPER_NAME)
+    return find_sekey_helper()
+
+
 def find_tpmkey_helper() -> str | None:
     """Locate the Linux TPM 2.0 helper (``mordred-hermes-tpmkey``)."""
     return _find_named_helper("MORDRED_TPMKEY_HELPER", _TPM_HELPER_NAME)
@@ -381,6 +395,8 @@ class _HelperSecKeyOps:
         self._binary = binary
         self._env_override = env_override
         self._presence_capable: bool | None = None
+        self._presence_stores: bool | None = None
+        self._presence_reason = False
 
     def with_store_override(self, env_name: str, store: Path) -> _HelperSecKeyOps:
         """Clone this helper ops with an explicit per-keyvault blob store."""
@@ -404,7 +420,7 @@ class _HelperSecKeyOps:
     def create_keypair(self, tag: bytes, label: str, *, unattended: bool = False) -> bytes:
         from ._presence import revoke
 
-        revoke()
+        revoke(windows=False)
         response = self._invoke(
             {"cmd": "generate", "tag_hex": tag.hex(), "label": label, "unattended": unattended},
         )
@@ -418,28 +434,65 @@ class _HelperSecKeyOps:
         _assert_native_tag_delete(ops=self, tag=tag)
         from ._presence import revoke
 
-        revoke()
+        revoke(windows=False)
         # Acknowledge deletion or confirmed absence; ambiguous native state refuses.
         response = self._invoke({"cmd": "delete", "tag_hex": tag.hex()})
         if response.get("ok") is not True:
             raise _OpsError(-1, "helper", "helper did not acknowledge deletion")
 
+    def _window_store(self) -> tuple[bool, str | None]:
+        """Whether an operation window may serve this helper's keys, and the store it names.
+
+        ``None`` is the helper's default store (it inherits this process's
+        environment, as a one-shot call does); a Secure Enclave store override
+        is named explicitly. Any other override keeps one-shot calls.
+        """
+        if self._env_override is None:
+            return True, None
+        name, store = self._env_override
+        return (True, store) if name == "MORDRED_SEKEY_STORE" else (False, None)
+
     def key_exchange(self, tag: bytes, peer_pub: bytes) -> bytes:
         from . import _presence
 
         authority = _presence.eligible(tag)
-        if authority is not None:
-            if self._presence_capable is None:
-                try:
-                    self._presence_capable = self._invoke({"cmd": "capabilities"}).get("presence_session") == 1
-                except _OpsError:
-                    self._presence_capable = False  # prompt-free legacy negotiation only
-            if self._presence_capable:
-                scope, seconds, binding = authority
-                response = _presence._pool.exchange(
-                    scope, self._binary, self._env_override, tag, peer_pub, seconds, binding
-                )
-                return _hex_field(response, "shared_hex")
+        window = None if authority is not None else _presence.window_for(tag)
+        if (authority is not None or window is not None) and self._presence_capable is None:
+            try:
+                capabilities = self._invoke({"cmd": "capabilities"})
+                self._presence_capable = capabilities.get("presence_session") == 1
+                self._presence_stores = capabilities.get("presence_stores") == 1
+                self._presence_reason = capabilities.get("presence_reason") == 1
+            except _OpsError:
+                self._presence_capable = self._presence_stores = False  # prompt-free legacy negotiation only
+        windowed, store = self._window_store()
+        if window is not None and self._presence_stores and windowed:
+            response = _presence._pool.exchange(
+                window.scope,
+                self._binary,
+                None,
+                tag,
+                peer_pub,
+                window.seconds,
+                window.binding,
+                max_keys=_presence.WINDOW_KEYS,
+                store=store,
+                reason=_presence.touch_id_reason(window.scope.purpose) if self._presence_reason else None,
+            )
+            return _hex_field(response, "shared_hex")
+        if authority is not None and self._presence_capable:
+            scope, seconds, binding = authority
+            response = _presence._pool.exchange(
+                scope,
+                self._binary,
+                self._env_override,
+                tag,
+                peer_pub,
+                seconds,
+                binding,
+                reason=_presence.touch_id_reason("credentials") if self._presence_reason else None,
+            )
+            return _hex_field(response, "shared_hex")
         response = self._invoke(
             {"cmd": "ecdh", "tag_hex": tag.hex(), "peer_pub_hex": peer_pub.hex()},
         )
@@ -449,6 +502,28 @@ class _HelperSecKeyOps:
         response = self._invoke({"cmd": "probe"})
         if response.get("ok") is not True:
             raise _OpsError(-1, "helper", "helper did not pass the probe")
+
+    def create_signing_key(self, tag: bytes, *, unattended: bool) -> bytes:
+        """A new Enclave P-256 signing key; its X9.63 public key."""
+        response = self._invoke({"cmd": "sign_generate", "tag_hex": tag.hex(), "unattended": unattended})
+        return _hex_field(response, "public_key_hex")
+
+    def signing_public_key(self, tag: bytes) -> bytes:
+        response = self._invoke({"cmd": "sign_public_key", "tag_hex": tag.hex()})
+        return _hex_field(response, "public_key_hex")
+
+    def sign(self, tag: bytes, messages: list[bytes], reason: str) -> list[bytes]:
+        """Raw (r || s) ECDSA-SHA256 signatures, one per message, under one authorization."""
+        response = self._invoke(
+            {"cmd": "sign", "tag_hex": tag.hex(), "messages_hex": [m.hex() for m in messages], "reason": reason}
+        )
+        signatures = response.get("signatures_hex")
+        if not isinstance(signatures, list) or len(signatures) != len(messages):
+            raise _OpsError(-1, "helper", "helper returned an invalid signature list")
+        try:
+            return [bytes.fromhex(h) for h in signatures]
+        except (TypeError, ValueError) as exc:
+            raise _OpsError(-1, "helper", "helper returned an invalid signature") from exc
 
 
 def _helper_ops_or_none(find: Callable[[], str | None]) -> _HelperSecKeyOps | None:

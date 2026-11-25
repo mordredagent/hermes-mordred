@@ -73,7 +73,110 @@ final class PresenceAuthorization {
     }
 }
 
-func presenceSession(seconds: Int) -> Never {
+// What a session is for: it picks the system prompt's text. The parent names
+// it; the helper never infers a purpose from the keys it is asked to use.
+enum PresencePurpose: String {
+    case credentials, setup, startup
+
+    var reason: String {
+        switch self {
+        case .credentials: return "Read Mordred Telegram or mail credentials"
+        case .setup: return "Set up Mordred's keys and encryption"
+        case .startup: return "Open Mordred's vault and databases"
+        }
+    }
+}
+
+// `--presence-session SECONDS [--max-keys N] [--purpose P] [--reason TEXT]`.
+// Without the options a session is the original one: one key, the credentials
+// text. `--reason` is the purpose's text in the user's language (the parent
+// picks it); without it the English one above is shown.
+struct PresenceOptions: Equatable {
+    let seconds: Int
+    let maxKeys: Int
+    let purpose: PresencePurpose
+    let reasonText: String?
+
+    var reason: String { reasonText ?? purpose.reason }
+
+    init?(arguments: [String]) {
+        guard arguments.count >= 2, arguments[0] == "--presence-session", let seconds = Int(arguments[1]) else {
+            return nil
+        }
+        var maxKeys = 1
+        var purpose = PresencePurpose.credentials
+        var reasonText: String?
+        var rest = arguments.dropFirst(2)
+        var seen = Set<String>()
+        while let flag = rest.first {
+            rest = rest.dropFirst()
+            guard let value = rest.first, seen.insert(flag).inserted else { return nil }
+            rest = rest.dropFirst()
+            switch flag {
+            case "--max-keys":
+                guard let count = Int(value), (1...8).contains(count) else { return nil }
+                maxKeys = count
+            case "--purpose":
+                guard let named = PresencePurpose(rawValue: value) else { return nil }
+                purpose = named
+            case "--reason":
+                // One short line: what the Touch ID window says Mordred is doing.
+                guard !value.isEmpty, value.utf8.count <= 240,
+                      !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+                    return nil
+                }
+                reasonText = value
+            default:
+                return nil
+            }
+        }
+        self.seconds = seconds
+        self.maxKeys = maxKeys
+        self.purpose = purpose
+        self.reasonText = reasonText
+    }
+}
+
+// The keys one session may use: at most `limit` distinct keys (a store and a
+// tag), each bound to the non-secret fingerprint of the key file it first saw.
+// Only the serial ECDH queue calls it.
+final class PresenceKeys {
+    private let limit: Int
+    private var bound: [String: SHA256.Digest] = [:]
+
+    init(limit: Int) { self.limit = limit }
+
+    func admit(tag: String, store: String? = nil, digest: SHA256.Digest) throws {
+        let key = (store ?? "") + "\n" + tag
+        if let known = bound[key] {
+            guard known == digest else {
+                throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "key changed")
+            }
+            return
+        }
+        guard bound.count < limit else {
+            throw HelperError(domain: "helper", status: -1, message: "invalid presence request")
+        }
+        bound[key] = digest
+    }
+}
+
+// The store an operation-window request names: an absolute directory path
+// with no empty, `.` or `..` component (not NSString.standardizingPath, which
+// also rewrites /private/tmp to /tmp). A one-key (credentials) session never
+// takes one. The store itself is validated like any other (a real 0700
+// directory, no symlinks).
+func presenceStore(_ path: String?, maxKeys: Int) throws -> URL? {
+    guard let path else { return nil }
+    let components = path.split(separator: "/", omittingEmptySubsequences: false).dropFirst()
+    guard maxKeys > 1, path.hasPrefix("/"), path.count > 1, !path.contains("\0"),
+          !components.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
+        throw HelperError(domain: "helper", status: -1, message: "invalid presence request")
+    }
+    return URL(fileURLWithPath: path, isDirectory: true)
+}
+
+func presenceSession(seconds: Int, maxKeys: Int = 1, purpose: PresencePurpose = .credentials, reason: String? = nil) -> Never {
     guard (1...300).contains(seconds), isatty(STDIN_FILENO) == 0,
           isatty(STDOUT_FILENO) == 0, getppid() > 1 else {
         fail("presence session requires private parent pipes and 1...300 seconds")
@@ -114,12 +217,24 @@ func presenceSession(seconds: Int) -> Never {
     monitor.resume()
     let worker = DispatchQueue(label: "mordred.presence.ecdh")
     let authorization = PresenceAuthorization(lease: lease)
+    let authenticate: () throws -> Void = {
+        let done = DispatchSemaphore(value: 0)
+        var allowed = false
+        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason ?? purpose.reason) { success, _ in
+            if success {
+                do { try lease.authenticated(); allowed = true } catch { }
+            }
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + 120) == .success, allowed else {
+            throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "authentication denied or cancelled")
+        }
+    }
     let slots = DispatchSemaphore(value: 17)
     DispatchQueue.global(qos: .userInitiated).async {
         var frame = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
-        var boundBlob: SHA256.Digest? // non-secret source fingerprint only
-        var boundTag: String?      // one key per session; no SecKey retained
+        let keys = PresenceKeys(limit: maxKeys) // tags and fingerprints only; no SecKey retained
         while true {
             let count = read(STDIN_FILENO, &buffer, buffer.count)
             guard count > 0 else { stop(); return }
@@ -139,31 +254,26 @@ func presenceSession(seconds: Int) -> Never {
                 worker.async {
                     defer { timeout.cancel(); slots.signal() }
                     do {
+                        // An operation window may confirm presence before it uses any key, so
+                        // a missed prompt stops the operation before it has changed anything.
+                        if maxKeys > 1, let request = try? JSONDecoder().decode(Request.self, from: requestData),
+                           request.cmd == "authenticate", request.tag_hex == nil, request.store == nil {
+                            try authorization.perform(authenticate: authenticate, exchange: { () })
+                            let reply = try JSONSerialization.data(withJSONObject: ["ok": true]) + Data([10])
+                            try lease.check()
+                            FileHandle.standardOutput.write(reply)
+                            return
+                        }
                         guard let request = try? JSONDecoder().decode(Request.self, from: requestData), request.cmd == "ecdh",
                               let tag = request.tag_hex, let tagData = hexDecode(tag), !tagData.isEmpty,
-                              let peerHex = request.peer_pub_hex, let peer = hexDecode(peerHex),
-                              boundTag == nil || boundTag == tag else {
+                              let peerHex = request.peer_pub_hex, let peer = hexDecode(peerHex) else {
                             throw HelperError(domain: "helper", status: -1, message: "invalid presence request")
                         }
-                        boundTag = tag
+                        presenceStoreOverride = try presenceStore(request.store, maxKeys: maxKeys)
+                        defer { presenceStoreOverride = nil }
                         let blobDigest = SHA256.hash(data: try readBlob(tagHex: tag))
-                        guard boundBlob == nil || boundBlob == blobDigest else {
-                            throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "key changed")
-                        }
-                        boundBlob = blobDigest
-                        let shared = try authorization.perform(authenticate: {
-                            let done = DispatchSemaphore(value: 0)
-                            var allowed = false
-                            context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Read Mordred Telegram or mail credentials") { success, _ in
-                                if success {
-                                    do { try lease.authenticated(); allowed = true } catch { }
-                                }
-                                done.signal()
-                            }
-                            guard done.wait(timeout: .now() + 120) == .success, allowed else {
-                                throw HelperError(domain: "OSStatus", status: errAuthFailed, message: "authentication denied or cancelled")
-                            }
-                        }, exchange: {
+                        try keys.admit(tag: tag, store: request.store, digest: blobDigest)
+                        let shared = try authorization.perform(authenticate: authenticate, exchange: {
                             // Reload the key and perform ECDH on every request.
                             try ecdh(tagHex: tag, peerPub: peer, authenticationContext: context, checkPresence: { try lease.check() })
                         })

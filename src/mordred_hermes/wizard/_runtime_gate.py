@@ -40,6 +40,7 @@ matching the wizard CLI convention.
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -180,9 +181,14 @@ def _gateway_gate(
     if not gateways:
         return 0
 
-    from ..keyvault._runtime_probe import discover_runtime_python
+    from ..keyvault._runtime_probe import discover_runtime_python, map_desktop_gateways_to_expected_runtime
 
     primary = discover_runtime_python(home=home)
+    if primary is not None:
+        # A Hermes Desktop standalone gateway is judged by the primary runtime; if
+        # mapping fails, the scanned gateways are probed as they are.
+        with contextlib.suppress(Exception):
+            gateways = map_desktop_gateways_to_expected_runtime(gateways, home, primary)
     primary_key = None if primary is None else _interpreter_key(primary)
     for gateway in gateways:
         if primary_key is not None and _interpreter_key(gateway.python) == primary_key:

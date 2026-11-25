@@ -1,0 +1,36 @@
+{
+  "button": {
+    "cancel": "Batal",
+    "download": "Muat Turun",
+    "notNow": "Bukan Sekarang",
+    "ok": "OK",
+    "showLog": "Tunjukkan Log",
+    "stopAndContinue": "Hentikan dan Teruskan",
+    "tryAgain": "Cuba Lagi"
+  },
+  "installer": {
+    "closeAndRetry": "Mordred masih berjalan. Tutup Mordred, kemudian buka semula pemasang Mordred.",
+    "couldNotStop": "Mordred tidak dapat dihentikan. Mulakan semula Mac, kemudian buka semula pemasang Mordred.",
+    "done": "Mordred telah dipasang dan akan bermula apabila anda log masuk. Fail sandarannya ialah {path}: fail itu sahaja sudah cukup untuk memulihkan kunci anda pada Mac lain, jadi simpan salinannya di tempat yang selamat dan peribadi.",
+    "downloadFailed": "{name} tidak berjaya dimuat turun. Semak rangkaian, kemudian buka semula pemasang Mordred: pemasang akan bersambung dari tempat ia berhenti.",
+    "downloadProgress": "Memuat turun {name}: {percent}% selesai.",
+    "downloadStarted": "Memuat turun {name} (kira-kira {size} MB). Pemasang akan terus berjalan dengan sendirinya.",
+    "failed": "Mordred tidak dapat dipasang: {reason}",
+    "fileInTheWay": "{path} menghalang dan tidak dibuat oleh Mordred. Alihkan ke tempat lain, kemudian buka semula pemasang Mordred.",
+    "largeModel": "Muat turun juga model besar (Bonsai 27B, kira-kira 8 GB)? Model ini menulis tajuk dan topik untuk sejarah anda. Anda boleh menambahkannya kemudian dengan membuka semula pemasang Mordred.",
+    "needsTools": "Mordred memerlukan Alat Baris Perintah Apple. Pasang alat itu dalam tetingkap yang baru dibuka, kemudian buka semula pemasang Mordred.",
+    "serverDidNotStop": "Pelayan Mordred tidak berhenti. Tunggu seminit, kemudian buka semula pemasang Mordred.",
+    "stillRunning": "Mordred masih berjalan (pemasangan sebelumnya, atau tetingkap Hermes). Hentikan dan teruskan?",
+    "touchIdNext": "Seterusnya, sahkan dengan Touch ID: sekali sekarang untuk menyediakan kunci Mordred, dan sekali lagi sebentar nanti apabila Mordred bermula. Tekan OK, kemudian sentuh penderia apabila tetingkap Touch ID muncul.",
+    "touchIdNotConfirmed": "Touch ID tidak disahkan, jadi kunci tidak disediakan. Buka semula pemasang Mordred.",
+    "touchIdRetry": "Touch ID tidak disahkan, jadi belum ada apa-apa yang disediakan. Cuba lagi?",
+    "unexpected": "Satu langkah terhenti tanpa diduga (baris {line}). Buka log untuk melihat langkah yang mana; kemudian buka semula pemasang Mordred: pemasang akan bersambung dari tempat ia berhenti.",
+    "unfinishedKeys": "Kunci daripada persediaan sebelumnya yang tidak selesai tidak dapat dibuang. Buka semula pemasang Mordred."
+  },
+  "touchId": {
+    "approveBrowser": "Benarkan pelayar “{label}” bersambung ke Mordred. Kod {code}",
+    "credentials": "Baca maklumat log masuk Telegram atau mel Mordred",
+    "setup": "Sediakan kunci dan penyulitan Mordred",
+    "startup": "Buka peti besi dan pangkalan data Mordred"
+  }
+}

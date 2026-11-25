@@ -1053,7 +1053,7 @@ vault       init | change-passphrase | recover | add | status | cat |
             disable-config-decrypt
 encryption  status | enable | disable | purge | change-passphrase
 plugins     list | migrate
-extension   pair | serve
+extension   agent | browsers | devices | native-host | serve
 desktop     install | uninstall | status
 egress      status | set | block | unblock | block-tool | unblock-tool |
             taint
@@ -4035,6 +4035,8 @@ page principal cannot (`error: page_session_forbidden`).
   get `auth_fail: not_authenticated`, on an authenticated one they are
   ignored, and they authenticate nothing. Leftover credential files are inert
   (`PATHS.md`).
+- The browser extension takes no codes; it is approved by signature
+  (`extension/trust.py`).
 - Trust (`paired_peer`) and permitted use (`learning`) come from the
   principal, never from the payload; a batch's `producer_kind` must match the
   principal's kind (`browser` for the extension). The kind `hermes` belongs
@@ -6290,13 +6292,23 @@ thin driver over it so the two entry points cannot drift. There is ONE contract:
   job or event. The page shows it, the owner ticks "I have written it down", then
   `POST /vault/{flow_id}/commit {"unattended": bool}` creates the vault with THAT
   passphrase (the typed-passphrase path of `_vault_lifecycle.init`), creates an empty
-  0600 `.env` when none exists, and enrolls `.env`. A lost response after commit is
+  0600 `.env` when none exists and none is enrolled, and enrolls `.env`. A lost response after commit is
   harmless (the phrase was delivered before commit). A backend restart between prepare
   and commit answers `vault_flow_expired` and nothing was created.
 - Commit on an existing vault with `env_enrolled: false` enrolls `.env` without a new
   phrase and answers `passphrase_reused: true` (the phrase shown at creation stays the
-  only one). `optout: true` answers `env_optout` (the owner restored a plaintext
-  `.env`; Terminal: `hermes-mordred encryption enable env`).
+  only one). With `optout: true` (the owner restored a plaintext `.env` with
+  `encryption disable env` or `uninstall`), prepare answers the same reuse flow on an
+  existing vault (the new-vault flow without one), and commit runs `encryption enable
+  env`. On macOS, with `.env` still enrolled, that seals the on-disk `.env` text (empty
+  when there is no plaintext; commit never creates one) plus every Mordred-owned key
+  (`HERMES_MEMORY_KEY`, `MORDRED_*`) that the old vault copy has and the on-disk text
+  does not. Nothing else comes from the old copy, and the carried lines are never
+  written to a plaintext file. The opt-out marker is removed after the read-back check,
+  then the plaintext. A failure before the enrollment write changes nothing and answers
+  `memory_encryption_failed`. The page shows step 1.2a as a step to do, with a sentence that `.env` encryption was
+  turned off earlier. `env_optout` stays in `MESSAGES` for an older backend that still
+  answers it.
 - `GET /status` adds `vault`: `{"exists", "env_enrolled", "env_injecting", "optout",
   "unattended"}`. These are facts; `unattended` is the key's effective policy read
   from the key store, never the requested one, and it is `null` when that policy is

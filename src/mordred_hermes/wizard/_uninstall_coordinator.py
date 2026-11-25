@@ -179,8 +179,11 @@ def execute(  # noqa: C901, PLR0912, PLR0915 - explicit ordered platform lifecyc
                 else:
                     rc = cli._restore_all(target, restores, flow, uninstall=permit)
                 if rc != 0:
+                    # `_restore_all` restores config/env as well as memory and has
+                    # already named the failed target; only Windows restores memory alone.
+                    what = "memory" if windows else "an encrypted target"
                     _term.emit_error(
-                        "uninstall stopped: memory could not be restored to plaintext; later cleanup stopped"
+                        f"uninstall stopped: {what} could not be restored to plaintext; later cleanup stopped"
                     )
                     return 1
                 _check_restored(files)

@@ -11,7 +11,6 @@ import importlib.metadata
 import json
 import os
 import socket
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,13 +18,19 @@ import aiohttp
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from mordred_hermes.extension import extension_api
 from mordred_hermes.extension import extension_crypto as xc
 from mordred_hermes.extension import extension_pairing as pairing
 from tests._checked_fixture_helpers import assert_private, seed_private_text
 from tests._checked_fixture_helpers import tmp_path as tmp_path
+from tests.extension._trust_helpers import Browser, authenticate, with_test_root
+
+
+@pytest.fixture(autouse=True)
+def _test_root(monkeypatch):
+    """Browsers are approved without Touch ID (an in-memory vault with a test root)."""
+    with_test_root(monkeypatch)
 
 
 def test_reported_package_version_prefers_canonical_distribution(monkeypatch):
@@ -64,20 +69,6 @@ def _free_port() -> int:
     return port
 
 
-@asynccontextmanager
-async def _running_server(**kwargs):
-    server = extension_api.ExtensionAPIServer(**kwargs)
-    await server.start()
-    try:
-        yield server
-    finally:
-        await server.stop()
-
-
-def _dispatch(conn, payload):
-    return asyncio.run(conn.dispatch(json.dumps(payload)))
-
-
 def _ec_public_key_b64(curve: ec.EllipticCurve) -> str:
     public_key = ec.generate_private_key(curve).public_key()
     spki = public_key.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -99,25 +90,12 @@ async def _recv(ws):
 
 
 async def _pair_and_auth(ws) -> bytes:
-    """Drive pair_init + auth as the extension would; returns the shared AES key."""
-    await _recv(ws)  # auth_challenge
-    code, _ = pairing.generate_code()
-    ext_priv = X25519PrivateKey.generate()
-    await ws.send_str(
-        json.dumps(
-            {
-                "id": "p1",
-                "type": "pair_init",
-                "code": code,
-                "ext_pubkey": xc.b64u_encode(xc.x25519_public_raw(ext_priv)),
-                "challenge": xc.b64u_encode(b"\x07" * 32),
-            }
-        )
-    )
-    complete = await _recv(ws)
-    await ws.send_str(json.dumps({"type": "auth", "ext_token": complete["ext_token"]}))
-    await _recv(ws)  # auth_ok
-    return xc.derive_shared_key(ext_priv, complete["hermes_pubkey"], code)
+    """Run auth v2 as an approved browser would; returns the socket's session key."""
+    browser = Browser()
+    reply = await browser.connect(ws)
+    assert reply["type"] == "auth2_ok", reply
+    assert browser.session_key is not None
+    return browser.session_key
 
 
 async def _page_auth(ws, server) -> None:
@@ -129,116 +107,104 @@ async def _page_auth(ws, server) -> None:
 
 async def _run_flow(port: int) -> dict:
     results: dict = {}
-    async with _running_server(port=port, chat_handler=_chat_handler), aiohttp.ClientSession() as session:
-        # Origin guard: a web page origin is rejected.
-        try:
-            await session.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": "https://evil.example"})
-            results["origin_rejected"] = False
-        except aiohttp.WSServerHandshakeError as e:
-            results["origin_rejected"] = e.status == 403
-
-        async with session.ws_connect(
-            f"http://127.0.0.1:{port}/ext", headers={"Origin": "chrome-extension://abc"}
-        ) as ws:
-            # Server greets with an auth_challenge (§3.5).
-            chal = json.loads((await ws.receive()).data)
-            results["challenge_type"] = chal["type"]
-            results["webauthn_required"] = chal["webauthn_required"]
-
-            # --- pairing ---
-            code, _ = pairing.generate_code()
-            ext_priv = X25519PrivateKey.generate()
-            ext_pub_b64 = xc.b64u_encode(xc.x25519_public_raw(ext_priv))
-            await ws.send_str(
-                json.dumps(
-                    {
-                        "id": "p1",
-                        "type": "pair_init",
-                        "code": code,
-                        "ext_pubkey": ext_pub_b64,
-                        "challenge": xc.b64u_encode(b"\x07" * 32),
-                    }
-                )
-            )
-            complete = json.loads((await ws.receive()).data)
-            results["pair_type"] = complete["type"]
-            ext_key = xc.derive_shared_key(ext_priv, complete["hermes_pubkey"], code)
-
-            # --- auth ---
-            await ws.send_str(json.dumps({"type": "auth", "ext_token": complete["ext_token"]}))
-            auth = json.loads((await ws.receive()).data)
-            results["auth_type"] = auth["type"]
-            results["auth_capabilities"] = auth.get("capabilities")
-
-            # --- encrypt then decrypt round-trip via the server ---
-            await ws.send_str(json.dumps({"id": "e1", "type": "encrypt", "plaintext": "秘密"}))
-            enc = json.loads((await ws.receive()).data)
-            results["enc_type"] = enc["type"]
-            # The extension would also be able to decrypt locally:
-            results["client_decrypt"] = xc.decrypt_message(ext_key, enc["ciphertext"])
-
-            await ws.send_str(json.dumps({"id": "d1", "type": "decrypt", "ciphertext": enc["ciphertext"]}))
-            dec = json.loads((await ws.receive()).data)
-            results["dec_plaintext"] = dec.get("plaintext")
-
-            # --- chat streaming ---
-            await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": "状態"}))
-            chat_chunks = []
-            while True:
-                m = json.loads((await ws.receive()).data)
-                if m["type"] == "chat_chunk":
-                    chat_chunks.append(m["content"])
-                elif m["type"] == "chat_end":
-                    break
-            results["chat"] = "".join(chat_chunks)
-
-            # --- sign flow (stub the keyvault signer) ---
-            import mordred_hermes.extension.api as api_mod
-            from mordred_hermes.keyvault import extension_sign
-
-            original_do_sign = api_mod._do_sign
-            original_get_address = extension_sign.get_address
-            signer = "0x" + "ab" * 20
+    server = extension_api.ExtensionAPIServer(port=port, chat_handler=_chat_handler)
+    await server.start()
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Origin guard: a web page origin is rejected.
             try:
-                api_mod._do_sign = lambda method, params, *a: "0xstubbedsig"  # type: ignore[assignment]
-                extension_sign.get_address = lambda: signer
-                await ws.send_str(
-                    json.dumps(
-                        {
-                            "id": "s1",
-                            "type": "sign_request",
-                            "request_id": "r1",
-                            "method": "personal_sign",
-                            "params": ["0xdeadbeef", signer.upper()],
-                            "origin": "https://app.uniswap.org",
-                        }
+                await session.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": "https://evil.example"})
+                results["origin_rejected"] = False
+            except aiohttp.WSServerHandshakeError as e:
+                results["origin_rejected"] = e.status == 403
+
+            async with session.ws_connect(
+                f"http://127.0.0.1:{port}/ext", headers={"Origin": "chrome-extension://abc"}
+            ) as ws:
+                # --- approval, then auth v2 ---
+                auth = await Browser().connect(ws)
+                results["auth_type"] = auth["type"]
+                results["auth_capabilities"] = auth.get("capabilities")
+
+                # --- encrypt then decrypt round-trip via the server (Hermes' own key) ---
+                await ws.send_str(json.dumps({"id": "e1", "type": "encrypt", "plaintext": "秘密"}))
+                enc = json.loads((await ws.receive()).data)
+                results["enc_type"] = enc["type"]
+
+                await ws.send_str(json.dumps({"id": "d1", "type": "decrypt", "ciphertext": enc["ciphertext"]}))
+                dec = json.loads((await ws.receive()).data)
+                results["dec_plaintext"] = dec.get("plaintext")
+
+                # --- chat streaming ---
+                await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": "状態"}))
+                chat_chunks = []
+                while True:
+                    m = json.loads((await ws.receive()).data)
+                    if m["type"] == "chat_chunk":
+                        chat_chunks.append(m["content"])
+                    elif m["type"] == "chat_end":
+                        break
+                results["chat"] = "".join(chat_chunks)
+
+                # --- sign flow (stub the keyvault signer) ---
+                import mordred_hermes.extension.api as api_mod
+                from mordred_hermes.keyvault import extension_sign
+
+                original_do_sign = api_mod._do_sign
+                original_get_address = extension_sign.get_address
+                signer = "0x" + "ab" * 20
+                try:
+                    api_mod._do_sign = lambda method, params, *a: "0xstubbedsig"  # type: ignore[assignment]
+                    extension_sign.get_address = lambda: signer
+                    await ws.send_str(
+                        json.dumps(
+                            {
+                                "id": "s1",
+                                "type": "sign_request",
+                                "request_id": "r1",
+                                "method": "personal_sign",
+                                "params": ["0xdeadbeef", signer.upper()],
+                                "origin": "https://app.uniswap.org",
+                            }
+                        )
                     )
-                )
-                prompt = json.loads((await ws.receive()).data)
-                results["sign_prompt_type"] = prompt["type"]
-                results["sign_risk"] = prompt["analysis"]["risk"]
-                results["signer"] = prompt["decoded"]["signer"]
-                await ws.send_str(
-                    json.dumps({"id": "s2", "type": "sign_approve", "request_id": "r1", "approved": True})
-                )
-                sresult = json.loads((await ws.receive()).data)
-                results["signature"] = sresult.get("signature")
-            finally:
-                api_mod._do_sign = original_do_sign
-                extension_sign.get_address = original_get_address
+                    prompt = json.loads((await ws.receive()).data)
+                    results["sign_prompt_type"] = prompt["type"]
+                    results["sign_risk"] = prompt["analysis"]["risk"]
+                    results["signer"] = prompt["decoded"]["signer"]
+                    await ws.send_str(
+                        json.dumps({"id": "s2", "type": "sign_approve", "request_id": "r1", "approved": True})
+                    )
+                    sresult = json.loads((await ws.receive()).data)
+                    results["signature"] = sresult.get("signature")
+                finally:
+                    api_mod._do_sign = original_do_sign
+                    extension_sign.get_address = original_get_address
+    finally:
+        await server.stop()
     return results
 
 
 def test_full_server_flow():
     r = asyncio.run(_run_flow(_free_port()))
     assert r["origin_rejected"] is True
-    assert r["challenge_type"] == "auth_challenge"
-    assert r["webauthn_required"] is False
-    assert r["pair_type"] == "pair_complete"
-    assert r["auth_type"] == "auth_ok"
-    assert r["auth_capabilities"] == ["discord_channel_resolve_v1", "telegram_import_v1", "activity_batch_v1"]
+    assert r["auth_type"] == "auth2_ok"
+    assert r["auth_capabilities"] == [
+        "telegram_import_v1",
+        "activity_batch_v1",
+        "recall_v1",
+        "recall_words_v1",
+        "recall_events_v1",
+        "recall_events_selection_v1",
+        "recall_restore_v1",
+        "recall_recommend_v1",
+        "recall_translate_v1",
+        "recall_conversation_v1",
+        "imports_v1",
+        "health_v1",
+        "chat_model_v1",
+    ]
     assert r["enc_type"] == "encrypt_result"
-    assert r["client_decrypt"] == "秘密"
     assert r["dec_plaintext"] == "秘密"
     assert r["chat"] == "こんにちは、受け取りました: 状態"
     assert r["sign_prompt_type"] == "sign_prompt"
@@ -302,20 +268,24 @@ def test_page_token_auth_and_history():
     async def _flow(port):
         # Seed some history under the test home.
 
-        async with (
-            _running_server(port=port, chat_handler=_chat_handler) as server,
+        server = extension_api.ExtensionAPIServer(port=port, chat_handler=_chat_handler)
+        await server.start()
+        try:
             # Local origin → page token accepted.
-            aiohttp.ClientSession() as s,
-            s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
-        ):
-            json.loads((await ws.receive()).data)  # auth_challenge
-            await ws.send_str(json.dumps({"type": "auth", "ext_token": server._page_token}))
-            auth = json.loads((await ws.receive()).data)
-            await ws.send_str(json.dumps({"id": "h", "type": "history_get"}))
-            hist = json.loads((await ws.receive()).data)
-            await ws.send_str(json.dumps({"id": "hc", "type": "history_clear"}))
-            cleared = json.loads((await ws.receive()).data)
-            return auth, hist["type"], cleared["type"]
+            async with (
+                aiohttp.ClientSession() as s,
+                s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
+            ):
+                json.loads((await ws.receive()).data)  # auth_challenge
+                await ws.send_str(json.dumps({"type": "auth", "ext_token": server._page_token}))
+                auth = json.loads((await ws.receive()).data)
+                await ws.send_str(json.dumps({"id": "h", "type": "history_get"}))
+                hist = json.loads((await ws.receive()).data)
+                await ws.send_str(json.dumps({"id": "hc", "type": "history_clear"}))
+                cleared = json.loads((await ws.receive()).data)
+                return auth, hist["type"], cleared["type"]
+        finally:
+            await server.stop()
 
     auth, hist_type, cleared_type = asyncio.run(_flow(_free_port()))
     assert auth["type"] == "auth_ok"
@@ -332,17 +302,21 @@ def test_accounts_failure_is_a_correlated_rpc_error(monkeypatch):
     monkeypatch.setattr(extension_api, "_get_account_snapshot", _fail_account_snapshot)
 
     async def _flow(port):
-        async with (
-            _running_server(port=port) as server,
-            aiohttp.ClientSession() as session,
-            session.ws_connect(
-                f"http://127.0.0.1:{port}/ext",
-                headers={"Origin": f"http://127.0.0.1:{port}"},
-            ) as ws,
-        ):
-            await _page_auth(ws, server)
-            await ws.send_str(json.dumps({"id": "a1", "type": "accounts_request"}))
-            return await _recv(ws)
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.ws_connect(
+                    f"http://127.0.0.1:{port}/ext",
+                    headers={"Origin": f"http://127.0.0.1:{port}"},
+                ) as ws,
+            ):
+                await _page_auth(ws, server)
+                await ws.send_str(json.dumps({"id": "a1", "type": "accounts_request"}))
+                return await _recv(ws)
+        finally:
+            await server.stop()
 
     assert asyncio.run(_flow(_free_port())) == {
         "id": "a1",
@@ -353,14 +327,15 @@ def test_accounts_failure_is_a_correlated_rpc_error(monkeypatch):
 
 def test_auth_required_before_commands():
     async def _flow(port):
-        async with (
-            _running_server(port=port),
-            aiohttp.ClientSession() as s,
-            s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws,
-        ):
-            json.loads((await ws.receive()).data)  # drain auth_challenge
-            await ws.send_str(json.dumps({"id": "x", "type": "encrypt", "plaintext": "hi"}))
-            return json.loads((await ws.receive()).data)
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as s, s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws:
+                json.loads((await ws.receive()).data)  # drain auth_challenge
+                await ws.send_str(json.dumps({"id": "x", "type": "encrypt", "plaintext": "hi"}))
+                return json.loads((await ws.receive()).data)
+        finally:
+            await server.stop()
 
     msg = asyncio.run(_flow(_free_port()))
     assert msg["type"] == "auth_fail"
@@ -372,152 +347,35 @@ def test_keepalive_ping_pushed_to_idle_client():
     keepalive) without sending anything itself."""
 
     async def _flow(port):
-        async with (
-            _running_server(port=port, keepalive_interval=0.05),
-            aiohttp.ClientSession() as s,
-            s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws,
-        ):
-            json.loads((await ws.receive()).data)  # auth_challenge
-            return json.loads((await asyncio.wait_for(ws.receive(), timeout=2)).data)
+        server = extension_api.ExtensionAPIServer(port=port, keepalive_interval=0.05)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as s, s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws:
+                json.loads((await ws.receive()).data)  # auth_challenge
+                return json.loads((await asyncio.wait_for(ws.receive(), timeout=2)).data)
+        finally:
+            await server.stop()
 
     assert asyncio.run(_flow(_free_port())) == {"type": "ping"}
 
 
-def test_reconnect_reauths_with_persisted_token():
-    """A reconnecting client (e.g. after an MV3 service-worker kill) redoes
-    only the auth handshake with its stored ext_token — no re-pairing."""
-
-    async def _flow(port):
-        async with _running_server(port=port), aiohttp.ClientSession() as s:
-            async with s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws:
-                json.loads((await ws.receive()).data)  # auth_challenge
-                code, _ = pairing.generate_code()
-                ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
-                await ws.send_str(
-                    json.dumps(
-                        {
-                            "id": "p1",
-                            "type": "pair_init",
-                            "code": code,
-                            "ext_pubkey": ext_pub,
-                            "challenge": xc.b64u_encode(b"\x07" * 32),
-                        }
-                    )
-                )
-                token = json.loads((await ws.receive()).data)["ext_token"]
-            # First socket is closed here — reconnect with the token only.
-            async with s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws2:
-                json.loads((await ws2.receive()).data)  # fresh auth_challenge
-                await ws2.send_str(json.dumps({"type": "auth", "ext_token": token}))
-                return json.loads((await ws2.receive()).data)
-
-    assert asyncio.run(_flow(_free_port()))["type"] == "auth_ok"
-
-
-@pytest.mark.parametrize("state_change", ["replace", "clear"])
-def test_open_extension_socket_is_revoked_when_pairing_changes(state_change):
-    """A live socket must never inherit replacement pairing keys or privileges."""
-    old_token = "old-extension-token"
-    old_key = b"\x11" * 32
-    pairing._save_pairing(
-        pairing.Pairing(
-            aes_key=old_key,
-            ext_token=old_token,
-            ext_pubkey_b64="old-extension",
-            hermes_pubkey_b64="old-hermes",
-            paired_at=1.0,
-        )
-    )
-    conn = extension_api._Connection(_FakeWS(), _chat_handler)
-    asyncio.run(conn._on_auth({"type": "auth", "ext_token": old_token}))
-    assert conn.ws.sent[-1]["type"] == "auth_ok"
-    conn._pending_sign["approved-under-old-pairing"] = {"method": "personal_sign"}
-
-    if state_change == "replace":
-        pairing._save_pairing(
-            pairing.Pairing(
-                aes_key=b"\x22" * 32,
-                ext_token="replacement-extension-token",
-                ext_pubkey_b64="new-extension",
-                hermes_pubkey_b64="new-hermes",
-                paired_at=2.0,
-            )
-        )
-    else:
-        pairing.clear_pairing()
-
-    _dispatch(
-        conn,
-        {
-            "id": "e1",
-            "type": "encrypt",
-            "plaintext": "must not cross pairing generations",
-        },
-    )
-
-    assert conn.ws.sent[-1] == {"type": "auth_fail", "reason": "pairing_changed"}
-    assert conn.authed is False
-    assert conn._pending_sign == {}
-    assert not any(frame.get("type") == "encrypt_result" for frame in conn.ws.sent)
-
-
-def test_socket_authenticated_before_webauthn_enable_cannot_unregister_it():
-    """Credential generation changes revoke token-only sessions immediately."""
-    token = "extension-token"
-    pairing._save_pairing(
-        pairing.Pairing(
-            aes_key=b"\x11" * 32,
-            ext_token=token,
-            ext_pubkey_b64="extension",
-            hermes_pubkey_b64="hermes",
-            paired_at=1.0,
-        )
-    )
-    conn = extension_api._Connection(
-        _FakeWS(),
-        _chat_handler,
-        client_origin="chrome-extension://abcdefghijklmnopabcdefghijklmnop",
-    )
-    asyncio.run(conn._on_auth({"type": "auth", "ext_token": token}))
-    assert conn.ws.sent[-1]["type"] == "auth_ok"
-
-    priv = ec.generate_private_key(ec.SECP256R1())
-    spki = priv.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
-    pairing.save_webauthn_credential(
-        "cred-1",
-        xc.b64u_encode(spki),
-        origin="chrome-extension://abcdefghijklmnopabcdefghijklmnop",
-    )
-    _dispatch(
-        conn,
-        {
-            "id": "w1",
-            "type": "webauthn_register",
-            # Empty credential fields request unregister.
-        },
-    )
-
-    assert conn.ws.sent[-1] == {"type": "auth_fail", "reason": "pairing_changed"}
-    assert conn.authed is False
-    assert pairing.has_webauthn_credential() is True
-
-
 def test_malformed_frames_get_error_and_connection_survives():
     async def _flow(port):
-        async with (
-            _running_server(port=port),
-            aiohttp.ClientSession() as s,
-            s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws,
-        ):
-            json.loads((await ws.receive()).data)  # auth_challenge
-            await ws.send_str("this is {not json")
-            bad_json = json.loads((await ws.receive()).data)
-            await ws.send_str(json.dumps(["a", "json", "array"]))
-            non_dict = json.loads((await ws.receive()).data)
-            # The connection must still dispatch normally afterwards.
-            await ws.send_str(json.dumps({"type": "auth", "ext_token": "nope"}))
-            after = json.loads((await ws.receive()).data)
-            return bad_json, non_dict, after
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as s, s.ws_connect(f"http://127.0.0.1:{port}/ext") as ws:
+                json.loads((await ws.receive()).data)  # auth_challenge
+                await ws.send_str("this is {not json")
+                bad_json = json.loads((await ws.receive()).data)
+                await ws.send_str(json.dumps(["a", "json", "array"]))
+                non_dict = json.loads((await ws.receive()).data)
+                # The connection must still dispatch normally afterwards.
+                await ws.send_str(json.dumps({"type": "auth", "ext_token": "nope"}))
+                after = json.loads((await ws.receive()).data)
+                return bad_json, non_dict, after
+        finally:
+            await server.stop()
 
     bad_json, non_dict, after = asyncio.run(_flow(_free_port()))
     assert bad_json == {"type": "error", "reason": "bad_json"}
@@ -536,89 +394,51 @@ def test_crashed_handler_replies_error(monkeypatch):
     monkeypatch.setattr(extension_history, "projected_history", _boom)
 
     async def _flow(port):
-        async with (
-            _running_server(port=port) as server,
-            aiohttp.ClientSession() as s,
-            s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
-        ):
-            json.loads((await ws.receive()).data)  # auth_challenge
-            await ws.send_str(json.dumps({"type": "auth", "ext_token": server._page_token}))
-            json.loads((await ws.receive()).data)  # auth_ok
-            await ws.send_str(json.dumps({"id": "h1", "type": "history_get"}))
-            return json.loads((await asyncio.wait_for(ws.receive(), timeout=5)).data)
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
+            ):
+                json.loads((await ws.receive()).data)  # auth_challenge
+                await ws.send_str(json.dumps({"type": "auth", "ext_token": server._page_token}))
+                json.loads((await ws.receive()).data)  # auth_ok
+                await ws.send_str(json.dumps({"id": "h1", "type": "history_get"}))
+                return json.loads((await asyncio.wait_for(ws.receive(), timeout=5)).data)
+        finally:
+            await server.stop()
 
     msg = asyncio.run(_flow(_free_port()))
     assert msg == {"id": "h1", "type": "error", "reason": "internal_error"}
 
 
 def test_page_session_cannot_touch_credentials(tmp_path):
-    """The launch-fragment page principal is exempt from WebAuthn, so its
-    allowlist must not reach credential/key-writing handlers or clear the
-    extension's registered second factor."""
-    pairing._save_pairing(
-        pairing.Pairing(
-            aes_key=b"\x01" * 32,
-            ext_token="page-test-extension-token",
-            ext_pubkey_b64="test-extension",
-            hermes_pubkey_b64="test-hermes",
-            paired_at=1.0,
-        )
-    )
-    priv = ec.generate_private_key(ec.SECP256R1())
-    spki = priv.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
-    pairing.save_webauthn_credential("cred-1", xc.b64u_encode(spki))
+    """The launch-fragment page principal's allowlist must not reach
+    credential/key-writing handlers."""
+    pairing.ensure_master()
 
     async def _flow(port):
-        async with (
-            _running_server(port=port) as server,
-            aiohttp.ClientSession() as s,
-            s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
-        ):
-            await _page_auth(ws, server)
-            out = {}
-            # Empty fields = "unregister" — the attacker's cheapest move.
-            await ws.send_str(json.dumps({"id": "w1", "type": "webauthn_register"}))
-            out["webauthn"] = await _recv(ws)
-            await ws.send_str(
-                json.dumps({"id": "s1", "type": "slack_setup", "bot_token": "xoxb-a", "app_token": "xapp-b"})
-            )
-            out["slack"] = await _recv(ws)
-            await ws.send_str(
-                json.dumps(
-                    {
-                        "id": "k1",
-                        "type": "channel_key_set",
-                        "channel_id": "C1",
-                        "key_ct": xc.b64u_encode(b"\x01" * 32),
-                    }
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
+            ):
+                await _page_auth(ws, server)
+                out = {}
+                await ws.send_str(
+                    json.dumps({"id": "s1", "type": "slack_setup", "bot_token": "xoxb-a", "app_token": "xapp-b"})
                 )
-            )
-            out["channel"] = await _recv(ws)
-            await ws.send_str(
-                json.dumps(
-                    {
-                        "id": "dc1",
-                        "type": "discord_channel_resolve",
-                        "guild_id": "123",
-                        "channel_id": "456",
-                    }
-                )
-            )
-            out["discord"] = await _recv(ws)
-            return out
+                out["slack"] = await _recv(ws)
+                return out
+        finally:
+            await server.stop()
 
     out = asyncio.run(_flow(_free_port()))
-    assert out["webauthn"] == {
-        "id": "w1",
-        "type": "error",
-        "reason": "page_session_forbidden",
-    }
     assert out["slack"] == {"id": "s1", "type": "error", "reason": "page_session_forbidden"}
-    assert out["channel"] == {"id": "k1", "type": "error", "reason": "page_session_forbidden"}
-    assert out["discord"] == {"id": "dc1", "type": "error", "reason": "page_session_forbidden"}
-    assert pairing.has_webauthn_credential() is True  # second factor survived
     assert not (tmp_path / ".env").exists()  # no Slack tokens written
-    assert pairing.load_channel_keys() == {}
 
 
 def test_page_session_allowlist_blocks_crypto_and_wallet_but_allows_chat_and_accounts(monkeypatch):
@@ -634,51 +454,57 @@ def test_page_session_allowlist_blocks_crypto_and_wallet_but_allows_chat_and_acc
     monkeypatch.setattr(extension_api, "_get_account_snapshot", lambda: ("0xabc", "0x1"))
 
     async def _flow(port):
-        async with (
-            _running_server(port=port, chat_handler=_chat_handler) as server,
-            aiohttp.ClientSession() as s,
-            s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
-        ):
-            await _page_auth(ws, server)
-            out = {}
+        server = extension_api.ExtensionAPIServer(port=port, chat_handler=_chat_handler)
+        await server.start()
+        try:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
+            ):
+                await _page_auth(ws, server)
+                out = {}
 
-            await ws.send_str(json.dumps({"id": "e1", "type": "encrypt", "plaintext": "x"}))
-            out["encrypt"] = await _recv(ws)
+                await ws.send_str(json.dumps({"id": "e1", "type": "encrypt", "plaintext": "x"}))
+                out["encrypt"] = await _recv(ws)
 
-            await ws.send_str(json.dumps({"id": "d1", "type": "decrypt", "ciphertext": "irrelevant"}))
-            out["decrypt"] = await _recv(ws)
+                await ws.send_str(json.dumps({"id": "d1", "type": "decrypt", "ciphertext": "irrelevant"}))
+                out["decrypt"] = await _recv(ws)
 
-            await ws.send_str(
-                json.dumps(
-                    {
-                        "id": "sr1",
-                        "type": "sign_request",
-                        "request_id": "r1",
-                        "method": "personal_sign",
-                        "params": ["0x1"],
-                    }
+                await ws.send_str(
+                    json.dumps(
+                        {
+                            "id": "sr1",
+                            "type": "sign_request",
+                            "request_id": "r1",
+                            "method": "personal_sign",
+                            "params": ["0x1"],
+                        }
+                    )
                 )
-            )
-            out["sign_request"] = await _recv(ws)
+                out["sign_request"] = await _recv(ws)
 
-            await ws.send_str(json.dumps({"id": "sa1", "type": "sign_approve", "request_id": "r1", "approved": True}))
-            out["sign_approve"] = await _recv(ws)
+                await ws.send_str(
+                    json.dumps({"id": "sa1", "type": "sign_approve", "request_id": "r1", "approved": True})
+                )
+                out["sign_approve"] = await _recv(ws)
 
-            # Positive: allowlisted handlers still work for a page session.
-            await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": "hi"}))
-            chunks = []
-            while True:
-                m = await _recv(ws)
-                if m["type"] == "chat_chunk":
-                    chunks.append(m["content"])
-                elif m["type"] == "chat_end":
-                    break
-            out["chat"] = "".join(chunks)
+                # Positive: allowlisted handlers still work for a page session.
+                await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": "hi"}))
+                chunks = []
+                while True:
+                    m = await _recv(ws)
+                    if m["type"] == "chat_chunk":
+                        chunks.append(m["content"])
+                    elif m["type"] == "chat_end":
+                        break
+                out["chat"] = "".join(chunks)
 
-            await ws.send_str(json.dumps({"id": "a1", "type": "accounts_request"}))
-            out["accounts"] = await _recv(ws)
+                await ws.send_str(json.dumps({"id": "a1", "type": "accounts_request"}))
+                out["accounts"] = await _recv(ws)
 
-            return out
+                return out
+        finally:
+            await server.stop()
 
     out = asyncio.run(_flow(_free_port()))
     assert out["encrypt"] == {"id": "e1", "type": "error", "reason": "page_session_forbidden"}
@@ -698,36 +524,40 @@ def test_slack_setup_rejects_newline_bearing_token(tmp_path):
     inject an extra dotenv entry that Hermes loads on its next restart."""
 
     async def _flow(port):
-        async with (
-            _running_server(port=port),
-            aiohttp.ClientSession() as s,
-            s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": "chrome-extension://abc"}) as ws,
-        ):
-            await _pair_and_auth(ws)
-            await ws.send_str(
-                json.dumps(
-                    {
-                        "id": "s1",
-                        "type": "slack_setup",
-                        "bot_token": "xoxb-x\nEVIL=pwned",
-                        "app_token": "xapp-1-A",
-                    }
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": "chrome-extension://abc"}) as ws,
+            ):
+                await _pair_and_auth(ws)
+                await ws.send_str(
+                    json.dumps(
+                        {
+                            "id": "s1",
+                            "type": "slack_setup",
+                            "bot_token": "xoxb-x\nEVIL=pwned",
+                            "app_token": "xapp-1-A",
+                        }
+                    )
                 )
-            )
-            bad = await _recv(ws)
-            # A well-formed pair must still be accepted (no over-blocking).
-            await ws.send_str(
-                json.dumps(
-                    {
-                        "id": "s2",
-                        "type": "slack_setup",
-                        "bot_token": "xoxb-123456-abcDEF",
-                        "app_token": "xapp-1-A01-9zz",
-                    }
+                bad = await _recv(ws)
+                # A well-formed pair must still be accepted (no over-blocking).
+                await ws.send_str(
+                    json.dumps(
+                        {
+                            "id": "s2",
+                            "type": "slack_setup",
+                            "bot_token": "xoxb-123456-abcDEF",
+                            "app_token": "xapp-1-A01-9zz",
+                        }
+                    )
                 )
-            )
-            good = await _recv(ws)
-            return bad, good
+                good = await _recv(ws)
+                return bad, good
+        finally:
+            await server.stop()
 
     bad, good = asyncio.run(_flow(_free_port()))
     assert bad["ok"] is False
@@ -859,14 +689,18 @@ def test_page_encrypt_without_pairing_is_forbidden_with_generic_error():
     coverage below still verifies the handler's own ``encrypt_fail`` response."""
 
     async def _flow(port):
-        async with (
-            _running_server(port=port) as server,
-            aiohttp.ClientSession() as s,
-            s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
-        ):
-            await _page_auth(ws, server)  # authed but keyless: no pairing exists
-            await ws.send_str(json.dumps({"id": "e1", "type": "encrypt", "plaintext": "x"}))
-            return await _recv(ws)
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
+            ):
+                await _page_auth(ws, server)  # authed but keyless: no pairing exists
+                await ws.send_str(json.dumps({"id": "e1", "type": "encrypt", "plaintext": "x"}))
+                return await _recv(ws)
+        finally:
+            await server.stop()
 
     assert asyncio.run(_flow(_free_port())) == {
         "id": "e1",
@@ -886,20 +720,23 @@ def test_chat_undecryptable_ciphertext_is_not_forwarded_to_the_agent():
         yield "ok"
 
     async def _flow(port):
-        async with (
-            _running_server(port=port, chat_handler=_recording_handler),
-            aiohttp.ClientSession() as s,
-            s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": "chrome-extension://abc"}) as ws,
-        ):
-            aes = await _pair_and_auth(ws)
-            stale = xc.encrypt_message(b"\x09" * 32, "hello")  # not our K_extchat
-            await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": stale}))
-            err = await _recv(ws)
-            # A correctly-keyed encrypted message must still get through.
-            ek = xc.hkdf_subkey(aes, extension_api._EXTCHAT_SALT, extension_api._EXTCHAT_INFO)
-            await ws.send_str(json.dumps({"id": "c2", "type": "chat", "content": xc.encrypt_message(ek, "hi")}))
-            ok = await _recv(ws)
-            return err, ok
+        server = extension_api.ExtensionAPIServer(port=port, chat_handler=_recording_handler)
+        await server.start()
+        try:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": "chrome-extension://abc"}) as ws,
+            ):
+                ek = await _pair_and_auth(ws)
+                stale = xc.encrypt_message(b"\x09" * 32, "hello")  # not this socket's key
+                await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": stale}))
+                err = await _recv(ws)
+                # A correctly-keyed encrypted message must still get through.
+                await ws.send_str(json.dumps({"id": "c2", "type": "chat", "content": xc.encrypt_message(ek, "hi")}))
+                ok = await _recv(ws)
+                return err, ok
+        finally:
+            await server.stop()
 
     err, ok = asyncio.run(_flow(_free_port()))
     assert err == {"id": "c1", "type": "chat_error", "reason": "undecryptable"}
@@ -952,169 +789,30 @@ class _FakeWS:
 
 
 def _authed_conn() -> extension_api._Connection:
-    token = "direct-test-extension-token"
     pairing._save_pairing(
-        pairing.Pairing(
-            aes_key=b"\x01" * 32,
-            ext_token=token,
-            ext_pubkey_b64="test-extension",
-            hermes_pubkey_b64="test-hermes",
-            paired_at=1.0,
-        )
+        pairing.Pairing(aes_key=b"\x01" * 32, ext_token="", ext_pubkey_b64="", hermes_pubkey_b64="", paired_at=1.0)
     )
+    assert pairing.load_pairing() is not None  # warms the state cache, as a live gateway has
     conn = extension_api._Connection(_FakeWS(), _chat_handler)
-    conn.authed = True
-    conn._authentication_generation = pairing.authentication_generation_fingerprint(token)
-    assert conn._authentication_generation is not None
+    authenticate(conn, b"\x02" * 32)
     return conn
 
 
-def test_authed_extension_resolves_discord_channel_metadata():
-    from mordred_hermes.extension.discord_context import DiscordChannelContext
-
-    async def resolver(guild_id: str, channel_id: str) -> DiscordChannelContext:
-        assert (guild_id, channel_id) == ("123", "999")
-        return DiscordChannelContext(
-            guild_id="123",
-            channel_id="999",
-            channel_type=11,
-            channel_name="release thread",
-            parent_channel_id="456",
-            parent_channel_name="secure-ops",
-        )
-
-    conn = _authed_conn()
-    conn.discord_resolver = resolver
-    _dispatch(
-        conn,
-        {
-            "id": "dc1",
-            "type": "discord_channel_resolve",
-            "guild_id": "123",
-            "channel_id": "999",
-        },
-    )
-    assert conn.ws.sent == [
-        {
-            "id": "dc1",
-            "type": "discord_channel_resolve_result",
-            "ok": True,
-            "guild_id": "123",
-            "channel_id": "999",
-            "channel_type": 11,
-            "channel_name": "release thread",
-            "parent_channel_id": "456",
-            "parent_channel_name": "secure-ops",
-        }
-    ]
-
-
-def test_webauthn_registration_binds_chromium_origin_as_rp_id(tmp_path):
-    origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
-    pairing._save_pairing(
-        pairing.Pairing(
-            aes_key=b"\x01" * 32,
-            ext_token="registration-test-token",
-            ext_pubkey_b64="test-extension",
-            hermes_pubkey_b64="test-hermes",
-            paired_at=1.0,
-        )
-    )
-    conn = extension_api._Connection(_FakeWS(), _chat_handler, client_origin=origin)
-    conn.authed = True
-
-    asyncio.run(
-        conn._on_webauthn_register(
-            {
-                "id": "w1",
-                "credential_id": "cred-1",
-                "public_key": _p256_public_key_b64(),
-            }
-        )
-    )
-
-    stored = json.loads((tmp_path / "extension" / "webauthn.json").read_text("utf-8"))
-    assert stored["origin"] == origin
-    assert stored["rp_id"] == origin
-    assert conn.ws.sent == [{"id": "w1", "type": "webauthn_registered", "ok": True}]
-
-
 @pytest.mark.parametrize(
-    "invalid_public_key",
+    "frame",
     [
-        pytest.param(xc.b64u_encode(b"not a DER public key"), id="malformed"),
-        pytest.param(_ec_public_key_b64(ec.SECP384R1()), id="p384"),
+        {"id": "k1", "type": "channel_key_set", "channel_id": "C1", "key_ct": "AQ"},
+        {"id": "dc1", "type": "discord_channel_resolve", "guild_id": "123", "channel_id": "999"},
     ],
 )
-def test_webauthn_registration_rejects_invalid_public_key_without_replacing_credential(
-    tmp_path,
-    invalid_public_key,
-):
-    origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
-    pairing._save_pairing(
-        pairing.Pairing(
-            aes_key=b"\x01" * 32,
-            ext_token="registration-test-token",
-            ext_pubkey_b64="test-extension",
-            hermes_pubkey_b64="test-hermes",
-            paired_at=1.0,
-        )
-    )
-    pairing.save_webauthn_credential("existing-credential", _p256_public_key_b64(), origin=origin)
-    stored_path = tmp_path / "extension" / "webauthn.json"
-    original = stored_path.read_bytes()
-    conn = extension_api._Connection(_FakeWS(), _chat_handler, client_origin=origin)
-    conn.authed = True
-
-    asyncio.run(
-        conn._on_webauthn_register(
-            {
-                "id": "w-invalid",
-                "credential_id": "replacement-credential",
-                "public_key": invalid_public_key,
-            }
-        )
-    )
-
-    assert conn.ws.sent == [
-        {
-            "id": "w-invalid",
-            "type": "webauthn_registered",
-            "ok": False,
-            "error": "invalid_public_key",
-        }
-    ]
-    assert stored_path.read_bytes() == original
-    assert json.loads(original)["credential_id"] == "existing-credential"
-
-
-def test_webauthn_registration_rejects_firefox_until_binding_is_in_protocol(tmp_path):
-    conn = extension_api._Connection(
-        _FakeWS(),
-        _chat_handler,
-        client_origin="moz-extension://random-document-uuid",
-    )
-    conn.authed = True
-
-    asyncio.run(
-        conn._on_webauthn_register(
-            {
-                "id": "w1",
-                "credential_id": "cred-1",
-                "public_key": _p256_public_key_b64(),
-            }
-        )
-    )
-
-    assert conn.ws.sent == [
-        {
-            "id": "w1",
-            "type": "webauthn_registered",
-            "ok": False,
-            "error": "webauthn_browser_unsupported",
-        }
-    ]
-    assert not (tmp_path / "extension" / "webauthn.json").exists()
+def test_removed_channel_encryption_requests_are_ignored(frame):
+    """The Slack/Discord transport is gone: its requests run nothing and store nothing."""
+    conn = _authed_conn()
+    before = json.loads(pairing._state_path().read_text())
+    asyncio.run(conn.dispatch(json.dumps(frame)))
+    assert conn.ws.sent == []
+    assert json.loads(pairing._state_path().read_text()) == before
+    assert "channel_keys" not in before
 
 
 def test_on_encrypt_not_paired_replies_encrypt_fail(monkeypatch):
@@ -1137,7 +835,9 @@ def test_sign_request_without_request_id_is_rejected():
     """An empty request_id collapsed every id-less request onto "" — a second
     one silently overwrote the first's frozen params."""
     conn = _authed_conn()
-    _dispatch(conn, {"id": "s1", "type": "sign_request", "method": "personal_sign", "params": ["0x1"]})
+    asyncio.run(
+        conn.dispatch(json.dumps({"id": "s1", "type": "sign_request", "method": "personal_sign", "params": ["0x1"]}))
+    )
     assert conn.ws.sent == [{"id": "s1", "type": "sign_result", "request_id": "", "error": "missing_request_id"}]
     assert conn._pending_sign == {}
 
@@ -1187,25 +887,31 @@ def test_sign_request_duplicate_request_id_is_rejected(monkeypatch):
     first_params = ["0xfirst", signer]
     second_params = ["0xsecond", signer]
 
-    _dispatch(
-        conn,
-        {
-            "id": "s1",
-            "type": "sign_request",
-            "request_id": "dup",
-            "method": "personal_sign",
-            "params": first_params,
-        },
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s1",
+                    "type": "sign_request",
+                    "request_id": "dup",
+                    "method": "personal_sign",
+                    "params": first_params,
+                }
+            )
+        )
     )
-    _dispatch(
-        conn,
-        {
-            "id": "s2",
-            "type": "sign_request",
-            "request_id": "dup",
-            "method": "personal_sign",
-            "params": second_params,
-        },
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s2",
+                    "type": "sign_request",
+                    "request_id": "dup",
+                    "method": "personal_sign",
+                    "params": second_params,
+                }
+            )
+        )
     )
 
     assert conn.ws.sent[-1] == {"id": "s2", "type": "sign_result", "request_id": "dup", "error": "duplicate_request_id"}
@@ -1216,16 +922,19 @@ def test_sign_request_duplicate_request_id_is_rejected(monkeypatch):
 def test_transaction_sign_request_rejects_unsafe_rpc_before_prompt():
     conn = _authed_conn()
 
-    _dispatch(
-        conn,
-        {
-            "id": "s1",
-            "type": "sign_request",
-            "request_id": "tx1",
-            "method": "eth_sendTransaction",
-            "params": [{"to": "0x" + "11" * 20}],
-            "rpc_url": "http://169.254.169.254/latest/meta-data",
-        },
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s1",
+                    "type": "sign_request",
+                    "request_id": "tx1",
+                    "method": "eth_sendTransaction",
+                    "params": [{"to": "0x" + "11" * 20}],
+                    "rpc_url": "http://169.254.169.254/latest/meta-data",
+                }
+            )
+        )
     )
 
     assert conn.ws.sent == [
@@ -1275,16 +984,19 @@ def test_transaction_sign_prompt_freezes_rpc_fields_and_signs_exact_snapshot(mon
     monkeypatch.setattr(extension_api, "_do_sign", do_sign)
     conn = _authed_conn()
 
-    _dispatch(
-        conn,
-        {
-            "id": "s1",
-            "type": "sign_request",
-            "request_id": "tx1",
-            "method": "eth_sendTransaction",
-            "params": [{"from": ("0x" + "aa" * 20).upper(), "to": "0x" + "11" * 20}],
-            "rpc_url": rpc_url,
-        },
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s1",
+                    "type": "sign_request",
+                    "request_id": "tx1",
+                    "method": "eth_sendTransaction",
+                    "params": [{"from": ("0x" + "aa" * 20).upper(), "to": "0x" + "11" * 20}],
+                    "rpc_url": rpc_url,
+                }
+            )
+        )
     )
 
     prompt = conn.ws.sent[-1]
@@ -1316,14 +1028,17 @@ def test_transaction_sign_prompt_freezes_rpc_fields_and_signs_exact_snapshot(mon
     assert conn._pending_sign["tx1"]["rpc_url"] == rpc_url
     assert conn._pending_sign["tx1"]["expected_signer"] == "0x" + "aa" * 20
 
-    _dispatch(
-        conn,
-        {
-            "id": "s2",
-            "type": "sign_approve",
-            "request_id": "tx1",
-            "approved": True,
-        },
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s2",
+                    "type": "sign_approve",
+                    "request_id": "tx1",
+                    "approved": True,
+                }
+            )
+        )
     )
 
     assert conn.ws.sent[-1]["signature"] == "0xfrozen"
@@ -1376,15 +1091,18 @@ def test_message_approval_rejects_wallet_switch_before_signing(monkeypatch, meth
     )
     conn = _authed_conn()
 
-    _dispatch(
-        conn,
-        {
-            "id": "s1",
-            "type": "sign_request",
-            "request_id": f"{method}-switch",
-            "method": method,
-            "params": params,
-        },
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s1",
+                    "type": "sign_request",
+                    "request_id": f"{method}-switch",
+                    "method": method,
+                    "params": params,
+                }
+            )
+        )
     )
 
     prompt = conn.ws.sent[-1]
@@ -1393,14 +1111,17 @@ def test_message_approval_rejects_wallet_switch_before_signing(monkeypatch, meth
     assert prompt["params"][account_index] == approved_signer
     assert conn._pending_sign[f"{method}-switch"]["expected_signer"] == approved_signer
 
-    _dispatch(
-        conn,
-        {
-            "id": "s2",
-            "type": "sign_approve",
-            "request_id": f"{method}-switch",
-            "approved": True,
-        },
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s2",
+                    "type": "sign_approve",
+                    "request_id": f"{method}-switch",
+                    "approved": True,
+                }
+            )
+        )
     )
 
     assert conn.ws.sent[-1] == {
@@ -1446,23 +1167,26 @@ def test_transaction_approval_rejects_wallet_switch_before_signing(monkeypatch):
     )
     conn = _authed_conn()
 
-    _dispatch(
-        conn,
-        {
-            "id": "s1",
-            "type": "sign_request",
-            "request_id": "tx-switch",
-            "method": "eth_sendTransaction",
-            "params": [
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
                 {
-                    "to": "0x" + "11" * 20,
-                    "nonce": "0x1",
-                    "gas": "0x5208",
-                    "gasPrice": "0x3b9aca00",
+                    "id": "s1",
+                    "type": "sign_request",
+                    "request_id": "tx-switch",
+                    "method": "eth_sendTransaction",
+                    "params": [
+                        {
+                            "to": "0x" + "11" * 20,
+                            "nonce": "0x1",
+                            "gas": "0x5208",
+                            "gasPrice": "0x3b9aca00",
+                        }
+                    ],
+                    "chain_id": "0x1",
                 }
-            ],
-            "chain_id": "0x1",
-        },
+            )
+        )
     )
 
     prompt = conn.ws.sent[-1]
@@ -1470,14 +1194,17 @@ def test_transaction_approval_rejects_wallet_switch_before_signing(monkeypatch):
     assert prompt["decoded"]["signer"] == approved_signer
     assert prompt["decoded"]["transaction"]["from"] == approved_signer
 
-    _dispatch(
-        conn,
-        {
-            "id": "s2",
-            "type": "sign_approve",
-            "request_id": "tx-switch",
-            "approved": True,
-        },
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s2",
+                    "type": "sign_approve",
+                    "request_id": "tx-switch",
+                    "approved": True,
+                }
+            )
+        )
     )
 
     assert conn.ws.sent[-1] == {
@@ -1501,17 +1228,20 @@ def test_transaction_sign_request_rejects_unconfigured_public_rpc(monkeypatch):
     )
     conn = _authed_conn()
 
-    _dispatch(
-        conn,
-        {
-            "id": "s1",
-            "type": "sign_request",
-            "request_id": "tx1",
-            "method": "eth_sendTransaction",
-            "params": [{"to": "0x" + "11" * 20}],
-            "chain_id": "0x1",
-            "rpc_url": "https://attacker.example/rpc",
-        },
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s1",
+                    "type": "sign_request",
+                    "request_id": "tx1",
+                    "method": "eth_sendTransaction",
+                    "params": [{"to": "0x" + "11" * 20}],
+                    "chain_id": "0x1",
+                    "rpc_url": "https://attacker.example/rpc",
+                }
+            )
+        )
     )
 
     assert conn.ws.sent == [
@@ -1570,21 +1300,23 @@ def test_ws_chat_client_disconnect_closes_generator():
             finally:
                 closed.set()
 
-        async with (
-            _running_server(port=port, chat_handler=endless_handler) as server,
-            aiohttp.ClientSession() as s,
-        ):
-            async with s.ws_connect(
-                f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}
-            ) as ws:
-                json.loads((await ws.receive()).data)  # auth_challenge
-                await ws.send_str(json.dumps({"type": "auth", "ext_token": server._page_token}))
-                json.loads((await ws.receive()).data)  # auth_ok
-                await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": "x"}))
-                for _ in range(2):  # prove streaming started, then vanish
-                    assert json.loads((await ws.receive()).data)["type"] == "chat_chunk"
-            await asyncio.wait_for(closed.wait(), timeout=10)
-            return True
+        server = extension_api.ExtensionAPIServer(port=port, chat_handler=endless_handler)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.ws_connect(
+                    f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}
+                ) as ws:
+                    json.loads((await ws.receive()).data)  # auth_challenge
+                    await ws.send_str(json.dumps({"type": "auth", "ext_token": server._page_token}))
+                    json.loads((await ws.receive()).data)  # auth_ok
+                    await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": "x"}))
+                    for _ in range(2):  # prove streaming started, then vanish
+                        assert json.loads((await ws.receive()).data)["type"] == "chat_chunk"
+                await asyncio.wait_for(closed.wait(), timeout=10)
+                return True
+        finally:
+            await server.stop()
 
     assert asyncio.run(_flow(_free_port())) is True
 
@@ -1608,7 +1340,7 @@ def test_authed_dispatch_does_not_reparse_state_per_frame(monkeypatch):
     monkeypatch.setattr(pairing, "_read_json", counting_read_json)
 
     for i in range(10):
-        _dispatch(conn, {"id": f"e{i}", "type": "encrypt", "plaintext": f"msg-{i}"})
+        asyncio.run(conn.dispatch(json.dumps({"id": f"e{i}", "type": "encrypt", "plaintext": f"msg-{i}"})))
 
     assert len(conn.ws.sent) == 10
     assert all(frame["type"] == "encrypt_result" for frame in conn.ws.sent)
@@ -1630,7 +1362,9 @@ def test_accounts_request_burst_costs_one_keyvault_resolution():
         return "0x" + "ab" * 20, 1
 
     async def _flow(port):
-        async with _running_server(port=port) as server:
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
             async with (
                 aiohttp.ClientSession() as session,
                 session.ws_connect(
@@ -1658,6 +1392,8 @@ def test_accounts_request_burst_costs_one_keyvault_resolution():
                 await ext_ws.send_str(json.dumps({"id": "x", "type": "accounts_request"}))
                 replies.append(await _recv(ext_ws))
             return replies
+        finally:
+            await server.stop()
 
     extension_wallet.reset_account_snapshot_cache()
     original = extension_sign.account_snapshot
@@ -1679,12 +1415,13 @@ def test_page_response_carries_a_hash_based_csp():
     from mordred_hermes.extension import page_headers
 
     async def _flow(port):
-        async with (
-            _running_server(port=port) as server,
-            aiohttp.ClientSession() as session,
-            session.get(f"http://127.0.0.1:{port}/") as response,
-        ):
-            return response.status, response.headers, await response.text(), port, server._page_token
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as session, session.get(f"http://127.0.0.1:{port}/") as response:
+                return response.status, response.headers, await response.text(), port, server._page_token
+        finally:
+            await server.stop()
 
     status, headers, html, port, token = asyncio.run(_flow(_free_port()))
     assert status == 200
@@ -1727,28 +1464,30 @@ def test_history_result_flags_undecryptable_history(tmp_path):
 
     from mordred_hermes.extension import extension_history
 
-    code, _ = pairing.generate_code()
-    ext_pub = xc.b64u_encode(xc.x25519_public_raw(X25519PrivateKey.generate()))
-    pairing.handle_pair_init(code, ext_pub, xc.b64u_encode(b"\x00" * 32))
+    pairing.ensure_master()
 
     async def _flow(port):
-        async with (
-            _running_server(port=port) as server,
-            aiohttp.ClientSession() as s,
-            s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
-        ):
-            await _page_auth(ws, server)
-            await ws.send_str(json.dumps({"id": "h0", "type": "history_get"}))
-            empty = await _recv(ws)
-            extension_history.save_messages([{"role": "user", "content": "hello"}])
-            await ws.send_str(json.dumps({"id": "h1", "type": "history_get"}))
-            readable = await _recv(ws)
-            # Re-pairing leaves a blob sealed under a key that is now gone.
-            (tmp_path / "extension" / "history.enc").write_text(
-                "\U0001f512ENC:v1:not-a-real-envelope", encoding="utf-8"
-            )
-            await ws.send_str(json.dumps({"id": "h2", "type": "history_get"}))
-            return empty, readable, await _recv(ws)
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
+            ):
+                await _page_auth(ws, server)
+                await ws.send_str(json.dumps({"id": "h0", "type": "history_get"}))
+                empty = await _recv(ws)
+                extension_history.save_messages([{"role": "user", "content": "hello"}])
+                await ws.send_str(json.dumps({"id": "h1", "type": "history_get"}))
+                readable = await _recv(ws)
+                # Re-pairing leaves a blob sealed under a key that is now gone.
+                (tmp_path / "extension" / "history.enc").write_text(
+                    "\U0001f512ENC:v1:not-a-real-envelope", encoding="utf-8"
+                )
+                await ws.send_str(json.dumps({"id": "h2", "type": "history_get"}))
+                return empty, readable, await _recv(ws)
+        finally:
+            await server.stop()
 
     empty, readable, broken = asyncio.run(_flow(_free_port()))
     assert empty["turns"] == [] and empty["status"] == "empty"
@@ -1786,14 +1525,18 @@ def test_chat_handler_exception_text_never_reaches_the_client(raised, expected_r
         yield ""  # pragma: no cover - unreachable, keeps this an async generator
 
     async def _flow(port):
-        async with (
-            _running_server(port=port, chat_handler=_boom) as server,
-            aiohttp.ClientSession() as s,
-            s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
-        ):
-            await _page_auth(ws, server)
-            await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": "hi"}))
-            return await _recv(ws)
+        server = extension_api.ExtensionAPIServer(port=port, chat_handler=_boom)
+        await server.start()
+        try:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
+            ):
+                await _page_auth(ws, server)
+                await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": "hi"}))
+                return await _recv(ws)
+        finally:
+            await server.stop()
 
     reply = asyncio.run(_flow(_free_port()))
     assert reply == {"id": "c1", "type": "chat_error", "reason": expected_reason}
@@ -1812,17 +1555,20 @@ def test_sign_failure_text_never_reaches_the_client(monkeypatch):
         raise RuntimeError("keyvault unwrap failed: /Users/operator/.hermes/keyvault/wmk")
 
     monkeypatch.setattr(extension_api, "_do_sign", _boom)
-    _dispatch(
-        conn,
-        {
-            "id": "s1",
-            "type": "sign_request",
-            "request_id": "r1",
-            "method": "personal_sign",
-            "params": ["0x1", signer],
-        },
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s1",
+                    "type": "sign_request",
+                    "request_id": "r1",
+                    "method": "personal_sign",
+                    "params": ["0x1", signer],
+                }
+            )
+        )
     )
-    _dispatch(conn, {"id": "s2", "type": "sign_approve", "request_id": "r1", "approved": True})
+    asyncio.run(conn.dispatch(json.dumps({"id": "s2", "type": "sign_approve", "request_id": "r1", "approved": True})))
 
     result = conn.ws.sent[-1]
     assert result == {"id": "s2", "type": "sign_result", "request_id": "r1", "error": "sign_failed"}
@@ -1835,14 +1581,17 @@ def test_slack_setup_failure_text_never_reaches_the_client(monkeypatch):
 
     monkeypatch.setattr(extension_api, "_update_slack_env", _boom)
     conn = _authed_conn()
-    _dispatch(
-        conn,
-        {
-            "id": "s1",
-            "type": "slack_setup",
-            "bot_token": "xoxb-" + "a" * 20,
-            "app_token": "xapp-" + "b" * 20,
-        },
+    asyncio.run(
+        conn.dispatch(
+            json.dumps(
+                {
+                    "id": "s1",
+                    "type": "slack_setup",
+                    "bot_token": "xoxb-" + "a" * 20,
+                    "app_token": "xapp-" + "b" * 20,
+                }
+            )
+        )
     )
 
     assert conn.ws.sent == [
@@ -1855,16 +1604,21 @@ def test_page_route_error_replies_still_carry_security_headers(tmp_path, monkeyp
     the route's protection must not depend on which branch replied."""
 
     async def _flow(port):
-        async with _running_server(port=port), aiohttp.ClientSession() as session:
-            # Rebinding attempt: loopback peer, non-loopback Host header.
-            async with session.get(
-                f"http://127.0.0.1:{port}/",
-                headers={"Host": "evil.example"},
-            ) as rebind:
-                forbidden = rebind.status, dict(rebind.headers)
-            monkeypatch.setattr(extension_api, "_WEB_DIR", tmp_path / "missing")
-            async with session.get(f"http://127.0.0.1:{port}/") as unbuilt:
-                return forbidden, (unbuilt.status, dict(unbuilt.headers))
+        server = extension_api.ExtensionAPIServer(port=port)
+        await server.start()
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Rebinding attempt: loopback peer, non-loopback Host header.
+                async with session.get(
+                    f"http://127.0.0.1:{port}/",
+                    headers={"Host": "evil.example"},
+                ) as rebind:
+                    forbidden = rebind.status, dict(rebind.headers)
+                monkeypatch.setattr(extension_api, "_WEB_DIR", tmp_path / "missing")
+                async with session.get(f"http://127.0.0.1:{port}/") as unbuilt:
+                    return forbidden, (unbuilt.status, dict(unbuilt.headers))
+        finally:
+            await server.stop()
 
     (forbidden_status, forbidden_headers), (unbuilt_status, unbuilt_headers) = asyncio.run(_flow(_free_port()))
     assert forbidden_status == 403
@@ -1910,3 +1664,39 @@ assert path.read_text() == "KEEP=unchanged\nSLACK_BOT_TOKEN=test-token\n"
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_history_is_answered_while_a_chat_reply_is_still_being_written():
+    """A slow model can take minutes over one reply. The popup asks for the
+    history whenever it opens, on the same socket, and reads Hermes as offline
+    until the answer comes, so a running chat must not hold the other requests."""
+
+    async def _flow(port):
+        release = asyncio.Event()
+
+        async def slow_handler(_content, _context):
+            yield "thinking"
+            await release.wait()
+            yield "done"
+
+        server = extension_api.ExtensionAPIServer(port=port, chat_handler=slow_handler)
+        await server.start()
+        try:
+            async with (
+                aiohttp.ClientSession() as s,
+                s.ws_connect(f"http://127.0.0.1:{port}/ext", headers={"Origin": f"http://127.0.0.1:{port}"}) as ws,
+            ):
+                await _page_auth(ws, server)
+                await ws.send_str(json.dumps({"id": "c1", "type": "chat", "content": "x"}))
+                assert (await _recv(ws))["type"] == "chat_chunk"
+                await ws.send_str(json.dumps({"id": "h", "type": "history_get"}))
+                frame = json.loads((await asyncio.wait_for(ws.receive(), timeout=2)).data)
+                release.set()
+                rest = [await _recv(ws) for _ in range(2)]
+                return frame, rest
+        finally:
+            await server.stop()
+
+    frame, rest = asyncio.run(_flow(_free_port()))
+    assert frame["type"] == "history_result"
+    assert [f["type"] for f in rest] == ["chat_chunk", "chat_end"]

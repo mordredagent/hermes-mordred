@@ -108,7 +108,8 @@ class KeyProvider:
                     raise DatabaseRefused("database key provider is closed")
                 if self._authority is None:
                     self._authority = Authority.acquire(self._home if self._home is not None else hermes_home())
-                return self._authority.key
+                authority = self._authority
+            return authority.key
         if self._cached is not None:
             return self._cached
         with _LOCK:
@@ -124,14 +125,26 @@ class KeyProvider:
 
     @property
     def authority(self) -> Authority:
-        """Acquire once for the guarded runtime; never export a temporary bare key."""
+        """Acquire once for the guarded runtime; never export a temporary bare key.
+
+        Acquisition does not unwrap the key: that waits for the first connection.
+        """
         from .._core._database_contracts import DatabaseRefused
+        from .._core._home import hermes_home
+        from ._authority import Authority
 
         if not self._native:
             raise DatabaseRefused("injected providers have no native authority")
-        self()
-        assert self._authority is not None
-        return self._authority
+        if self._pid != os.getpid():
+            self._lock = threading.RLock()
+            self.close()
+            raise DatabaseRefused("database key provider cannot survive fork")
+        with self._lock:
+            if self._closed:
+                raise DatabaseRefused("database key provider is closed")
+            if self._authority is None:
+                self._authority = Authority.acquire(self._home if self._home is not None else hermes_home())
+            return self._authority
 
     @property
     def current_authority(self) -> Authority | None:

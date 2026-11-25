@@ -1,4 +1,4 @@
-"""Mordred browser-extension WebSocket API (ws://127.0.0.1:7788/ext).
+"""Mordred browser-extension WebSocket API (ws://127.0.0.1:47711/ext).
 
 Ported from the full-Hermes gateway layer into the mordred_hermes package so
 the extension server ships with the plugin bundle. Hermes-runtime imports
@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 # Canonical submodules + the back-compat ``extension_*`` aliases (the original
 # full-Hermes modules were named ``extension_api`` .. ``extension_rpc``).
-_SUBMODULES = frozenset({"api", "chat", "crypto", "history", "pairing", "rpc", "webauthn"})
+_SUBMODULES = frozenset({"api", "chat", "crypto", "history", "pairing", "rpc", "trust"})
 _ALIASES = {
     "extension_api": "api",
     "extension_chat": "chat",
@@ -46,7 +46,7 @@ def __dir__() -> list[str]:
 
 
 if TYPE_CHECKING:  # keep static analysers / IDEs aware of the attributes
-    from . import api, chat, crypto, history, pairing, rpc, webauthn
+    from . import api, chat, crypto, history, pairing, rpc, trust
 
     extension_api = api
     extension_chat = chat
@@ -68,5 +68,5 @@ __all__ = [
     "history",
     "pairing",
     "rpc",
-    "webauthn",
+    "trust",
 ]

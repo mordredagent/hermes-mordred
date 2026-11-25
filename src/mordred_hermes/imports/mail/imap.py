@@ -16,13 +16,15 @@ Transport (SPEC "IMAP sync (2026-10-22)"):
   refused) with :func:`ssl.create_default_context`: certificate and hostname
   verification on, TLS 1.2 or newer, SNI set to the sealed host. ``STARTTLS``
   and referrals are never used.
-- Authentication is ``LOGIN`` inside that TLS connection and nothing else:
-  ``AUTHENTICATE`` is not on the allowlist, so there is no mechanism
-  negotiation that could fall back to something weaker, and a server that
-  advertises ``LOGINDISABLED`` is ``imap_auth_failed``.
+- Authentication is ``LOGIN`` inside that TLS connection, or for a Gmail
+  signed in with Google ``AUTHENTICATE XOAUTH2`` (:mod:`.oauth`), and nothing
+  else: ``AUTHENTICATE`` with any other mechanism is refused before it is
+  sent, so there is no mechanism negotiation that could fall back to
+  something weaker, and a server that advertises ``LOGINDISABLED`` refuses
+  ``LOGIN`` as ``imap_auth_failed``.
 
 Protocol: :class:`_CommandGuard` refuses, before anything is sent, every command
-outside ``CAPABILITY``, ``LOGIN``, ``LIST`` (``"" "*"`` only), ``EXAMINE`` (one
+outside ``CAPABILITY``, ``LOGIN``, ``AUTHENTICATE XOAUTH2``, ``LIST`` (``"" "*"`` only), ``EXAMINE`` (one
 quoted name), ``UID SEARCH``, ``UID FETCH`` (``BODY.PEEK[]`` and metadata items
 only), ``NOOP`` and ``LOGOUT`` (no arguments), and every argument that contains
 CR, LF or NUL (no second command can be framed into an argument) — so no
@@ -160,7 +162,9 @@ MAX_COMMAND_LINE_BYTES: Final = 16 * _MIB
 #: Every byte one session may read (the fetch plans batches well below it).
 MAX_RUN_BYTES: Final = 2048 * _MIB
 _DRAIN_CHUNK: Final = 64 * 1024
-_ALLOWED_COMMANDS: Final = frozenset({"CAPABILITY", "LOGIN", "LIST", "EXAMINE", "UID", "NOOP", "LOGOUT"})
+_ALLOWED_COMMANDS: Final = frozenset(
+    {"CAPABILITY", "LOGIN", "AUTHENTICATE", "LIST", "EXAMINE", "UID", "NOOP", "LOGOUT"}
+)
 _NO_ARGUMENTS: Final = frozenset({"CAPABILITY", "NOOP", "LOGOUT"})
 _LIST_ARGUMENTS: Final = ('""', '"*"')
 _FRAMING_CHARS: Final = frozenset("\r\n\0")
@@ -763,6 +767,9 @@ def _check_command(verb: str, args: Sequence[object]) -> None:
         raise ImapError("imap_command_refused")
     if verb == "LOGIN" and len(present) != 2:
         raise ImapError("imap_command_refused")
+    # Gmail signed in with Google is the only other way in: no other SASL mechanism is ever started.
+    if verb == "AUTHENTICATE" and tuple(_text(arg).upper() for arg in present) != ("XOAUTH2",):
+        raise ImapError("imap_command_refused")
     if verb == "UID":
         _check_uid_command(present)
 
@@ -1275,6 +1282,46 @@ class ImapSession:
         except imaplib.IMAP4.error as exc:
             if getattr(self._conn, "state", "") == "AUTH":  # LOGIN was accepted: a later command failed
                 return ImapError("imap_protocol")
+            return ImapError("imap_auth_failed", hint=_login_hint(exc))
+        except (UnicodeError, ValueError):
+            return ImapError("imap_auth_failed")
+        except Exception as exc:  # the guard's own ImapError, or a socket failure
+            failure = _mapped_failure(exc)
+            if failure is None:
+                raise
+            return failure
+        return None
+
+    def authenticate_xoauth2(self, user: str, access_token: str) -> None:
+        """``AUTHENTICATE XOAUTH2`` (Gmail signed in with Google, :mod:`.oauth`).
+
+        Refused and scrubbed like :meth:`login`.
+        """
+        failure = self._xoauth2(user, access_token)
+        del user, access_token
+        if failure is not None:
+            self._scrub()
+            raise sever_chain(failure)
+        self._run(self._refresh_capabilities)
+
+    def _xoauth2(self, user: str, access_token: str) -> ImapError | None:
+        """The SASL exchange; the failure is returned, so no frame holding the token is ever in a traceback."""
+        initial = f"user={user}\x01auth=Bearer {access_token}\x01\x01".encode()
+        answered = False
+
+        def respond(_challenge: bytes) -> bytes:
+            nonlocal answered
+            if answered:
+                return b""  # the server's error challenge: an empty answer ends the exchange
+            answered = True
+            return initial
+
+        try:
+            self._conn.authenticate("XOAUTH2", respond)
+        except imaplib.IMAP4.abort as exc:
+            _emit(f"mordred imap: connection aborted during AUTHENTICATE ({_diag(exc)})")
+            return ImapError("imap_unreachable")
+        except imaplib.IMAP4.error as exc:
             return ImapError("imap_auth_failed", hint=_login_hint(exc))
         except (UnicodeError, ValueError):
             return ImapError("imap_auth_failed")

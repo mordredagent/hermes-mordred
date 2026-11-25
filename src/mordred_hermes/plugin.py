@@ -12,17 +12,21 @@ module's :func:`register` wires every component in a fixed order:
 3. ``network``       — the process-wide Tor / VPN / clearnet route and hooks.
 4. ``privacy_check`` — tool-call policy and the session-start integrity gate.
 5. ``dbcrypt``       — the database-encryption monitor and status line.
-6. ``e2e``           — encrypted gateway dispatch, outbound re-encryption and
-                        the read-only Telegram tools.
+6. ``e2e``           — the read-only Telegram tools (the Slack/Discord
+                        end-to-end transport that gave it its name is gone).
 7. ``activity``      — browser activity history: capture runs in the
                         extension server's receiver; ``register`` adds the
                         history hooks (``transform_tool_result``,
                         ``pre_llm_call``), the two lookup tools and the
                         ``browser-history`` skill, all gated per call by
                         ``plugins.mordred_activity``.
-8. ``wizard``        — the ``hermes mordred`` CLI subcommand.
+8. ``recall``        — memory from ``mordred.db``: a ``pre_llm_call`` hook that
+                        searches every chat turn (the extension's by default),
+                        the ``mordred_memory_search`` tool and the ``recall``
+                        skill (:mod:`mordred_hermes.recall.plugin`).
+9. ``wizard``        — the ``hermes mordred`` CLI subcommand.
 
-Components 1-4 and 8 keep the relative order they had as separate plugins
+Components 1-4 and 9 keep the relative order they had as separate plugins
 (Hermes loaded those alphabetically: keyvault, llm_guard, network,
 privacy_check, wizard). ``e2e`` used to load first only because its old name
 sorted first; it now loads after the runtime guards it relies on.
@@ -72,6 +76,7 @@ COMPONENTS: Final[tuple[tuple[str, str], ...]] = (
     ("dbcrypt", "mordred_hermes.dbcrypt"),
     ("e2e", "mordred_hermes.extension.gateway_plugin"),
     ("activity", "mordred_hermes.activity"),
+    ("recall", "mordred_hermes.recall.plugin"),
     ("wizard", "mordred_hermes.wizard"),
 )
 
@@ -86,8 +91,9 @@ COMPONENT_REQUIRED_HOOKS: Final[dict[str, frozenset[str]]] = {
     "network": frozenset({"on_session_start", "on_session_end", "pre_api_request", "pre_tool_call"}),
     "privacy_check": frozenset({"on_session_start", "pre_tool_call"}),
     "dbcrypt": frozenset({"on_session_start", "pre_llm_call"}),
-    "e2e": frozenset({"on_session_start", "pre_gateway_dispatch"}),
+    "e2e": frozenset({"on_session_start"}),
     "activity": frozenset(),
+    "recall": frozenset(),
     "wizard": frozenset(),
 }
 

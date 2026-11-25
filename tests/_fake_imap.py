@@ -19,6 +19,7 @@ ever (a server that never lets a read time out), and ``raw_labels`` sends the
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import re
 import socket
@@ -31,7 +32,7 @@ from mordred_hermes.imports.mail._imap_codec import encode_mutf7
 from mordred_hermes.imports.mail.imap import GuardedIMAP4, ImapSession, IoLimits
 
 _FORBIDDEN = {"SELECT", "STORE", "COPY", "MOVE", "EXPUNGE", "APPEND", "CREATE", "DELETE", "RENAME", "CLOSE", "XLIST"}
-_ALLOWED = {"CAPABILITY", "LOGIN", "LIST", "EXAMINE", "UID", "NOOP", "LOGOUT"}
+_ALLOWED = {"CAPABILITY", "LOGIN", "AUTHENTICATE", "LIST", "EXAMINE", "UID", "NOOP", "LOGOUT"}
 _MONTH_NAMES = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _MONTHS = {name: n for n, name in enumerate(_MONTH_NAMES, 1)}
 
@@ -133,8 +134,11 @@ class FakeImapServer:
         login_failure: str = "NO [AUTHENTICATIONFAILED] bad",
         login_untagged: tuple[str, ...] = (),
         replies: dict[str, str] | None = None,
+        oauth_token: str | None = None,
     ) -> None:
         self.mailboxes = mailboxes
+        #: The access token ``AUTHENTICATE XOAUTH2`` accepts (Gmail signed in with Google); None refuses it.
+        self.oauth_token = oauth_token
         self.gmail = gmail
         self.user = user
         self.password = password
@@ -194,6 +198,7 @@ class FakeImapServer:
 
     def _serve(self, sock: socket.socket) -> None:
         stream = sock.makefile("rb")
+        self._stream = stream
         try:
             extra = "".join(f" {word}" for word in self.capabilities).encode("ascii")
             caps = b"IMAP4rev1 AUTH=PLAIN" + (b" X-GM-EXT-1" if self.gmail else b"") + extra
@@ -240,6 +245,16 @@ class FakeImapServer:
             for line in self.login_untagged:
                 reply(line.encode() + b"\r\n")
             reply(f"{tag} {'OK LOGIN completed' if ok else self.login_failure}\r\n".encode())
+            self.logged_in = ok
+        elif verb == "AUTHENTICATE":
+            reply(b"+ \r\n")
+            answer = base64.b64decode(self._stream.readline().strip() or b"=")
+            expected = f"user={self.user}\x01auth=Bearer {self.oauth_token}\x01\x01".encode()
+            ok = args.upper() == "XOAUTH2" and self.oauth_token is not None and answer == expected
+            if not ok:  # Gmail's error challenge, answered by an empty line
+                reply(b"+ eyJzdGF0dXMiOiI0MDAifQ==\r\n")
+                self._stream.readline()
+            reply(f"{tag} {'OK AUTHENTICATE completed' if ok else self.login_failure}\r\n".encode())
             self.logged_in = ok
         elif verb == "LIST":
             for name, box in self.mailboxes.items():

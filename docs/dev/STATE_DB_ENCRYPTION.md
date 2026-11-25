@@ -165,6 +165,21 @@ imported; the PluginManager wrapper is deferred to a post-import hook because
 the Hermes checkout is not on `sys.path` at that moment; `hermes_home()`
 honours `HERMES_HOME` before Hermes is importable.
 
+Because of this launch form, the runtime gate maps a gateway that runs the
+bare standalone interpreter to the expected runtime that the gate already
+resolved. The gate scans the running gateways once, then maps that list
+without starting a process. It maps a gateway only when the first token of the
+gateway's own command line is the interpreter path, that path, not resolved,
+is the one that `<home>/hermes-agent/.hermes/bin/hermes` runs in its `exec`
+line, and that path is the same file the expected runtime resolves to. An
+interpreter read from a launcher file or from `/proc/<pid>/exe`, and any other
+path, including a symlink to the same binary, is probed as itself. Gateway
+discovery itself does not map, and `encryption status` and the uninstall
+listing do not map either, so they still show the bare interpreter for a
+Desktop gateway. A second Hermes checkout that starts its gateway for the same
+home with the same standalone interpreter path has the same command line and
+cannot be told apart.
+
 ## Phase 2 (done)
 
 `mordred_hermes.dbcrypt` (`_policy`, `_key`, `_shim`), installed first thing

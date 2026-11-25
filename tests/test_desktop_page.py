@@ -469,11 +469,28 @@ STATE_CASES.update(
             mac(memory=False, login=False, **v4(vault={**VAULT_NONE, "exists": True, "optout": True}, armed=False)),
             None,
             ready_but(
-                vault="attention:env_optout",
+                vault="next",
                 memory="blocked:needs_vault",
                 databases="blocked:needs_memory",
                 telegram="blocked:needs_memory",
                 telegram_import="blocked:needs_memory",
+                mail="todo",
+            ),
+        ),
+        "v4, .env enrolled, then encryption opted out": (
+            mac(
+                memory=False,
+                login=False,
+                **v4(vault={**VAULT_READY, "env_injecting": False, "optout": True}, armed=False),
+            ),
+            None,
+            ready_but(
+                vault="next",
+                memory="blocked:needs_vault",
+                databases="blocked:needs_memory",
+                telegram="blocked:needs_memory",
+                telegram_import="blocked:needs_memory",
+                mail="todo",
             ),
         ),
         "v4, memory already on from an older ceremony": (
@@ -1506,11 +1523,16 @@ def test_overview_from_version_4_reads_the_store_and_the_mailbox_label():
         (
             {**VAULT_NONE, "exists": True, "optout": True},
             False,
-            ("attention", "Secure Enclave · vault without .env · memory not encrypted · databases off"),
+            ("partial", "Secure Enclave · vault without .env · memory not encrypted · databases off"),
+        ),
+        (
+            {**VAULT_READY, "env_injecting": False, "optout": True},
+            False,
+            ("partial", "Secure Enclave · vault, .env encryption off · memory not encrypted · databases off"),
         ),
         (None, True, ("partial", "Secure Enclave · memory encrypted · databases off")),
     ],
-    ids=["no-vault", "vault-without-env", "env-opted-out", "api-without-vault"],
+    ids=["no-vault", "vault-without-env", "env-opted-out", "enrolled-env-opted-out", "api-without-vault"],
 )
 def test_overview_protection_row_names_the_vault(vault, memory, expected):
     status = mac(memory=memory, **v4(vault=vault, armed=False, available=False, code="not_armed"))
@@ -1873,9 +1895,6 @@ def test_vault_commit_failures_end_the_flow_unless_the_ceremony_was_busy(code, k
 
 
 def test_vault_step_states_from_status():
-    optout = component(vault_step({**VAULT_NONE, "exists": True, "optout": True}, "attention", "env_optout"), [])
-    assert "hermes-mordred encryption enable env" in optout["text"]
-    assert "Create the vault" not in optout["buttons"] and "Move .env into the vault" not in optout["buttons"]
     done = component(vault_step(VAULT_READY, "done"), [])
     assert "On · .env is in the vault · opens without Touch ID while you are logged in." in done["text"]
     assert "Restart Hermes Desktop" not in done["buttons"]
@@ -1884,6 +1903,20 @@ def test_vault_step_states_from_status():
     waiting = component(vault_step({**VAULT_READY, "env_injecting": False}, "done"), [])
     assert "Restart Hermes Desktop so Hermes reads .env from the vault" in waiting["text"]
     assert "Restart Hermes Desktop" in waiting["buttons"]
+
+
+def test_an_opted_out_env_is_moved_into_the_vault_again():
+    vault = {**VAULT_READY, "env_injecting": False, "optout": True}
+    result = component(
+        vault_step(vault), [REUSE, {"ok": True, "passphrase_reused": True}], "out.body = text(tree)\n" + MOVE + MOVE
+    )
+    body = result["out"]["body"]
+    assert ".env encryption was turned off earlier." in body
+    assert "the vault will hold what is in .env now, and keys that are not in that file are removed" in body
+    assert "plaintext" not in body and "is not in it yet" not in body
+    assert result["requests"] == [["/vault/prepare", {}], ["/vault/v2/commit", {"unattended": True}]]
+    assert "Restart Hermes Desktop so Hermes reads .env from the vault" in result["text"]
+    assert "Restart Hermes Desktop" in result["buttons"]
 
 
 ANCHOR = "mordred-hermes.vault.0123456789abcdef"

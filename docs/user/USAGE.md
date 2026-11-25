@@ -379,7 +379,13 @@ the hook reseals the current config and removes the plaintext. Do not re-run
 > console script appears once the kernel rewrites the `#!` exec),
 > `<launcher> gateway run`, and `<shell> <launcher> gateway run` — the launcher
 > path must be absolute. A gateway running under another account (or a shape
-> outside that set) is not seen, and therefore not probed. If a running gateway
+> outside that set) is not seen, and therefore not probed. A Hermes Desktop
+> gateway runs the bare standalone interpreter, and Hermes's startup adds the
+> selected environment to it. When the gateway's own command line starts with
+> exactly the interpreter path that Desktop's launcher for this home runs, the
+> command treats that gateway as the expected runtime it has already checked.
+> (`encryption status` does not do this and still shows that gateway's bare
+> interpreter.) If a running gateway
 > cannot load the shim, the command refuses and touches nothing (excerpt):
 >
 > ```text
@@ -436,6 +442,24 @@ file at `--output` is complete (mode `0600`); verify it and remove the private
 `.<name>.mordred-materialize-*` staging copy if one was left beside it before
 relying on it. Never run `reset` unless an isolated recovery test has verified the
 latest blob or every dependency on the source has been removed.
+
+`keyvault init --backup-file <path>` (also `setup --backup-file <path>`) skips
+the paper ceremony: the seed is never shown, no offline device or air gap is
+needed, and the keyvault's backup, seed included, is saved to that new file
+(mode `0600`), protected by the passphrase. The file and the passphrase are
+then everything recovery needs: `keyvault recover --blob <path>`, pressing
+Enter at the Seed Phrase prompt, reads the seed out of the file. Whoever holds
+both holds the keyvault, so keep the file apart from the passphrase. A backup of
+a paper-only Keyvault holds no seed, and recovering it still needs the 24 words.
+
+`setup --no-prompts --backup-file <path>` (what the Mac installer runs) asks
+nothing in the terminal; only Touch ID dialogs appear. A keyvault it creates
+gets a generated passphrase, which is used for the at-rest vault's recovery too
+and saved inside the backup file with the keyvault's backup. That file alone
+then restores the keyvault: `keyvault recover --blob <path>` asks nothing, and
+whoever holds the file holds the keyvault. A later `setup --no-prompts` reads
+the passphrase back from the same file. Keys confirm with Touch ID unless
+`--unattended-keys` is given.
 
 #### `keyvault eth` — Ethereum keys (HD wallet)
 
@@ -534,26 +558,23 @@ hermes-mordred plugins list                 # the mordred plugin + per-component
 hermes-mordred plugins migrate              # switch old mordred_* plugin names to mordred
 ```
 
-### `extension` — browser-extension pairing and server (preview)
+### `extension` — browser-extension approval and server (preview)
 ```sh
-hermes-mordred extension pair               # print a MORT-… code (+ QR with messaging), then wait
-hermes-mordred extension pair --timeout 300 # seconds to wait for the extension to pair (default 600)
 hermes-mordred extension serve              # run the extension WebSocket server in the foreground
 hermes-mordred extension serve --port 7799  # bind a non-default port (default: 127.0.0.1:7788)
+hermes-mordred extension devices            # list the approved browsers
+hermes-mordred extension devices --remove ID  # remove one; its connections close
 ```
-> `pair` prints a code and waits for a running extension WebSocket server to
-> consume it — either this plugin's `extension serve` or a compatible
-> legacy/custom gateway. After the normal platform install, the pairing path
-> does not need the server's `extension` extra; `messaging` adds only the QR
-> render. A `gateway.extension_pairing` fallback remains for compatible older
-> custom checkouts. When no pairing backend is available, the command fails
-> closed with a clear install hint.
+> There is no pairing code. Choose **Connect** in the extension popup: the popup
+> shows a check code, and the Mac asks for Touch ID (or the login password)
+> once, with the same code in the prompt. Approve only when the codes match.
+> Removing a browser needs no approval.
 >
 > `serve` runs the plugin's own ported server (`mordred_hermes.extension`)
 > standalone. Install the `extension` extra to guarantee its dependencies.
-> Pairing, crypto, history, keyvault signing, and agent chat all work: the chat
+> Approval, crypto, history, keyvault signing, and agent chat all work: the chat
 > handler binds the
-> Hermes runtime shipped with `hermes-agent`, so E2E-encrypted messages get
+> Hermes runtime shipped with `hermes-agent`, so chat messages get
 > real agent replies (a stub reply appears only if that runtime is missing);
 > see [`EXTENSION.md`](./EXTENSION.md) for the security model and deployment
 > options.
@@ -1488,10 +1509,12 @@ lid is closed), each unlock shows the macOS login-password dialog instead.
 **Recommended: create the SE key in unattended mode** — especially if anything
 starts Hermes in the **background** (a launchd-started gateway, `extension
 serve`). An attended key blocks a background process on a Touch ID prompt it can
-never answer: after the 120 s helper timeout the process starts **without** the
-vault-managed secrets (e.g. a Slack bot token sealed in `.env` silently drops
+never answer: after the 120 s helper timeout a gateway process starts **without**
+the vault-managed secrets (e.g. a Slack bot token sealed in `.env` silently drops
 that platform, with only a `Mordred component 'keyvault' failed to register:
-... auth_failed` error in the logs). To make the hot path **silent** (no Touch ID
+... auth_failed` error in the logs), and `extension serve` runs with its vault
+locked until the extension's **Unlock** button gets a Touch ID approval (see
+[EXTENSION.md](EXTENSION.md#starting-with-the-vault-locked)). To make the hot path **silent** (no Touch ID
 while the Mac is unlocked), install the helper and select **unattended** policy
 on a later fresh device-key creation command:
 
@@ -1955,7 +1978,7 @@ curl -fsSL https://raw.githubusercontent.com/mordredagent/hermes-mordred/main/sc
 
 A Hermes self-update can recreate `~/.hermes/hermes-agent/venv`. Repeat the
 same feature flags whenever you reinstall or upgrade so optional dependencies
-such as `extension`, `ethereum`, `messaging`, `tor-control`, and `telegram` are installed
+such as `extension`, `ethereum`, `tor-control`, and `telegram` are installed
 and re-resolved in the new environment.
 
 To install an exact release, replace `VERSION` with its PEP 440 version and

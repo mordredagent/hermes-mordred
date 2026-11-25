@@ -101,6 +101,12 @@ def _add_seed_storage_options(parser: argparse.ArgumentParser, *, seed_label: st
         action="store_false",
         help=f"Do not store the {seed_label} at rest; require the paper seed for later recovery/import.",
     )
+    parser.add_argument(
+        "--backup-file",
+        metavar="PATH",
+        help="Never show the seed: save the keyvault's backup (seed included, protected by the passphrase) "
+        "to this new file instead; the file and the passphrase restore it (no offline step)",
+    )
 
 
 def _add_desktop(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -368,22 +374,51 @@ def _add_telegram(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> N
 
 
 def _add_extension(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = sub.add_parser("extension", help="Browser extension: pairing and bridge")
+    p = sub.add_parser("extension", help="Browser extension: approved browsers and bridge")
     esub = p.add_subparsers(dest="extension_command", required=True, metavar="COMMAND")
-    p_pair = esub.add_parser("pair", help="Generate a pairing code and wait for the extension")
-    p_pair.add_argument("--timeout", type=float, default=600.0, help="Seconds to wait for pairing (default: 600)")
-    p_pair.set_defaults(func=_handle_extension_pair)
+    p_devices = esub.add_parser("devices", help="List the approved browsers, or remove one")
+    p_devices.add_argument("--remove", metavar="ID", help="Remove the browser with this id")
+    p_devices.set_defaults(func=_handle_extension_devices)
     p_serve = esub.add_parser(
         "serve",
-        help="Run the extension WebSocket server (ws://127.0.0.1:7788/ext) in the foreground",
+        help="Run the extension WebSocket server (ws://127.0.0.1:47711/ext) in the foreground",
     )
     p_serve.add_argument(
         "--host",
         default="127.0.0.1",
         help="Loopback bind host (default: 127.0.0.1; non-loopback values are refused)",
     )
-    p_serve.add_argument("--port", type=int, default=7788, help="Bind port (default: 7788)")
+    p_serve.add_argument("--port", type=int, default=47711, help="Bind port (default: 47711)")
     p_serve.set_defaults(func=_handle_extension_serve)
+    p_agent = esub.add_parser(
+        "agent",
+        help="Start `extension serve` at login (macOS LaunchAgent): install, uninstall, status",
+    )
+    p_agent.add_argument("action", choices=("install", "uninstall", "status"))
+    p_agent.add_argument("--host", default="127.0.0.1", help="Loopback bind host (default: 127.0.0.1)")
+    p_agent.add_argument("--port", type=int, default=47711, help="Bind port (default: 47711)")
+    p_agent.add_argument(
+        "--env-script",
+        metavar="FILE",
+        help="A shell file sourced at each start (a development home's settings); its values stay out of the plist",
+    )
+    p_agent.set_defaults(func=_handle_extension_agent)
+    p_browsers = esub.add_parser(
+        "browsers",
+        help="Let the Mordred extension find and connect to this Mac (registers the native host)",
+    )
+    p_browsers.add_argument("action", choices=("install",))
+    p_browsers.add_argument(
+        "--extension-id",
+        action="append",
+        default=[],
+        metavar="ID",
+        help="Also accept this extension ID (an unpacked development build); repeatable",
+    )
+    p_browsers.set_defaults(func=_handle_extension_browsers)
+    p_host = esub.add_parser("native-host", help="(started by the browser) the Mordred extension's native host")
+    p_host.add_argument("browser_args", nargs="*", help=argparse.SUPPRESS)
+    p_host.set_defaults(func=_handle_extension_native_host)
 
 
 def _add_status(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -401,10 +436,18 @@ def _add_setup(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None
         help="Run every setup step in order (hermes / configure / network / hardware helper / "
         "keyvault / encryption); safe to re-run, resumes where it left off",
     )
-    p.add_argument(
+    prompts_group = p.add_mutually_exclusive_group()
+    prompts_group.add_argument(
         "--non-interactive",
         action="store_true",
         help="Never prompt; any step that still needs a decision is reported as needing a manual follow-up",
+    )
+    prompts_group.add_argument(
+        "--no-prompts",
+        action="store_true",
+        help="Run every step without asking anything in the terminal (Touch ID dialogs still appear): "
+        "a new keyvault gets a generated passphrase saved inside --backup-file (required), which then "
+        "restores it on its own; keys ask for Touch ID unless --unattended-keys",
     )
     hermes_group = p.add_mutually_exclusive_group()
     hermes_group.add_argument(
@@ -1112,10 +1155,10 @@ def _handle_plugins_migrate(args: argparse.Namespace) -> int:
     return plugins_list.migrate_cli_handler(args)
 
 
-def _handle_extension_pair(args: argparse.Namespace) -> int:
-    from . import extension_pair_cli
+def _handle_extension_devices(args: argparse.Namespace) -> int:
+    from . import extension_devices_cli
 
-    return extension_pair_cli.cli_extension_pair(args)
+    return extension_devices_cli.cli_extension_devices(args)
 
 
 def _handle_desktop(args: argparse.Namespace) -> int:
@@ -1164,6 +1207,45 @@ def _handle_telegram(args: argparse.Namespace) -> int:
     from . import telegram_cli
 
     return telegram_cli.cli_telegram(args)
+
+
+def _handle_extension_agent(args: argparse.Namespace) -> int:
+    from mordred_hermes.extension.launch_agent import cli
+
+    return cli(args.action, host=args.host, port=args.port, env_script=args.env_script)
+
+
+def _handle_extension_browsers(args: argparse.Namespace) -> int:
+    import shutil
+    import sys
+    from pathlib import Path
+
+    from mordred_hermes._core._home import hermes_home
+    from mordred_hermes.extension import native_host
+
+    home = Path(hermes_home())
+    try:
+        ids = native_host.allow_extension_ids(home, [native_host.STORE_EXTENSION_ID, *args.extension_id])
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    launcher = shutil.which("hermes-mordred")
+    if launcher is None:
+        print("error: the hermes-mordred command is not on PATH", file=sys.stderr)
+        return 1
+    written = native_host.install(home, Path(launcher))
+    print(f"Accepted extension IDs: {', '.join(sorted(ids))}")
+    for path in written:
+        print(f"Registered with {path.parent.parent.name}: {path}")
+    if not written:
+        print("No supported browser (Brave, Chrome) is installed yet; run this again after installing one.")
+    return 0
+
+
+def _handle_extension_native_host(args: argparse.Namespace) -> int:
+    from mordred_hermes.extension import native_host
+
+    return native_host.main(list(args.browser_args))
 
 
 def _handle_extension_serve(args: argparse.Namespace) -> int:

@@ -25,12 +25,12 @@ def erase_reset_history(home: Path, *, lease: ExclusiveLease, _reset: ResetAutho
         return
     path = checked_store_destination(path, home=home)
     with maintenance_scope(home, lease=lease) as scope, scope.connection(path) as conn:
-        tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        tables = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         if "import_meta" not in tables:
             if any(name.startswith("import_") for name in tables):
                 raise DatabaseRefused("incomplete import schema; reset history retained")
             return
-        meta = {str(k): str(v) for k, v in conn.execute("SELECT key, value FROM import_meta")}
+        meta = {str(k): str(v) for k, v in conn.execute("SELECT key, value FROM import_meta").fetchall()}
         if meta.get("profile_home") != str(home) or meta.get("schema_version", "") not in {"1", "2"}:
             raise DatabaseRefused("foreign or unsupported import store; reset history retained")
         conn.execute("PRAGMA secure_delete=ON")

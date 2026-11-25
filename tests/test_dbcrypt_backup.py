@@ -1384,3 +1384,113 @@ def test_cleanup_removes_the_staging_sidecars(native_root):
     _backup_failing_during_copy(native_root, plant)
     assert sidecars and not any(path.exists() for path in sidecars)
     assert not (native_root[0] / "mordred/db-backups.journal.json").exists()
+
+
+def _registered_backup(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, _, key, _ = native_root
+    source = root / "state.db"
+    cipher(source, key)
+    backup = root.parent / (root.name + "-restore.backup")
+    authority = Authority.acquire(root)
+    try:
+        _backup.backup_database(source, backup, authority=authority)
+    finally:
+        authority.close()
+    monkeypatch.setattr(_migrate, "holders", lambda paths: [])
+    return root, source, backup
+
+
+def _restore_staging(source):
+    from mordred_hermes.dbcrypt import _migrate
+
+    return source.with_name(source.name + _migrate.PREPARED_SUFFIX)
+
+
+def test_restore_fsync_failure_discards_staging_and_next_restore_succeeds(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, source, backup = _registered_backup(native_root, monkeypatch)
+    before = source.read_bytes()
+    with acquire_exclusive(root) as lease:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_migrate, "_fsync_file", _enospc)
+            with pytest.raises(OSError, match="no space"):
+                _backup.restore_database(backup, source, lease=lease)
+        assert not _restore_staging(source).exists()
+        assert not _migrate.journal_path(root).exists()
+        assert source.read_bytes() == before
+        _migrate._inventory(root)  # no orphan left for later conversions to refuse
+        _backup.restore_database(backup, source, lease=lease)
+    assert not _restore_staging(source).exists()
+    assert not _migrate.journal_path(root).exists()
+
+
+def test_restore_verification_failure_discards_staging(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, source, backup = _registered_backup(native_root, monkeypatch)
+    staged = _restore_staging(source)
+    real_schema = _migrate._schema
+
+    def changed(path, key, **kwargs):
+        return {"changed": True} if path == staged else real_schema(path, key, **kwargs)
+
+    with acquire_exclusive(root) as lease:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_migrate, "_schema", changed)
+            with pytest.raises(DatabaseRefused, match="backup changed during restore"):
+                _backup.restore_database(backup, source, lease=lease)
+        assert not staged.exists()
+        assert not list(source.parent.glob(staged.name + "-*"))
+        _migrate._inventory(root)
+        _backup.restore_database(backup, source, lease=lease)
+
+
+def test_restore_failure_never_deletes_a_replaced_staging_file(native_root, monkeypatch, caplog):
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, source, backup = _registered_backup(native_root, monkeypatch)
+    staged = _restore_staging(source)
+
+    def swap_then_fail(path):
+        # Another inode now holds the staging name; it is not ours to erase.
+        replacement = path.with_name(path.name + ".other")
+        replacement.write_bytes(b"not ours")
+        replacement.chmod(0o600)
+        os.replace(replacement, path)
+        raise OSError(errno.ENOSPC, "no space")
+
+    with acquire_exclusive(root) as lease:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_migrate, "_fsync_file", swap_then_fail)
+            with pytest.raises(OSError, match="no space"):
+                _backup.restore_database(backup, source, lease=lease)
+        assert staged.read_bytes() == b"not ours"
+        assert "staging cleanup stopped" in caplog.text
+        with pytest.raises(_migrate.MigrationError, match="orphan prepared database"):
+            _migrate._inventory(root)
+
+
+def test_restore_journal_binding_failure_discards_staging(native_root, monkeypatch):
+    from mordred_hermes.dbcrypt import _backup, _migrate
+
+    root, source, backup = _registered_backup(native_root, monkeypatch)
+    staged = _restore_staging(source)
+
+    def unbindable(_root):
+        # e.g. a group-writable or hard-linked database elsewhere under the root
+        raise DatabaseRefused("database must be a checked regular owned file")
+
+    with acquire_exclusive(root) as lease:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(_migrate, "_inventory_binding", unbindable)
+            with pytest.raises(DatabaseRefused, match="checked regular owned file"):
+                _backup.restore_database(backup, source, lease=lease)
+        assert not staged.exists()
+        assert not list(source.parent.glob(staged.name + "-*"))
+        assert not _migrate.journal_path(root).exists()
+        _migrate._inventory(root)
+        _backup.restore_database(backup, source, lease=lease)
+    assert not staged.exists()

@@ -278,7 +278,7 @@ def _read_passphrase(prompt_io: PromptIO, session: FlowSession | None = None) ->
     vault's recovery passphrase) does not prompt again.
     """
     if session is not None and session.passphrase:
-        print("Using the passphrase you already chose in this setup run.", file=sys.stderr)
+        print("Using this setup run's passphrase.", file=sys.stderr)
         return session.passphrase
     passphrase = prompt_io.ask_password("Choose a Passphrase")
     if passphrase != prompt_io.ask_password("Re-enter the Passphrase"):
@@ -848,6 +848,8 @@ def init_keyvault(
     store_seed_for_hd: bool = True,
     unattended: bool | None = None,
     flow_session: FlowSession | None = None,
+    backup_file: Path | None = None,
+    embed_passphrase: bool = False,
 ) -> int:
     """Initialise the keyvault: generate the key, display the Seed, finalize.
 
@@ -892,7 +894,26 @@ def init_keyvault(
     Passphrase chosen here is remembered in memory so the vault created later in
     the same run reuses it instead of prompting again (see
     :mod:`._flow_session`). Standalone ``keyvault init`` passes ``None``.
+
+    ``backup_file`` replaces the paper ceremony: the seed is never shown and
+    the keyvault's backup, seed included, is saved there instead
+    (:mod:`._keyvault_init_backup`); ``store_seed_for_hd`` is then implied.
+    ``embed_passphrase`` (``setup --no-prompts``) takes the flow's generated
+    passphrase instead of asking, and saves it inside that file.
     """
+    if backup_file is not None:
+        from ._keyvault_init_backup import init_keyvault_with_backup_file
+
+        return init_keyvault_with_backup_file(
+            backup_file=backup_file,
+            home=home,
+            backend=backend,
+            prompt_io=prompt_io,
+            audit_sink=audit_sink,
+            unattended=unattended,
+            flow_session=flow_session,
+            embed_passphrase=embed_passphrase,
+        )
     refusal = _preflight_or_refuse(home=home, blackout_assert=blackout_assert, surface=surface)
     if refusal is not None:
         return refusal

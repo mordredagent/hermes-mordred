@@ -1567,6 +1567,9 @@ dependencies = [
     { name = "packaging" },
     { name = "psutil" },
     { name = "ruamel-yaml" },
+    { name = "snowballstemmer" },
+    { name = "sudachidict-core" },
+    { name = "sudachipy" },
 ]
 
 [package.optional-dependencies]
@@ -1624,9 +1627,6 @@ macos = [
     { name = "pyobjc-framework-systemconfiguration" },
     { name = "sqlcipher3-wheels" },
 ]
-messaging = [
-    { name = "qrcode" },
-]
 telegram = [
     { name = "aiohttp" },
     { name = "aiohttp-socks" },
@@ -1682,23 +1682,25 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.8,<4" },
     { name = "python-socks", extras = ["asyncio"], marker = "extra == 'telegram'", specifier = ">=2.4" },
-    { name = "qrcode", marker = "extra == 'messaging'", specifier = ">=7.4" },
     { name = "requests", extras = ["socks"], marker = "extra == 'extension'", specifier = ">=2.32" },
     { name = "requests", extras = ["socks"], marker = "extra == 'integration'", specifier = ">=2.32" },
     { name = "requests", extras = ["socks"], marker = "extra == 'telegram'", specifier = ">=2.32" },
     { name = "rlp", marker = "extra == 'ethereum'", specifier = ">=4" },
     { name = "ruamel-yaml", specifier = ">=0.18" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.13" },
+    { name = "snowballstemmer", specifier = ">=2.2" },
     { name = "sqlcipher3-wheels", marker = "sys_platform == 'win32' and extra == 'dbcrypt'", specifier = "==0.5.7" },
     { name = "sqlcipher3-wheels", marker = "sys_platform == 'win32' and extra == 'macos'", specifier = "==0.5.7" },
     { name = "sqlcipher3-wheels", marker = "extra == 'dbcrypt'", specifier = ">=0.5.4" },
     { name = "sqlcipher3-wheels", marker = "extra == 'macos'", specifier = ">=0.5.4" },
     { name = "stem", marker = "extra == 'tor-control'", specifier = ">=1.8.0,<2" },
+    { name = "sudachidict-core", specifier = ">=20240409" },
+    { name = "sudachipy", specifier = ">=0.6.8" },
     { name = "telethon", marker = "extra == 'telegram'", specifier = ">=1.40,<2" },
     { name = "urllib3", marker = "extra == 'extension'", specifier = ">=2" },
     { name = "urllib3", marker = "extra == 'telegram'", specifier = ">=2" },
 ]
-provides-extras = ["dbcrypt", "dev", "ethereum", "extension", "integration", "keyvault", "macos", "messaging", "telegram", "tor-control"]
+provides-extras = ["dbcrypt", "dev", "ethereum", "extension", "integration", "keyvault", "macos", "telegram", "tor-control"]
 
 [[package]]
 name = "hexbytes"
@@ -3081,18 +3083,6 @@ wheels = [
 ]
 
 [[package]]
-name = "qrcode"
-version = "8.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/8f/b2/7fc2931bfae0af02d5f53b174e9cf701adbb35f39d69c2af63d4a39f81a9/qrcode-8.2.tar.gz", hash = "sha256:35c3f2a4172b33136ab9f6b3ef1c00260dd2f66f858f24d88418a015f446506c", size = 43317, upload-time = "2025-05-01T15:44:24.726Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/dd/b8/d2d6d731733f51684bbf76bf34dab3b70a9148e8f2cef2bb544fccec681a/qrcode-8.2-py3-none-any.whl", hash = "sha256:16e64e0716c14960108e85d853062c9e8bba5ca8252c0b4d0231b9df4060ff4f", size = 45986, upload-time = "2025-05-01T15:44:22.781Z" },
-]
-
-[[package]]
 name = "regex"
 version = "2026.6.28"
 source = { registry = "https://pypi.org/simple" }
@@ -3369,6 +3359,15 @@ wheels = [
 ]
 
 [[package]]
+name = "snowballstemmer"
+version = "3.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/43/f8/0a71edf031f03c40db17503cb8ca78a69a171254e568e7db241b0ab57ea1/snowballstemmer-3.1.1.tar.gz", hash = "sha256:e07bbc54a0d798fe6010a12398422e62a8bfbba95c394fd0956ef58cb4d3e260", size = 123314, upload-time = "2026-06-03T00:56:40.194Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4c/07/2ebca9b11fb9be7340a818d8d6f63feaebb146be2c4afbd6061701d6df6e/snowballstemmer-3.1.1-py3-none-any.whl", hash = "sha256:7e207fa178741da09cdee59d3ecec3827ad5f92b1fc5c9ff3755b639f71f5752", size = 104164, upload-time = "2026-06-03T00:56:38.614Z" },
+]
+
+[[package]]
 name = "socksio"
 version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3483,6 +3482,37 @@ name = "stem"
 version = "1.8.2"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/c6/b2258155546f966744e78b9862f62bd2b8671b422bb9951a1330e4c8fd73/stem-1.8.2.tar.gz", hash = "sha256:83fb19ffd4c9f82207c006051480389f80af221a7e4783000aedec4e384eb582", size = 2859640, upload-time = "2023-06-06T06:37:21.251Z" }
+
+[[package]]
+name = "sudachidict-core"
+version = "20261015"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "sudachipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/70/04/4e8698fcb26999fc9381911aea95a4c861e219c098476b784f54a0cd5c36/sudachidict_core-20261015.tar.gz", hash = "sha256:32d2bfc1491b82659959d28f79eb7c034d3a57d77f7610c3d2ea834151d15d23", size = 9157, upload-time = "2026-10-15T08:32:33.402Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3d/6a/9dddc36e33ff7f86e394315a77b90d0f41bfd161e011d77a8397662d53e0/sudachidict_core-20261015-py3-none-any.whl", hash = "sha256:6d7774b518e64c88a0578975d569590b3dae3b3c834f166486aa611879ee9d98", size = 76937301, upload-time = "2026-10-15T08:37:35.957Z" },
+]
+
+[[package]]
+name = "sudachipy"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fc/1d/b34702f38a8bd34972836538d222209095d5aba7faff79d56bce3fb2640c/sudachipy-0.7.0.tar.gz", hash = "sha256:14a2505e7d086fe9da64c0048d8e2de13cdded3aac4f1e047929cef51dba338c", size = 304664, upload-time = "2026-09-24T01:34:56.238Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/aa/47edbec02618803ac8ef8f1561b233760bbd266fb040ba9d4d577a5f1773/sudachipy-0.7.0-cp310-abi3-macosx_10_12_universal2.whl", hash = "sha256:6be34e856c99498e990904f7155e1a102f675cf5edfdaf7a396f26d71ce4b333", size = 3147103, upload-time = "2026-09-24T01:34:43.053Z" },
+    { url = "https://files.pythonhosted.org/packages/d7/b3/2117420a05b2785ce561912baff01dd7872f5bca6b60dce49dc592a9f600/sudachipy-0.7.0-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:907eadc1db305f9bc6e502a9acf9ff1ac871cd8d4ac3a2e0aaba3ddc60e93b2a", size = 1622350, upload-time = "2026-09-24T01:34:44.636Z" },
+    { url = "https://files.pythonhosted.org/packages/88/11/3b740eea1796d1ce6f7bdaa1f5470685dbcbfcacf751f3aa06d9da72856f/sudachipy-0.7.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:0e60cefd3a7a9680206ae160bf86d266d0d60e434adac2384f8c7a6dfb0f3ba7", size = 1561984, upload-time = "2026-09-24T01:34:45.761Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/12/5455c3e4afea272c1ef0995c489dc9c2a6ead2a6d980822a53ae879a2042/sudachipy-0.7.0-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:68be139f5d7f053eba16fd3f792e4ef0c6bfed81a1b63e68b4544c7159296034", size = 1720464, upload-time = "2026-09-24T01:34:46.92Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/2d/b2c2511b3627032e81ef1626d6bce4506efacc7b698ca0e70cf6b4345e86/sudachipy-0.7.0-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:dfc90631aa2276d2165e1995bc94b56c9f5bc27b875f43fb7d67e4a3b7346d4f", size = 1758941, upload-time = "2026-09-24T01:34:47.986Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/a1/03e40b0eadbdd48ed47aef7aaf27d4703f5cc225750872af1a26de08ec2b/sudachipy-0.7.0-cp310-abi3-win_amd64.whl", hash = "sha256:8d0429db2d02d408daa7dccd062a6d8c2984a07f8e448b49a3ea694377617658", size = 1515929, upload-time = "2026-09-24T01:34:49.307Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/f7/580ece6a559e0cad8a9a3fff36bbd478e335e125c96c1910abe20f3b6bc2/sudachipy-0.7.0-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:1bf2254ee6357e0defa498630f188fefa8a543b82887077cfb1596bc3e8d4840", size = 3139240, upload-time = "2026-09-24T01:34:50.418Z" },
+    { url = "https://files.pythonhosted.org/packages/62/20/4475da1e0393bef7d136f91214d560730006d2a4792e585003b17f2779e1/sudachipy-0.7.0-cp314-cp314t-macosx_10_15_x86_64.whl", hash = "sha256:efd56375584dec9523fe9a26daa69da02a70ae2f2c22d25248e65a4998cae8e1", size = 1626313, upload-time = "2026-09-24T01:34:51.665Z" },
+    { url = "https://files.pythonhosted.org/packages/8b/75/952595fe7fa84a8f90cbe8f94a7cb5210642f166ec0ec1d7d808abef978e/sudachipy-0.7.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:9446eba17985b1d14926afc6312fb0367687ab1b5397fa65d7e2cdd1745451c9", size = 1549814, upload-time = "2026-09-24T01:34:52.708Z" },
+    { url = "https://files.pythonhosted.org/packages/cf/39/5e138a2f949bf3af45951980382adc69d0d975448e604dc1801325f0008a/sudachipy-0.7.0-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:f1e24f71a71816dcbc6fb759a5819cca5d603a4d49b7ade63dd0fe49468ed22c", size = 1712756, upload-time = "2026-09-24T01:34:53.813Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/f4/2df0f7a5dce327d82c451be96151afa8f7e3324a3a8d71845eec5be26f3e/sudachipy-0.7.0-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:c8306eab503d891e394fb21156e417c2f9f54cc39f56dddb8cf2b40620d470fa", size = 1750689, upload-time = "2026-09-24T01:34:55.08Z" },
+]
 
 [[package]]
 name = "telethon"

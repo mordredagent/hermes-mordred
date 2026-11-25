@@ -1,22 +1,38 @@
 [
   {"type": "ping"},
-  {"type": "auth_challenge", "nonce": "bm9uY2U", "webauthn_required": false},
+  {
+    "type": "auth_challenge",
+    "nonce": "bm9uY2U",
+    "webauthn_required": false,
+    "auth_versions": [2]
+  },
   {
     "type": "auth_ok",
     "hermes_version": "0.1.0a12",
     "se_available": true,
-    "capabilities": ["discord_channel_resolve_v1", "telegram_import_v1"]
+    "capabilities": ["telegram_import_v1"]
   },
   {"type": "auth_fail", "reason": "invalid_token"},
+  {
+    "type": "auth2_ok",
+    "body": "{\"device_id\":\"ZGV2aWNl\",\"eph_s\":\"ZXBo\",\"hello_sha256\":\"aGVsbG8\",\"hermes_spki\":\"aGVybWVz\",\"kind\":\"ok\",\"v_spki\":\"dmF1bHQ\"}",
+    "sig": "c2lnbmF0dXJl",
+    "endorsements": [
+      {"body": "{\"action\":\"hermes-id\"}", "sig": "c2ln"},
+      {"body": "{\"action\":\"device-add\"}", "sig": "c2ln"}
+    ],
+    "hermes_version": "0.1.0a12",
+    "se_available": true,
+    "capabilities": ["recall_v1"]
+  },
+  {
+    "type": "auth2_unendorsed",
+    "body": "{\"hello_sha256\":\"aGVsbG8\",\"hermes_spki\":\"aGVybWVz\",\"kind\":\"unendorsed\",\"sas\":\"ABC-DEF\",\"v_spki\":\"dmF1bHQ\"}",
+    "sig": "c2lnbmF0dXJl",
+    "endorsements": []
+  },
   {"type": "error", "reason": "bad_json"},
   {"id": "rpc-error", "type": "error", "reason": "internal_error"},
-  {"id": "webauthn-ok", "type": "webauthn_registered", "ok": true},
-  {
-    "id": "webauthn-fail",
-    "type": "webauthn_registered",
-    "ok": false,
-    "error": "invalid_public_key"
-  },
   {
     "id": "history-complete",
     "type": "history_result",
@@ -30,18 +46,6 @@
     "truncated": true
   },
   {"id": "history-clear", "type": "history_cleared", "ok": true},
-  {
-    "id": "pair-ok",
-    "type": "pair_complete",
-    "hermes_pubkey": "aGVybWVzLXB1YmxpYy1rZXk",
-    "attestation": {
-      "signed_challenge": "c2lnbmVkLWNoYWxsZW5nZQ",
-      "se_pubkey": "c2UtcHVibGljLWtleQ",
-      "se_available": true
-    },
-    "ext_token": "ZXh0ZW5zaW9uLXRva2Vu"
-  },
-  {"id": "pair-fail", "type": "pair_fail", "reason": "expired"},
   {"id": "chat-1", "type": "chat_chunk", "content": "partial"},
   {"id": "chat-1", "type": "chat_end"},
   {"id": "chat-2", "type": "chat_error", "reason": "agent_unavailable"},
@@ -60,17 +64,6 @@
     "type": "slack_setup_result",
     "ok": false,
     "error": "bad_token_format"
-  },
-  {
-    "id": "discord-context",
-    "type": "discord_channel_resolve_result",
-    "ok": true,
-    "guild_id": "123",
-    "channel_id": "999",
-    "channel_type": 11,
-    "channel_name": "release thread",
-    "parent_channel_id": "456",
-    "parent_channel_name": "secure-ops"
   },
   {
     "id": "sign-prompt",
@@ -153,5 +146,43 @@
     "type": "accounts_result",
     "accounts": ["0x0000000000000000000000000000000000000001"],
     "chainId": "0x1"
-  }
+  },
+  {"id": "recall-query", "type": "recall_result", "ok": true, "content": "\ud83d\udd12ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "recall-query-fail", "type": "recall_result", "ok": false, "error": "import_store_unavailable"},
+  {"id": "recall-events", "type": "recall_events_result", "ok": true, "content": "🔒ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "recall-events-fail", "type": "recall_events_result", "ok": false, "error": "invalid_request"},
+  {"id": "recall-open", "type": "recall_opened", "ok": true, "content": "\ud83d\udd12ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "recall-open-fail", "type": "recall_opened", "ok": false, "error": "invalid_request"},
+  {"id": "recall-dismiss", "type": "recall_dismissed", "ok": true},
+  {"id": "recall-dismiss-fail", "type": "recall_dismissed", "ok": false, "error": "recall_unavailable"},
+  {"id": "recall-restore", "type": "recall_restored", "ok": true},
+  {"id": "recall-restore-fail", "type": "recall_restored", "ok": false, "error": "invalid_request"},
+  {"id": "recall-hidden", "type": "recall_hidden_result", "ok": true, "content": "\ud83d\udd12ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "recall-hidden-fail", "type": "recall_hidden_result", "ok": false, "error": "recall_unavailable"},
+  {"id": "recall-recommend", "type": "recall_recommend_item", "content": "\ud83d\udd12ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "recall-recommend", "type": "recall_recommend_end", "ok": true},
+  {"id": "recall-recommend-fail", "type": "recall_recommend_end", "ok": false, "error": "recall_agent_unavailable"},
+  {"id": "recall-translate", "type": "recall_translate_piece", "content": "\ud83d\udd12ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "recall-translate", "type": "recall_translate_end", "ok": true},
+  {"id": "recall-translate-fail", "type": "recall_translate_end", "ok": false, "error": "recall_agent_unavailable"},
+  {"id": "imports-status", "type": "imports_status_result", "ok": true, "content": "\ud83d\udd12ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "imports-status-fail", "type": "imports_status_result", "ok": false, "error": "imports_unavailable"},
+  {"id": "imports-call", "type": "imports_call_result", "ok": true, "content": "\ud83d\udd12ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "imports-call-fail", "type": "imports_call_result", "ok": false, "error": "mail_already_configured"},
+  {"id": "chat-model", "type": "chat_model_result", "ok": true, "content": "\ud83d\udd12ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"},
+  {"id": "chat-model-fail", "type": "chat_model_result", "ok": false, "error": "venice_model_not_private"},
+  {
+    "id": "h1",
+    "type": "health_result",
+    "items": [
+      {"id": "search", "state": "ok", "code": null},
+      {"id": "headlines", "state": "down", "code": "model_unreachable"},
+      {"id": "recommend", "state": "off", "code": "model_not_configured"},
+      {"id": "chat", "state": "ok", "code": "not_checked"},
+      {"id": "mail", "state": "off", "code": "not_set_up"},
+      {"id": "telegram", "state": "off", "code": "not_logged_in"},
+      {"id": "signing", "state": "ok", "code": null}
+    ]
+  },
+  {"id": "rc1", "type": "recall_conversation_result", "ok": true, "content": "🔒ENC:v2:a2lk:bm9uY2U:Y2lwaGVy"}
 ]

@@ -46,7 +46,7 @@ from ..records import (
     part_uid,
     validate_message,
 )
-from ._text import cap_utf8, clean_line, link_key
+from ._text import MAX_PART_BYTES, cap_utf8, clean_line, link_key
 from .body import BodyResult, ForwardedMail, extract_body
 from .headers import Address, MailHeaders, parse_headers
 from .link import Linker, QuoteClaim, text_digest
@@ -379,6 +379,30 @@ class _PartBuilder:
         n = self.counters[segment.kind]
         self.parts.append(_part(self.source_uid, segment.kind, n, len(self.parts), author, text))
 
+    def add_attachment(self, fmt: str, text: str) -> None:
+        """A document attachment's text as forwarded parts by the sender, in 64 KiB pieces, within MAX_PARTS."""
+        rest = text
+        first = True
+        while rest and len(self.parts) + (self.authored_slot is None) < MAX_PARTS:
+            piece, _cut = cap_utf8(rest, MAX_PART_BYTES - 64)  # room for the label line
+            rest = rest[len(piece) :]
+            label = f"[attachment: {fmt}]" if first else f"[attachment: {fmt}, continued]"
+            first = False
+            self.counters[PartKind.FORWARDED] += 1
+            n = self.counters[PartKind.FORWARDED]
+            # The sender attached it: the part is theirs, not a claim to link to a quote.
+            self.parts.append(
+                _part(
+                    self.source_uid,
+                    PartKind.FORWARDED,
+                    n,
+                    len(self.parts),
+                    self.sender,
+                    self.capped(f"{label}\n{piece}"),
+                )
+            )
+        self.truncated |= bool(rest)
+
     def build(self) -> tuple[ImportPart, ...]:
         if self.authored_slot is None and not self.parts:
             self.authored_slot = 0
@@ -418,6 +442,8 @@ def _build(raw: RawMessage, ctx: NormalizeContext) -> NormalizedMessage | Skippe
     builder = _PartBuilder(source_uid, headers, ctx, sender)
     for segment in _segments(headers, body, ctx.stats):
         builder.add(segment)
+    for fmt, text in body.attachment_texts:
+        builder.add_attachment(fmt, text)
     parts = builder.build()
     thread = thread_input(headers, source_uid, raw.origin_index)
     reply_to = _reply_uid(headers, ctx.account)

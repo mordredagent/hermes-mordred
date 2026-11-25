@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .._core._home import hermes_home as _hermes_home
 from . import _memory_key_holder as holder
@@ -54,6 +54,7 @@ def inject_vault_env(
     backend: NativeBackend | None = None,
     store: AnchorStore | None = None,
     name: str = ".env",
+    on_open: Callable[[Any, str], None] | None = None,
 ) -> int:
     """Decrypt the vault-enrolled ``name`` (``.env``) at ``root`` into ``environ``.
 
@@ -103,6 +104,9 @@ def inject_vault_env(
         return 0
 
     with opened:
+        if on_open is not None:
+            # Lets another reader share this unlock instead of opening again.
+            on_open(opened, key_id)
         if name not in opened.list_files():
             return 0
         plaintext = opened.read_file(name)
@@ -133,7 +137,11 @@ def inject_vault_env(
 _INJECTED_INTO_OS_ENVIRON = False
 
 
-def install_vault_env_decrypt(*, environ: MutableMapping[str, str] | None = None) -> int:
+def install_vault_env_decrypt(
+    *,
+    environ: MutableMapping[str, str] | None = None,
+    on_open: Callable[[Any, str], None] | None = None,
+) -> int:
     """Install the runtime env decrypt at startup (called from the plugin ``register()``).
 
     **macOS-only**: the unattended hot path needs a device key store (Secure
@@ -168,7 +176,7 @@ def install_vault_env_decrypt(*, environ: MutableMapping[str, str] | None = None
         environ = os.environ
     if _env_optout_marker_path(_hermes_home()).exists():
         return 0
-    injected = inject_vault_env(root=default_vault_root(), environ=environ)
+    injected = inject_vault_env(root=default_vault_root(), environ=environ, on_open=on_open)
     if environ is os.environ and holder.MEMORY_KEY_ENV in os.environ:
         from . import vault
 

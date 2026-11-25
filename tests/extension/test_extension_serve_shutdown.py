@@ -1,7 +1,7 @@
 """``extension serve`` shutdown, port release and restart (C11).
 
 Runs the real launcher in a child process on port 7799 (never the production
-7788). Windows sends ``CTRL_BREAK_EVENT`` to a new process group (the proactor
+47711). Windows sends ``CTRL_BREAK_EVENT`` to a new process group (the proactor
 loop has no ``add_signal_handler``, so the launcher routes ``SIGBREAK`` through
 ``signal.signal`` + ``loop.call_soon_threadsafe``); POSIX sends ``SIGTERM``.
 Each run must exit 0 within 10 s, leave no child process, free the port, and a

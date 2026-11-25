@@ -3,6 +3,13 @@
 Only trusted host adapters enter ``presence_scope``. An ECDH is eligible only
 inside both that host scope and a matching concrete credential read. Wallets,
 management calls and CLI code never enter the latter scope.
+
+Separately, a Mordred operation that opens several of its own keys in a row
+(``setup`` creating them, ``extension serve`` opening the vault and the
+databases) can hold an :func:`operation_window`: one OS prompt then covers up
+to :data:`WINDOW_KEYS` of this home's keys for at most the purpose's seconds,
+and the window closes (killing the helper child) when the operation ends.
+Telegram and mail credential keys are never admitted to a window.
 """
 
 from __future__ import annotations
@@ -19,15 +26,41 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from weakref import WeakSet
 
 from ._presence_transport import Channel, PresenceChannel
 from ._seckey_errors import _OpsError
 
+#: Seconds a window may reuse one prompt, by purpose (the helper caps sessions at 300).
+OPERATION_SECONDS: dict[str, int] = {"setup": 300, "startup": 60}
+#: Distinct keys one window may open: keyvault, vault, databases, audit log, with room.
+WINDOW_KEYS = 8
+_WINDOW_PRINCIPAL = "mordred-operation"
+
 
 def _reuse_seconds(value: object) -> int:
     return value if type(value) is int and 0 <= value <= 300 else 0
+
+
+#: Left by ``setup`` when it enrolled attended keys: this home's operations may
+#: then hold a window. Unattended keys never prompt, so a window would add one.
+OPERATION_PRESENCE_MARKER = "operation-presence"
+
+
+def operation_presence_configured(home: Path) -> bool:
+    """Whether setup enrolled attended keys and so opted this home into operation windows."""
+    try:
+        return stat.S_ISREG((home / "mordred" / OPERATION_PRESENCE_MARKER).lstat().st_mode)
+    except OSError:
+        return False
+
+
+def enable_operation_presence(home: Path) -> None:
+    """Record that this home's keys are attended (an empty private file)."""
+    marker = home / "mordred" / OPERATION_PRESENCE_MARKER
+    fd = os.open(marker, os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    os.close(fd)
 
 
 def configured_seconds(home: Path) -> int:
@@ -91,6 +124,122 @@ def credential_scope(home: Path, purpose: str, observation: object) -> Iterator[
         _credential.reset(token)
 
 
+@dataclass(frozen=True)
+class OperationWindow:
+    scope: _Scope
+    seconds: int
+    binding: str
+    pid: int
+
+
+_window: OperationWindow | None = None
+_window_lock = threading.Lock()
+
+
+def open_window(home: Path, purpose: str) -> Callable[[], None]:
+    """Open this process's operation window; returns the idempotent closer.
+
+    Only Mordred's own operations call this, and only when the home's keys are
+    attended (unattended keys never prompt, so a window would add a prompt).
+    """
+    global _window
+    seconds = OPERATION_SECONDS[purpose]
+    scope = _Scope(home.resolve(), (_WINDOW_PRINCIPAL, purpose), purpose, lambda: True)
+    window = OperationWindow(scope, seconds, f"operation:{purpose}", os.getpid())
+    with _window_lock:
+        if _window is not None and _window.pid == os.getpid() and _window.scope.active():
+            raise _refused("an operation window is already open")
+        _window = window
+
+    def close() -> None:
+        global _window
+        with _window_lock:
+            if _window is window:
+                _window = None
+        scope.cancelled.set()
+        _pool.revoke(home=scope.home, principal=scope.principal, purpose=purpose)
+
+    return close
+
+
+@contextlib.contextmanager
+def operation_window(home: Path, purpose: str) -> Iterator[None]:
+    close = open_window(home, purpose)
+    try:
+        yield
+    finally:
+        close()
+
+
+def confirm_window() -> None:
+    """Ask for this process's window's Touch ID now, before the operation uses any key.
+
+    An operation that confirms first stops before it has changed anything when
+    the prompt is missed or cancelled (raises ``_OpsError``), so it can simply
+    run again. A no-op without a window, off macOS, or with a helper that
+    cannot confirm ahead (its first key use asks instead).
+    """
+    window = _window
+    if sys.platform != "darwin" or window is None or window.pid != os.getpid() or not window.scope.active():
+        return
+    from . import _seckey_helper
+
+    binary = _seckey_helper.find_sekey_helper()
+    if binary is None:
+        return
+    try:
+        capabilities = _seckey_helper._run_helper(binary, {"cmd": "capabilities"})
+    except _OpsError:
+        return
+    if capabilities.get("presence_confirm") != 1 or capabilities.get("presence_stores") != 1:
+        return
+    _ensure_monitor()
+    response = _pool.exchange(
+        window.scope,
+        binary,
+        None,
+        b"",
+        b"",
+        window.seconds,
+        window.binding,
+        max_keys=WINDOW_KEYS,
+        confirm=True,
+        reason=touch_id_reason(window.scope.purpose) if capabilities.get("presence_reason") == 1 else None,
+    )
+    if response.get("ok") is not True:
+        raise _refused("presence was not confirmed")
+
+
+#: What the Touch ID window says for each purpose (English; :mod:`..i18n` translates).
+_REASONS: Final = {
+    "credentials": "Read Mordred's Telegram or mail sign-in",
+    "setup": "Set up Mordred's keys and encryption",
+    "startup": "Open Mordred's vault and databases",
+}
+
+
+def touch_id_reason(purpose: str) -> str:
+    """The Touch ID window's text for ``purpose``, in the Mac's language."""
+    from .. import i18n
+
+    return i18n.text(f"touchId.{purpose}", _REASONS.get(purpose, _REASONS["credentials"]))
+
+
+def window_for(tag: bytes) -> OperationWindow | None:
+    """The open window admitting ``tag``; never one for a Telegram or mail credential key."""
+    window = _window
+    if sys.platform != "darwin" or window is None or window.pid != os.getpid() or not window.scope.active():
+        return None
+    from ._mail_key import KEY_ID as mail_key
+    from ._seckey_errors import _application_tag
+    from ._telegram_custody import KEY_ID as telegram_key
+
+    if tag in (_application_tag(telegram_key), _application_tag(mail_key)):
+        return None
+    _ensure_monitor()
+    return window
+
+
 def eligible(tag: bytes) -> tuple[_Scope, int, str] | None:
     scope, credential = _scope.get(), _credential.get()
     if sys.platform != "darwin" or scope is None or credential is None:
@@ -127,10 +276,16 @@ def _version(paths: tuple[Path, ...]) -> tuple[object, ...]:
     return tuple(result)
 
 
-def _watch_paths(scope: _Scope, binary: str, env: tuple[str, str] | None, tag: bytes) -> tuple[Path, ...]:
+def _watch_paths(scope: _Scope, binary: str, env: tuple[str, str] | None, tag: bytes | None) -> tuple[Path, ...]:
+    if tag is None:
+        # A window spans an operation that writes config and creates keys and
+        # stores, and its one helper serves every store the operation uses. The
+        # helper binds each key to its store and file; here only the home and
+        # the helper must stay the same.
+        return (scope.home, Path(binary))
+    store = Path(env[1]) if env is not None else scope.home / "mordred/keyvault/sekey"
     root = scope.home / "mordred" / scope.purpose
     names = ("credentials.sealed", "credentials.meta.json", "enclave-key.json", "generation", "mail-forget.json")
-    store = Path(env[1]) if env is not None else scope.home / "mordred/keyvault/sekey"
     return (
         scope.home,
         root,
@@ -219,10 +374,17 @@ class _PresencePool:
                     self._discard(key, entry, _refused("presence expired or revoked"))
 
     def revoke(
-        self, *, home: Path | None = None, principal: tuple[str, ...] | None = None, purpose: str | None = None
+        self,
+        *,
+        home: Path | None = None,
+        principal: tuple[str, ...] | None = None,
+        purpose: str | None = None,
+        windows: bool = True,
     ) -> None:
         with self._lock:
             for key, entry in list(self._entries.items()):
+                if not windows and entry.scope.principal[0] == _WINDOW_PRINCIPAL:
+                    continue
                 if (
                     (home is None or entry.scope.home == home)
                     and (principal is None or entry.scope.principal == principal)
@@ -242,6 +404,8 @@ class _PresencePool:
         tag: bytes,
         seconds: int,
         binding: str,
+        max_keys: int = 1,
+        reason: str | None = None,
     ) -> _Entry:
         with self._lock:
             self.bind_scope(scope)
@@ -257,9 +421,15 @@ class _PresencePool:
             if entry is None:
                 if len(self._entries) >= 8:
                     raise _refused("presence capacity or authority refused")
-                paths = _watch_paths(scope, binary, env, tag)
+                paths = _watch_paths(scope, binary, env, None if max_keys > 1 else tag)
                 version = _version(paths)
-                entry = _Entry(scope, binding, self._factory(binary, env, seconds), seconds, paths, version)
+                options: dict[str, object] = {}
+                if max_keys != 1:
+                    options.update(max_keys=max_keys, purpose=scope.purpose)
+                if reason is not None:
+                    options["reason"] = reason
+                channel = self._factory(binary, env, seconds, **options)
+                entry = _Entry(scope, binding, channel, seconds, paths, version)
                 self._entries[key] = entry
             if entry.pending >= 17:  # one active + sixteen waiting requests
                 raise _refused("presence queue full")
@@ -290,10 +460,24 @@ class _PresencePool:
         peer: bytes,
         seconds: int,
         binding: str,
+        *,
+        max_keys: int = 1,
+        store: str | None = None,
+        confirm: bool = False,
+        reason: str | None = None,
     ) -> dict[str, Any]:
+        """One ECDH through the session; with ``confirm`` (a window only), just its Touch ID."""
         started = self._clock()
-        key = (os.getpid(), scope.home, scope.principal, scope.purpose, binary, env, tag)
-        entry = self._admit(key, scope, binary, env, tag, seconds, binding)
+        window = max_keys > 1
+        if (store is not None or confirm) and not window:
+            raise _refused("presence capacity or authority refused")
+        # A window's one helper serves several keys in several stores, each
+        # request naming its store (``None``: the helper's default store); a
+        # credential session serves one key in the store it was started for.
+        if window:
+            env = None
+        key = (os.getpid(), scope.home, scope.principal, scope.purpose, binary, env, "window" if window else tag)
+        entry = self._admit(key, scope, binary, env, tag, seconds, binding, max_keys, reason)
         response: dict[str, Any] = {}
         try:
             remaining = 120 - (self._clock() - started)
@@ -308,10 +492,12 @@ class _PresencePool:
                     or (entry.deadline is not None and self._clock() >= entry.deadline)
                 ):
                     raise _refused("presence expired or revoked")
-                response = entry.channel.exchange(
-                    {"cmd": "ecdh", "tag_hex": tag.hex(), "peer_pub_hex": peer.hex()},
-                    120 - (self._clock() - started),
-                )
+                request: dict[str, Any] = {"cmd": "ecdh", "tag_hex": tag.hex(), "peer_pub_hex": peer.hex()}
+                if confirm:
+                    request = {"cmd": "authenticate"}
+                elif store is not None:
+                    request["store"] = store
+                response = entry.channel.exchange(request, 120 - (self._clock() - started))
                 self._accept(scope, entry, started)
                 return response
             finally:
@@ -333,8 +519,20 @@ class _PresencePool:
 _pool = _PresencePool()
 
 
-def revoke(*, home: Path | None = None, principal: tuple[str, ...] | None = None, purpose: str | None = None) -> None:
-    _pool.revoke(home=None if home is None else home.resolve(), principal=principal, purpose=purpose)
+def revoke(
+    *,
+    home: Path | None = None,
+    principal: tuple[str, ...] | None = None,
+    purpose: str | None = None,
+    windows: bool = True,
+) -> None:
+    """End matching sessions; ``windows=False`` spares operation windows.
+
+    Creating or deleting a key passes ``windows=False``: setup creates keys
+    between the uses its window covers, and the helper already refuses a key
+    whose file changed under a session.
+    """
+    _pool.revoke(home=None if home is None else home.resolve(), principal=principal, purpose=purpose, windows=windows)
 
 
 def revoke_current() -> None:
@@ -359,6 +557,9 @@ def _after_fork() -> None:
     _pool = _PresencePool()
     _scope.set(None)
     _credential.set(None)
+    global _window, _window_lock
+    _window = None
+    _window_lock = threading.Lock()
     global _monitor_pid, _monitor_lock
     _monitor_pid = None
     _monitor_lock = threading.Lock()

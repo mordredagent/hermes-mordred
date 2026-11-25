@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any, Final
 
 from . import _term
@@ -136,22 +137,25 @@ def telegram_migrate_store(
 # -- logout --forget: this account's rows in mordred.db --------------------------------
 
 
-def forget_import_rows(current: Any) -> str | None:
+def forget_import_rows(current: Any, *, home: Path | None = None) -> str | None:
     """Delete the account's Telegram ``import_*`` rows in ``mordred.db``; ``None`` or a content-free code.
 
     Only an index retired to ``mordred.db`` names rows to delete (see
     :func:`~mordred_hermes.extension.telegram.history.forget_imported_history`).
     Needs the archive key and index, so it runs before either is wiped.
+    ``home`` selects the archive and database (default: the active home), so
+    a profile's forget never reads the root's archive or ``mordred.db``.
     """
     from .._core._home import hermes_home
     from ..extension.telegram.history import forget_imported_history
     from ..extension.telegram.store import ArchiveStore, StoreError
 
+    base = home if home is not None else hermes_home()
     try:
-        archive = ArchiveStore(current.store_key)
+        archive = ArchiveStore(current.store_key, root=base / "mordred" / "telegram")
     except StoreError as exc:
         return exc.code
-    return forget_imported_history(archive, home=hermes_home())
+    return forget_imported_history(archive, home=base)
 
 
 def rows_not_deleted(code: str) -> int:

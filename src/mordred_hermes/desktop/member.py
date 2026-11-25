@@ -36,7 +36,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -488,6 +488,30 @@ def pm_managed() -> bool:
         return importlib.util.find_spec("pm.workspace") is not None
     except (ImportError, ValueError):
         return False
+
+
+def list_member_candidates(selection: Mapping[Path, Iterable[str]], plugin_id: str) -> list[Path]:
+    """Return ``<plugins dir>/<plugin_id>`` for every home that enables it, in pm's home order.
+
+    pm builds one environment from every home's selection, and uv refuses two
+    workspace members with the same name, so only one of these may hold the
+    member.
+    """
+    return [plugins_dir / plugin_id for plugins_dir, names in selection.items() if plugin_id in names]
+
+
+def select_member_target(candidates: Iterable[Path], read_status: Callable[[Path], Mapping[str, Any]]) -> Path | None:
+    """Return the first candidate that already holds a valid member, else the first candidate, else None."""
+    ordered = list(candidates)
+    return next((path for path in ordered if read_status(path).get("valid")), ordered[0] if ordered else None)
+
+
+def read_pm_selection() -> dict[Path, list[str]]:
+    """Return pm's enabled-plugin selection per home plugins dir, skipping broken secondary profiles."""
+    from pm.plugins_state import enabled_plugins_ordered
+
+    selection: dict[Path, list[str]] = enabled_plugins_ordered(skip_invalid_secondary=True)
+    return selection
 
 
 def ensure_member(

@@ -232,6 +232,7 @@ def _prepare(home: Path, assume_yes: bool, prompt_io: Any) -> _ResetJournal | No
             journal = _load_reset_journal(root)
         except FileNotFoundError:
             journal = None
+        resuming = journal is not None
         if journal is not None:
             if journal.connected is None:
                 # v2 authorized only keyvault keys. Never turn an old retry
@@ -286,7 +287,11 @@ def _prepare(home: Path, assume_yes: bool, prompt_io: Any) -> _ResetJournal | No
             )
             journal, _ = _encode_reset_journal(root, keys, retained, incomplete, connected=state)
         if not assume_yes and not keyvault_cli._confirm_reset(resolve_prompt_io(prompt_io), list(journal.key_ids)):
-            print("Reset aborted — nothing was deleted.")
+            print(
+                "Reset aborted — earlier progress is kept in the reset journal; nothing further was deleted."
+                if resuming
+                else "Reset aborted — nothing was deleted."
+            )
             return None
         _save(root, journal)
         _storage.ensure_generation_epoch(root, force_new=True)

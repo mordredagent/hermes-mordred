@@ -1,0 +1,36 @@
+{
+  "button": {
+    "cancel": "취소",
+    "download": "다운로드",
+    "notNow": "나중에",
+    "ok": "확인",
+    "showLog": "로그 보기",
+    "stopAndContinue": "중단하고 계속",
+    "tryAgain": "다시 시도"
+  },
+  "installer": {
+    "closeAndRetry": "Mordred가 아직 실행 중입니다. Mordred를 닫은 다음 Mordred 설치 프로그램을 다시 여십시오.",
+    "couldNotStop": "Mordred를 중단할 수 없습니다. Mac을 재시동한 다음 Mordred 설치 프로그램을 다시 여십시오.",
+    "done": "Mordred가 설치되었으며 로그인하면 자동으로 시작됩니다. 백업 파일은 {path}입니다. 이 파일만 있으면 다른 Mac에서 키를 복원할 수 있으니, 사본을 안전하고 다른 사람이 볼 수 없는 곳에 보관하십시오.",
+    "downloadFailed": "{name}을(를) 다운로드하지 못했습니다. 네트워크를 확인한 다음 Mordred 설치 프로그램을 다시 여십시오. 중단된 지점부터 계속됩니다.",
+    "downloadProgress": "{name} 다운로드 중: {percent}% 완료.",
+    "downloadStarted": "{name}을(를) 다운로드하는 중입니다(약 {size} MB). 설치 프로그램은 알아서 계속 진행됩니다.",
+    "failed": "Mordred를 설치할 수 없습니다: {reason}",
+    "fileInTheWay": "{path}이(가) 이미 있으며 Mordred가 만든 것이 아니어서 진행할 수 없습니다. 다른 곳으로 옮긴 다음 Mordred 설치 프로그램을 다시 여십시오.",
+    "largeModel": "대형 모델(Bonsai 27B, 약 8 GB)도 다운로드하시겠습니까? 이 모델은 기록의 제목과 주제를 만들어 줍니다. 나중에 Mordred 설치 프로그램을 다시 열어 추가할 수도 있습니다.",
+    "needsTools": "Mordred를 사용하려면 Apple의 명령어 라인 도구가 필요합니다. 방금 열린 창에서 설치한 다음 Mordred 설치 프로그램을 다시 여십시오.",
+    "serverDidNotStop": "Mordred의 서버가 중단되지 않았습니다. 1분 정도 기다린 다음 Mordred 설치 프로그램을 다시 여십시오.",
+    "stillRunning": "Mordred가 아직 실행 중입니다(이전 설치 또는 Hermes 창). 중단하고 계속하시겠습니까?",
+    "touchIdNext": "다음으로 Touch ID로 확인합니다. 지금 한 번은 Mordred의 키를 설정하기 위해, 잠시 후 Mordred가 시작될 때 한 번 더 확인합니다. '확인'을 누른 다음 Touch ID 창이 나타나면 센서를 터치하십시오.",
+    "touchIdNotConfirmed": "Touch ID가 확인되지 않아 키를 설정하지 못했습니다. Mordred 설치 프로그램을 다시 여십시오.",
+    "touchIdRetry": "Touch ID가 확인되지 않아 아직 아무것도 설정되지 않았습니다. 다시 시도하시겠습니까?",
+    "unexpected": "한 단계가 예기치 않게 중단되었습니다({line}번째 줄). 로그를 열면 어느 단계인지 확인할 수 있습니다. 그런 다음 Mordred 설치 프로그램을 다시 열면 중단된 지점부터 계속됩니다.",
+    "unfinishedKeys": "이전에 완료되지 않은 설정의 키를 제거할 수 없습니다. Mordred 설치 프로그램을 다시 여십시오."
+  },
+  "touchId": {
+    "approveBrowser": "브라우저 '{label}'의 Mordred 연결 허용. 코드 {code}",
+    "credentials": "Mordred의 Telegram 또는 메일 로그인 정보 읽기",
+    "setup": "Mordred의 키와 암호화 설정",
+    "startup": "Mordred의 보관함과 데이터베이스 열기"
+  }
+}

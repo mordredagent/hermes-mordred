@@ -21,7 +21,7 @@ claims do not override current SPEC/PLAN, TODO or CI evidence.
 | [`PATHS.md`](./PATHS.md) | Every filesystem path Mordred reads or manages |
 | [`POLICY.md`](./POLICY.md) | Policy schema, decisions, and audit reason codes |
 | [`HOOK_PAYLOADS.md`](./HOOK_PAYLOADS.md) | Consumed Hermes hook fields and drift validation |
-| [`SLACK_E2E.md`](./SLACK_E2E.md) | Gateway `ENC:v3` wire and mandatory-E2E behavior |
+| [`SLACK_E2E.md`](./SLACK_E2E.md) | Former gateway `ENC:v3` wire (removed; kept as a record) |
 | [`STATE_DB_ENCRYPTION.md`](./STATE_DB_ENCRYPTION.md) | Original macOS format and lifecycle notes, with links to the shared database rollout |
 | [`UPSTREAM.md`](./UPSTREAM.md) | Hermes compatibility and the zero-PR commitment |
 

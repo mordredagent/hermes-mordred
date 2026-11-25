@@ -328,19 +328,13 @@ def test_user_docs_describe_installer_options() -> None:
         document = path.read_text(encoding="utf-8")
         assert "bash -s -- --with-extension" in document, f"{path.relative_to(ROOT)} omits --with-extension"
         assert "--version VERSION" in document, f"{path.relative_to(ROOT)} omits --version"
-        assert re.search(r"The `messaging` extra is not required to use the\s+browser extension\.", document), (
-            f"{path.relative_to(ROOT)} does not explain that messaging is optional"
-        )
-        assert "terminal QR" in document, f"{path.relative_to(ROOT)} does not explain what messaging adds"
+        assert "`messaging`" not in document, f"{path.relative_to(ROOT)} still mentions the removed messaging extra"
 
     # Keep the common path focused on --with-extension. Quickstart owns the
-    # advanced installer options; the Extension guide shows the shorter
-    # additive form for users who want a QR.
+    # advanced installer options.
     quickstart = paths[0].read_text(encoding="utf-8")
-    extension_guide = paths[1].read_text(encoding="utf-8")
     assert "--extras LIST" in quickstart
     assert "--all-extras" in quickstart
-    assert "--with-extension --extras messaging" in extension_guide
 
     # A `hermes` self-update recreates ~/.hermes/hermes-agent/venv, so a bare
     # re-run of the installer only gets what that re-run itself asks for; the
@@ -499,24 +493,42 @@ def test_installs_optional_extras_from_pipe_friendly_environment_variable(tmp_pa
 def test_piped_installer_accepts_optional_extra_arguments(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, platform_name="Linux")
 
-    result = _run_from_stdin(fixture, "--extras", "extension,messaging")
+    result = _run_from_stdin(fixture, "--extras", "extension,telegram")
 
     assert result.returncode == 0, result.stderr
-    expected = "hermes-mordred[keyvault,dbcrypt,extension,messaging]>=0.1.0a16"
+    expected = "hermes-mordred[keyvault,dbcrypt,extension,telegram]>=0.1.0a16"
     assert fixture.uv_calls().count(expected) == 2
 
 
 def test_all_extras_are_deduplicated_in_stable_order(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, platform_name="Darwin")
 
-    result = _run(fixture, "--extras=extension", "--all-extras", "--extras", "messaging, extension")
+    result = _run(fixture, "--extras=extension", "--all-extras", "--extras", "telegram, extension")
 
     assert result.returncode == 0, result.stderr
-    expected = "hermes-mordred[macos,extension,ethereum,messaging,tor-control,telegram]>=0.1.0a16"
+    expected = "hermes-mordred[macos,extension,ethereum,tor-control,telegram]>=0.1.0a16"
     calls = fixture.uv_calls()
     assert calls.count(expected) == 2
     assert "extension,extension" not in calls
     assert f"installing {expected} from PyPI" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("args", "env"),
+    [(("--extras", "extension,messaging"), {}), ((), {"MORDRED_INSTALL_EXTRAS": "messaging,extension"})],
+)
+def test_the_removed_messaging_extra_is_ignored_with_a_warning(
+    tmp_path: Path, args: tuple[str, ...], env: dict[str, str]
+) -> None:
+    fixture = _fixture(tmp_path, platform_name="Linux")
+
+    result = _run(fixture, *args, **env)
+
+    assert result.returncode == 0, result.stderr
+    assert "messaging extra was removed and is ignored" in result.stderr
+    expected = "hermes-mordred[keyvault,dbcrypt,extension]>=0.1.0a16"
+    assert fixture.uv_calls().count(expected) == 2
+    assert re.search(r"hermes-mordred\[[^\]]*messaging", fixture.uv_calls()) is None
 
 
 @pytest.mark.parametrize("args", [("--extras", "all"), ("--extras=all",)])
@@ -526,7 +538,7 @@ def test_extras_all_matches_the_all_extras_flag(tmp_path: Path, args: tuple[str,
     result = _run(fixture, *args)
 
     assert result.returncode == 0, result.stderr
-    expected = "hermes-mordred[macos,extension,ethereum,messaging,tor-control,telegram]>=0.1.0a16"
+    expected = "hermes-mordred[macos,extension,ethereum,tor-control,telegram]>=0.1.0a16"
     assert fixture.uv_calls().count(expected) == 2
 
 
@@ -594,7 +606,7 @@ def test_empty_or_dangling_comma_extras_stop_before_uv(tmp_path: Path, args: tup
 
 @pytest.mark.parametrize(
     "extra",
-    ["unknown", "dev", "integration", "macos", "keyvault", "extension,,messaging"],
+    ["unknown", "dev", "integration", "macos", "keyvault", "extension,,telegram"],
 )
 def test_invalid_optional_extra_stops_before_uv(tmp_path: Path, extra: str) -> None:
     fixture = _fixture(tmp_path)
@@ -628,7 +640,8 @@ def test_installer_help_does_not_require_hermes_or_uv(tmp_path: Path) -> None:
     assert "--extras LIST" in result.stdout
     assert "--with-extension" in result.stdout
     assert "--version VERSION" in result.stdout
-    assert "extension, ethereum, messaging, tor-control" in result.stdout
+    assert "extension, ethereum, tor-control, telegram" in result.stdout
+    assert "messaging" not in result.stdout
     assert not fixture.uv_log.exists()
 
 
@@ -985,7 +998,7 @@ def test_real_uv_accepts_the_installer_flag_combination(tmp_path: Path) -> None:
     specs = (
         f"hermes-mordred[{platform_extra}]>=0.1.0a16",
         f"hermes-mordred[{platform_extra},extension,ethereum]==0.1.0a16,>=0.1.0a16",
-        f"hermes-mordred[{platform_extra},extension,ethereum,messaging,tor-control,telegram]>=0.1.0a16",
+        f"hermes-mordred[{platform_extra},extension,ethereum,tor-control,telegram]>=0.1.0a16",
     )
     for spec in specs:
         install = subprocess.run(
