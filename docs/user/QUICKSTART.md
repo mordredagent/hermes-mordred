@@ -42,7 +42,9 @@ Settings > Privacy & Security ("Open Anyway").
 Developers can run the same installer from a checkout,
 `scripts/install-standalone.sh --from-source .` (`--help` lists the options:
 another folder, other ports, models from another folder, no login services),
-and build the package with `packaging/macos/build-pkg.sh`. The rest of this
+and build the package with `packaging/macos/build-pkg.sh` (see
+[`packaging/macos/README.md`](../../packaging/macos/README.md) for how the
+package works, how to check it and how to try it safely). The rest of this
 guide covers installing into an existing Hermes instead.
 
 ## What is Mordred?
