@@ -36,11 +36,11 @@ async def vault_prepare(request: Request) -> Any:
     """Body ``{}``. Generate the recovery passphrase in memory and show it BEFORE anything is created.
 
     Answers ``{"ok": true, "flow_id", "passphrase": [8 words], "passphrase_reused": false}``;
-    nothing on disk changes. An existing vault whose ``.env`` is not enrolled
-    gets a flow without a passphrase (``passphrase: null, passphrase_reused:
-    true``): its phrase is the one shown at its creation. ``vault_exists`` when
-    there is nothing to do, ``env_optout`` when the owner restored a plaintext
-    ``.env``. One flow at a time (a new one replaces it), TTL 600 s.
+    nothing on disk changes. An existing vault whose ``.env`` is not enrolled,
+    or is opted out (the owner restored a plaintext ``.env``), gets a flow
+    without a passphrase (``passphrase: null, passphrase_reused: true``): its
+    phrase is the one shown at its creation. ``vault_exists`` when there is
+    nothing to do. One flow at a time (a new one replaces it), TTL 600 s.
     """
     api = _api()
     body = await read_object(request)
@@ -57,8 +57,10 @@ async def vault_prepare(request: Request) -> Any:
 async def vault_commit(flow_id: str, request: Request) -> Any:
     """Body ``{"unattended": bool}``. Create the vault with the prepared passphrase, enroll ``.env``.
 
+    Opted out, the on-disk ``.env`` plus the Mordred-owned keys only the vault
+    copy has are enrolled and the opt-out marker removed, as ``encryption enable env``.
     ``{"ok": true, "passphrase_reused": bool}``; ``vault_flow_expired`` (TTL,
-    replaced, restart: nothing was created), ``vault_exists``, ``env_optout``,
+    replaced, restart: nothing was created), ``vault_exists``,
     ``vault_anchor_stale`` (with ``anchor_store``, ``anchor_identity`` and,
     only for a legacy anchor over an empty vault directory, ``remedy``; checked
     BEFORE the wizard, which would otherwise migrate a legacy anchor) or

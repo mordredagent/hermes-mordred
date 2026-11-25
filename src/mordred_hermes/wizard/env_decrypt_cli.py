@@ -235,6 +235,58 @@ def _should_reseal_instead(*, platform: str, home: Path, root: Path) -> bool:
     return platform == "darwin" and not _env_optout_marker_path(home).exists() and _env_enrolled(root)
 
 
+def _should_reenable_opted_out(*, platform: str, home: Path, root: Path) -> bool:
+    """Whether ``enable`` turns an opted-out, still enrolled ``.env`` back on (macOS only)."""
+    return platform == "darwin" and _env_optout_marker_path(home).exists() and _env_enrolled(root)
+
+
+def _reenable_opted_out(
+    *,
+    home: Path,
+    root: Path,
+    env_path: Path,
+    backend: NativeBackend | None,
+    store: AnchorStore | None,
+    flow_session: FlowSession | None,
+) -> int:
+    """Seal on-disk ``.env`` (empty if absent) + old copy's missing Mordred keys, then drop marker and plaintext."""
+    from .._core._database_contracts import DatabaseRefused
+    from ..keyvault import anchor, vault
+    from ..keyvault._env_reseal import add_vault_mordred_keys
+    from ..keyvault._exceptions import WrapError
+    from . import vault_cli
+    from ._vault_entries import _source_change_lease
+
+    try:
+        disk_bytes = env_path.read_bytes() if env_path.is_file() else None
+        disk_text = "" if disk_bytes is None else disk_bytes.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        _term.emit_error(f"cannot read {env_path}: {exc}")
+        return 1
+    opened = vault_cli._open_hot_path_or_report(root, backend=backend, store=store, flow_session=flow_session)
+    if opened is None:
+        return 1
+    with opened:
+        try:
+            sealed = add_vault_mordred_keys(disk_text, opened.read_file(_ENV_NAME).decode("utf-8")).encode("utf-8")
+            with _source_change_lease(root, opened, _ENV_NAME, sealed) as lease:
+                opened.enroll_file(_ENV_NAME, sealed, database_lease=lease)
+            enrolled = opened.read_file(_ENV_NAME)
+        except (DatabaseRefused, vault.VaultError, anchor.AnchorError, WrapError, OSError, UnicodeDecodeError) as exc:
+            _term.emit_error(f"cannot add {_ENV_NAME!r}: {exc}")
+            return 1
+    if enrolled != sealed:
+        _term.emit_warn(".env was enrolled but the vault read-back does not match — leaving the opt-out in place.")
+        return 1
+
+    _env_optout_marker_path(home).unlink(missing_ok=True)  # injection ON
+    if disk_bytes is None:
+        print(".env is now vault-managed (no plaintext was on disk).")
+        return 0
+    _delete_enrolled_plaintext(env_path, disk_bytes)
+    return 0
+
+
 def _delete_enrolled_plaintext(env_path: Path, enrolled: bytes | None) -> None:
     """Remove the plaintext ``.env`` after a clean macOS enroll, or explain why not.
 
@@ -292,7 +344,9 @@ def enable(
     ``.env`` to protect, the vault cannot be created, or the enroll fails
     (unverifiable vault, device key-store error). On macOS the plaintext is
     removed only after a clean enroll, so a failure never strands the operator
-    without a readable ``.env``.
+    without a readable ``.env``. On macOS with the opt-out marker and ``.env``
+    still enrolled, the on-disk text (empty when absent) plus the Mordred-owned
+    keys only the old vault copy has are sealed instead.
 
     On macOS the seal is **fail-closed on the runtime**: before any destructive
     step it probes the interpreter that actually runs ``hermes`` (see
@@ -320,7 +374,8 @@ def enable(
     (home / _RESEAL_TMP_NAME).unlink(missing_ok=True)
 
     env_path = home / _ENV_NAME
-    if not env_path.is_file():
+    reenable = _should_reenable_opted_out(platform=platform, home=home, root=root)
+    if not env_path.is_file() and not reenable:
         return _handle_missing_plaintext(root, home, env_path)
 
     # Fail-closed runtime check (macOS only): sealing deletes the plaintext and
@@ -342,6 +397,10 @@ def enable(
     # wholesale here would drop every other enrolled secret, so merge instead.
     if _should_reseal_instead(platform=platform, home=home, root=root):
         return reseal(home=home, root=root, backend=backend, store=store)
+    if reenable:
+        return _reenable_opted_out(
+            home=home, root=root, env_path=env_path, backend=backend, store=store, flow_session=flow_session
+        )
 
     rc = vault_cli.ensure_initialised(
         root=root, prompt_io=prompt_io, backend=backend, store=store, flow_session=flow_session

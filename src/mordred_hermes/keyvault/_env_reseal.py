@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING
 
 from .._core import _term
 from ._identity import resolve_backend, resolve_store, vault_identity
+from ._memory_key_holder import MEMORY_KEY_ENV
 from ._plaintext_capture import (
     capture_plaintext,
     discard_capture,
@@ -58,9 +59,12 @@ if TYPE_CHECKING:
     from .vault import OpenVault
     from .wrap import NativeBackend
 
-__all__ = ["reseal_env"]
+__all__ = ["add_vault_mordred_keys", "is_mordred_owned_env_key", "reseal_env"]
 
 _ENV_NAME = ".env"
+
+#: Prefix of the ``.env`` keys Mordred writes itself (``network init``'s Mullvad account).
+MORDRED_ENV_PREFIX = "MORDRED_"
 
 #: Optional keyvault crypto-stack extra ("[keyvault]"): argon2-cffi /
 #: cryptography / blake3. Mirrors ``wizard._defaults.KEYVAULT_STACK_MODULES`` —
@@ -167,6 +171,26 @@ def _merge_env_text(base_text: str, overrides: dict[str, str]) -> str:
     for key, value in remaining.items():
         lines.append(f"{key}={_render_env_value(value)}\n")
     return "".join(lines)
+
+
+def is_mordred_owned_env_key(name: str | None) -> bool:
+    """Whether ``.env`` key ``name`` is Mordred's own: ``HERMES_MEMORY_KEY`` or any ``MORDRED_*`` key."""
+    return name is not None and (name == MEMORY_KEY_ENV or name.startswith(MORDRED_ENV_PREFIX))
+
+
+def add_vault_mordred_keys(disk_text: str, vault_text: str) -> str:
+    """Return ``disk_text`` with each Mordred-owned key that ``vault_text`` has and ``disk_text`` lacks appended."""
+    from io import StringIO
+
+    from dotenv import dotenv_values
+
+    disk_keys = set(dotenv_values(stream=StringIO(disk_text), interpolate=False))
+    carried = {
+        key: value
+        for key, value in dotenv_values(stream=StringIO(vault_text), interpolate=False).items()
+        if value is not None and is_mordred_owned_env_key(key) and key not in disk_keys
+    }
+    return _merge_env_text(disk_text, carried)
 
 
 def _reseal_within_open(opened: OpenVault, overrides: dict[str, str]) -> tuple[bool, str | None]:

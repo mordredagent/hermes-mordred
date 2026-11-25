@@ -1101,8 +1101,11 @@ Decisions (these win over everything above and are mirrored in SPEC):
   the key store, never the requested one). Commit on an existing vault with
   `env_enrolled: false` enrolls `.env` without a new phrase (`passphrase_reused:
   true` in the answer; the phrase shown at creation stays the only one);
-  `optout: true` answers `env_optout` (the owner restored a plaintext `.env`;
-  Terminal: `hermes-mordred encryption enable env`). `/memory/enable` requires
+  `optout: true` (the owner restored a plaintext `.env`) gets the same reuse
+  flow, and commit runs `encryption enable env`: the on-disk `.env` plus the
+  Mordred-owned keys only the old vault copy has (see
+  SPEC.md "Vault and memory ceremonies from the page"; earlier drafts answered
+  `env_optout` and sent the owner to Terminal). `/memory/enable` requires
   `env_enrolled && env_injecting` (`env_required` otherwise). The Touch ID
   checkbox belongs to the vault step. Ceremonies run in a worker thread under
   one module-level lock and are not cancelled when the HTTP request is
