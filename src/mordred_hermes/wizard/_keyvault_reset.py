@@ -269,7 +269,7 @@ def _prepare(home: Path, assume_yes: bool, prompt_io: Any) -> _ResetJournal | No
                 _storage._check_dir_mode(root)
             else:
                 root.mkdir(mode=0o700)
-            if (root / "meta.json").exists():
+            if _storage.has_keyvault_metadata(root):
                 keys, retained, incomplete = keyvault_cli._collect_reset_key_ids(root)
             else:
                 keys, retained, incomplete = {}, [], False

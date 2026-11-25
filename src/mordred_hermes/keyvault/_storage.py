@@ -506,6 +506,11 @@ def atomic_write(path: Path, data: bytes) -> None:
     # NTFS metadata durability is filesystem-managed there (review 2026-07-29).
 
 
+def has_keyvault_metadata(root: Path) -> bool:
+    """Return whether `keyvault init` created this root; other features also keep native keys under it."""
+    return (root / "meta.json").exists()
+
+
 def reset_journal_path(root: Path) -> Path:
     """Return the reset journal outside the destructively removed tree."""
     return root.parent / RESET_JOURNAL_NAME

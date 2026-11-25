@@ -1832,3 +1832,26 @@ def test_desktop_reenable_after_uninstall_keeps_the_memory_key(installed, encryp
         assert new["HERMES_MEMORY_KEY"] == old["HERMES_MEMORY_KEY"]
         assert new["MORDRED_MULLVAD_ACCOUNT"] == "1234567890"
         assert desktop.post("/memory/enable") == {"ok": True, "restart_required": True}
+
+
+@pytest.mark.parametrize("meta", [None, b"not json"])
+def test_purge_preflight_reads_keyvault_ownership_only_after_keyvault_init(plain_install, meta):
+    """Telegram and mail keep native keys under keyvault/sekey; only meta.json marks a created keyvault."""
+    from mordred_hermes._core._database_contracts import DatabaseRefused
+    from mordred_hermes.keyvault._storage import KeyvaultCorruptError
+    from mordred_hermes.wizard._flow_session import FlowSession
+    from mordred_hermes.wizard._uninstall_coordinator import _purge_preflight
+
+    ctx, _runner = plain_install
+    ctx.keyvault_reset = None
+    sekey = ctx.home / "mordred/keyvault/sekey"
+    sekey.mkdir(parents=True, mode=0o700)
+    (sekey / f"{_application_tag('mordred-hermes.telegram.credentials.v1').hex()}.bin").write_bytes(b"Telegram key")
+    if meta is not None:
+        (ctx.home / "mordred/keyvault/meta.json").write_bytes(meta)
+    with FlowSession() as flow:
+        if meta is None:
+            _purge_preflight(ctx, flow)
+        else:
+            with pytest.raises((DatabaseRefused, KeyvaultCorruptError)):
+                _purge_preflight(ctx, flow)
