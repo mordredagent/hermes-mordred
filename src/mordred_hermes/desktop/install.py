@@ -140,12 +140,15 @@ def ensure_page(home: Path | None = None) -> bool:
 
 
 def ensure_member(home: Path | None = None, *, force: bool = False) -> bool:
-    """Keep ``<home>/plugins/mordred/`` a pm workspace member (see :mod:`.member`).
+    """Keep one pm workspace member for Mordred across all homes (see :mod:`.member`).
 
-    Only on pm-managed Hermes installs (Hermes Desktop, source installs), where
-    each update builds a fresh environment from its recorded inputs; a plain
-    ``pip install hermes-agent`` never rebuilds and needs no member. ``force``
-    skips that check (``hermes-mordred desktop install --pm-member``).
+    The member goes in the first home, in pm's order, that enables Mordred, and
+    the other enabling homes lose theirs; with none enabled, or without pm, it
+    goes in ``<home>/plugins/mordred/``. Only on pm-managed Hermes installs
+    (Hermes Desktop, source installs), where each update builds a fresh
+    environment from its recorded inputs; a plain ``pip install hermes-agent``
+    never rebuilds and needs no member. ``force`` skips that check
+    (``hermes-mordred desktop install --pm-member``).
     """
     if _windows():
         # The POSIX member lock and recursive placement are not ported. Even
@@ -153,9 +156,13 @@ def ensure_member(home: Path | None = None, *, force: bool = False) -> bool:
         return False
     from . import member
 
-    if not force and not member.pm_managed():
+    managed = member.pm_managed()
+    if not force and not managed:
         return False
-    return member.ensure_member(plugin_dir(home or _home()))
+    candidates = member.list_member_candidates(member.read_pm_selection(), PLUGIN_ID) if managed else []
+    target, duplicates = (candidates[0], candidates[1:]) if candidates else (plugin_dir(home or _home()), [])
+    removed = [member.remove_member(duplicate) for duplicate in duplicates]
+    return member.ensure_member(target) or any(removed)
 
 
 def _enable(home: Path) -> None:

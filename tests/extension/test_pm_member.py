@@ -346,8 +346,36 @@ def test_install_ensure_member_only_on_pm_managed_hermes(tmp_path: Path, monkeyp
     monkeypatch.setattr(member, "pm_managed", lambda: False)
     assert install.ensure_member(tmp_path) is False and calls == []
     monkeypatch.setattr(member, "pm_managed", lambda: True)
+    monkeypatch.setattr(member, "read_pm_selection", lambda: {})
     assert install.ensure_member(tmp_path) is True
     assert calls == [tmp_path / "plugins" / "mordred"]
+
+
+def test_list_member_candidates_keeps_pm_home_order_and_enabling_homes_only(tmp_path: Path) -> None:
+    root, disabled, profile = (tmp_path / name / "plugins" for name in ("root", "disabled", "profile"))
+    selection = {root: ["zerc20", "mordred"], disabled: ["zerc20"], profile: ["mordred"]}
+    assert member.list_member_candidates(selection, "mordred") == [root / "mordred", profile / "mordred"]
+
+
+@pytest.mark.usefixtures("posix_member_model")
+def test_install_ensure_member_keeps_one_member_across_enabling_homes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two members named hermes-mordred make pm's `uv lock` fail (issue #323)."""
+    first, second = tmp_path / "root" / "plugins", tmp_path / "profile" / "plugins"
+    duplicate = second / "mordred"
+    (duplicate / "dashboard").mkdir(parents=True)
+    (duplicate / "dashboard" / "plugin_api.py").write_text("shim")
+    (duplicate / "pyproject.toml").write_text(f"# {member.MARKER}\n")
+    (duplicate / member.PACKAGE).mkdir()
+    calls: list[Path] = []
+    monkeypatch.setattr(member, "ensure_member", lambda plugin_dir: calls.append(plugin_dir) or False)
+    monkeypatch.setattr(member, "pm_managed", lambda: True)
+    monkeypatch.setattr(member, "read_pm_selection", lambda: {first: ["mordred"], second: ["mordred"]})
+    assert install.ensure_member(tmp_path / "profile") is True
+    assert calls == [first / "mordred"]
+    assert not (duplicate / "pyproject.toml").exists() and not (duplicate / member.PACKAGE).exists()
+    assert (duplicate / "dashboard" / "plugin_api.py").read_text() == "shim"
 
 
 @pytest.mark.usefixtures("posix_member_model")
