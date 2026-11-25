@@ -321,6 +321,7 @@ def test_another_setup_failure_is_not_retried(tmp_path: Path) -> None:
     assert (tmp_path / "home" / "calls").read_text().count("--no-prompts") == 1
 
 
+@pytest.mark.skipif(sys.platform != "darwin" or shutil.which("lsof") is None, reason="macOS lsof")
 def test_a_default_port_another_program_uses_moves_to_a_free_one(tmp_path: Path) -> None:
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,7 @@ def test_a_text_is_translated_filled_in_and_falls_back_to_english() -> None:
     assert i18n.text("touchId.setup", "English", language="en") == "English"
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="the installer reads its strings with macOS plutil")
 def test_the_installer_speaks_the_macs_language(tmp_path: Path) -> None:
     body = "\n".join(INSTALLER.read_text(encoding="utf-8").splitlines()[:-1])
     script = tmp_path / "functions.sh"
