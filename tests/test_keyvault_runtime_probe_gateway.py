@@ -22,6 +22,7 @@ import os
 import shlex
 import signal
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,7 @@ from mordred_hermes.keyvault._runtime_probe import (
     discover_running_gateway_pythons,
     discover_running_gateway_runtimes,
     environment_key,
+    map_desktop_gateways_to_expected_runtime,
 )
 from tests._checked_fixture_helpers import file_symlink as file_symlink
 from tests._helpers import PlatformSys
@@ -615,3 +617,281 @@ def test_launcher_with_unbalanced_shebang_quote_is_ignored(tmp_path: Path) -> No
     launcher.write_text("#!/usr/bin/python3 'unterminated\nprint(1)\n", encoding="utf-8")
     launcher.chmod(0o755)
     assert _runtime_probe._python_for_launcher(launcher) is None
+
+
+# -----------------------------------------------------------------------------
+# Hermes Desktop launch form — standalone interpreter + launcher-selected venv
+# -----------------------------------------------------------------------------
+_DESKTOP_ARGV = "{py} -m hermes_cli.main --profile default gateway run --quiet"
+
+
+def _make_venv_python(venv: Path, base_python: Path) -> Path:
+    """Create a venv ``bin/python3`` symlinked to ``base_python``, with the venv's ``pyvenv.cfg``."""
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(f"home = {base_python.parent}\n", encoding="utf-8")
+    python = _ProcessPath(venv / "bin" / "python3")
+    python.symlink_to(base_python)
+    return python
+
+
+def _make_desktop_home(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Build a home with the standalone interpreter, a selected environment linked to it, and its launcher."""
+    home = tmp_path / "home"
+    standalone = _make_python(home / "tools" / "python-3.14.9" / "bin", "python3")
+    selected = _make_venv_python(home / "installs" / "i1" / "environments" / "e1" / "venv", standalone)
+    launcher = home / "hermes-agent" / ".hermes" / "bin" / "hermes"
+    launcher.parent.mkdir(parents=True)
+    bootstrap = "import os, sys\nimport hermes_bootstrap\n"  # Hermes's real bootstrap spans many lines
+    launcher.write_text(f'#!/bin/sh\nexec {shlex.join([str(standalone), "-I", "-c", bootstrap])} "$@"\n')
+    launcher.chmod(0o755)
+    return home, standalone, selected
+
+
+def _run_gate(home: Path, probe: Callable[..., tuple[bool, str]]) -> int:
+    """Run the ``.env`` runtime gate on darwin with production gateway discovery."""
+    from mordred_hermes.wizard._runtime_gate import runtime_gate
+
+    return runtime_gate(
+        home=home,
+        platform="darwin",
+        runtime_probe=None,
+        force_runtime_unverified=False,
+        default_probe=probe,
+        target=".env",
+        mechanism="  mechanism\n",
+        rerun_tail="  tail.",
+    )
+
+
+def _scan_count(fake: _FakePs) -> int:
+    """Count the full process-table scans ``fake`` served."""
+    return sum(1 for call in fake.calls if "-axo" in call)
+
+
+@pytest.mark.usefixtures("file_symlink")
+class TestDesktopGatewayGate:
+    def test_gate_passes_a_desktop_gateway_when_the_expected_runtime_is_healthy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+        monkeypatch.setenv(_runtime_probe.RUNTIME_PYTHON_ENV, str(selected))
+        _install_ps(monkeypatch, _FakePs(scan=_scan_row(7001, _DESKTOP_ARGV.format(py=standalone))))
+        probed: list[Path | None] = []
+
+        def probe_bare_interpreter_fails(*, home: Path, runtime_python: Path | None = None) -> tuple[bool, str]:
+            """Pass the primary check; fail any gateway interpreter, as the bare standalone one would."""
+            probed.append(runtime_python)
+            return (True, "ok") if runtime_python is None else (False, "mordred plugin not registered")
+
+        assert _run_gate(home, probe_bare_interpreter_fails) == 0
+        assert probed == [None]
+
+    def test_gate_refuses_when_the_expected_runtime_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+        monkeypatch.setenv(_runtime_probe.RUNTIME_PYTHON_ENV, str(selected))
+        _install_ps(monkeypatch, _FakePs(scan=_scan_row(7001, _DESKTOP_ARGV.format(py=standalone))))
+
+        def probe_fails(*, home: Path, runtime_python: Path | None = None) -> tuple[bool, str]:
+            """Report that the expected runtime cannot unseal."""
+            return False, "mordred plugin not registered"
+
+        assert _run_gate(home, probe_fails) == 1
+        assert "mordred plugin not registered" in capsys.readouterr().err
+
+    def test_gate_scans_once_and_probes_the_gateway_it_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        home, _standalone, selected = _make_desktop_home(tmp_path)
+        unrelated = _make_python(tmp_path / "usr" / "bin", "python3")
+        monkeypatch.setenv(_runtime_probe.RUNTIME_PYTHON_ENV, str(selected))
+        fake = _install_ps(monkeypatch, _FakePs(scan=_scan_row(7002, _DESKTOP_ARGV.format(py=unrelated))))
+        probed: list[Path | None] = []
+
+        def probe_gateway_fails(*, home: Path, runtime_python: Path | None = None) -> tuple[bool, str]:
+            """Pass the primary check; fail every gateway interpreter."""
+            probed.append(runtime_python)
+            return (True, "ok") if runtime_python is None else (False, "mordred plugin not registered")
+
+        assert _run_gate(home, probe_gateway_fails) == 1
+        assert probed == [None, unrelated]
+        assert _scan_count(fake) == 1
+
+    def test_gate_probes_the_scanned_gateway_when_mapping_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+        monkeypatch.setenv(_runtime_probe.RUNTIME_PYTHON_ENV, str(selected))
+        _install_ps(monkeypatch, _FakePs(scan=_scan_row(7001, _DESKTOP_ARGV.format(py=standalone))))
+
+        def mapping_raises(*_a: object, **_k: object) -> list[GatewayRuntime]:
+            raise RuntimeError("mapping broke")
+
+        monkeypatch.setattr(_runtime_probe, "map_desktop_gateways_to_expected_runtime", mapping_raises)
+        probed: list[Path | None] = []
+
+        def probe_gateway_fails(*, home: Path, runtime_python: Path | None = None) -> tuple[bool, str]:
+            """Pass the primary check; fail every gateway interpreter."""
+            probed.append(runtime_python)
+            return (True, "ok") if runtime_python is None else (False, "mordred plugin not registered")
+
+        assert _run_gate(home, probe_gateway_fails) == 1
+        assert probed == [None, standalone]
+
+    @pytest.mark.parametrize("alias_first", [False, True])
+    def test_gate_probes_a_merged_gateway_started_through_an_alias_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None, alias_first: bool
+    ) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+        alias = _alias_of_standalone(tmp_path, standalone)
+        monkeypatch.setenv(_runtime_probe.RUNTIME_PYTHON_ENV, str(selected))
+        rows = [_scan_row(7001, _DESKTOP_ARGV.format(py=standalone)), _scan_row(7002, _DESKTOP_ARGV.format(py=alias))]
+        _install_ps(monkeypatch, _FakePs(scan="\n".join(reversed(rows) if alias_first else rows)))
+        probed: list[Path | None] = []
+
+        def probe_bare_interpreter_fails(*, home: Path, runtime_python: Path | None = None) -> tuple[bool, str]:
+            """Pass the primary check; fail any gateway interpreter, as the bare standalone one would."""
+            probed.append(runtime_python)
+            return (True, "ok") if runtime_python is None else (False, "mordred plugin not registered")
+
+        assert _run_gate(home, probe_bare_interpreter_fails) == 1
+        assert probed == [None, alias if alias_first else standalone]
+
+    def test_gate_passes_two_desktop_gateways_with_the_same_standalone_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+        monkeypatch.setenv(_runtime_probe.RUNTIME_PYTHON_ENV, str(selected))
+        scan = "\n".join(_scan_row(pid, _DESKTOP_ARGV.format(py=standalone)) for pid in (7001, 7002))
+        _install_ps(monkeypatch, _FakePs(scan=scan))
+        probed: list[Path | None] = []
+
+        def probe_bare_interpreter_fails(*, home: Path, runtime_python: Path | None = None) -> tuple[bool, str]:
+            """Pass the primary check; fail any gateway interpreter, as the bare standalone one would."""
+            probed.append(runtime_python)
+            return (True, "ok") if runtime_python is None else (False, "mordred plugin not registered")
+
+        assert _run_gate(home, probe_bare_interpreter_fails) == 0
+        assert probed == [None]
+
+
+def _alias_of_standalone(tmp_path: Path, standalone: Path) -> Path:
+    """Return ``standalone`` spelled through a symlinked directory that points at its ``bin``."""
+    alias_dir = tmp_path / "alias-bin"
+    alias_dir.symlink_to(standalone.parent, target_is_directory=True)
+    return _ProcessPath(alias_dir / standalone.name)
+
+
+@pytest.mark.usefixtures("file_symlink")
+class TestMapDesktopGateways:
+    def test_standalone_gateway_is_mapped_to_the_expected_runtime(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+
+        def no_process(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+            raise AssertionError("mapping started a process")
+
+        monkeypatch.setattr(subprocess, "run", no_process)
+        mapped = map_desktop_gateways_to_expected_runtime(
+            [GatewayRuntime(pid=7001, python=standalone, python_is_argv0=True)], home, selected
+        )
+        assert [(g.pid, g.python) for g in mapped] == [(7001, selected)]
+
+    def test_missing_launcher_maps_nothing(self, tmp_path: Path, macos: None) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+        (home / "hermes-agent" / ".hermes" / "bin" / "hermes").unlink()
+        gateway = GatewayRuntime(pid=7001, python=standalone, python_is_argv0=True)
+        assert [g.python for g in map_desktop_gateways_to_expected_runtime([gateway], home, selected)] == [standalone]
+
+    def test_expected_runtime_on_another_binary_maps_nothing(self, tmp_path: Path, macos: None) -> None:
+        home, standalone, _selected = _make_desktop_home(tmp_path)
+        unrelated = _make_python(tmp_path / "usr" / "bin", "python3")
+        gateway = GatewayRuntime(pid=7001, python=standalone, python_is_argv0=True)
+        assert [g.python for g in map_desktop_gateways_to_expected_runtime([gateway], home, unrelated)] == [standalone]
+
+    def test_rejected_expected_runtime_maps_nothing(self, tmp_path: Path, macos: None) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+        selected.parent.chmod(0o777)  # world-writable directory: _accept_interpreter rejects it
+        gateway = GatewayRuntime(pid=7001, python=standalone, python_is_argv0=True)
+        assert [g.python for g in map_desktop_gateways_to_expected_runtime([gateway], home, selected)] == [standalone]
+
+    def test_symlink_elsewhere_to_the_standalone_binary_is_not_mapped(self, tmp_path: Path, macos: None) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+        (tmp_path / "other" / "bin").mkdir(parents=True)
+        other = _ProcessPath(tmp_path / "other" / "bin" / "python3")
+        other.symlink_to(standalone)
+        gateway = GatewayRuntime(pid=7004, python=other, python_is_argv0=True)
+        assert [g.python for g in map_desktop_gateways_to_expected_runtime([gateway], home, selected)] == [other]
+
+    def test_unrelated_interpreter_and_other_venv_are_not_mapped(self, tmp_path: Path, macos: None) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+        unrelated = _make_python(tmp_path / "usr" / "bin", "python3")
+        older_env = _make_venv_python(home / "installs" / "i1" / "environments" / "e0" / "venv", standalone)
+        gateways = [
+            GatewayRuntime(pid=7002, python=unrelated, python_is_argv0=True),
+            GatewayRuntime(pid=7003, python=older_env, python_is_argv0=True),
+        ]
+        assert [g.python for g in map_desktop_gateways_to_expected_runtime(gateways, home, selected)] == [
+            unrelated,
+            older_env,
+        ]
+
+    def test_interpreter_not_named_by_the_command_line_is_not_mapped(self, tmp_path: Path, macos: None) -> None:
+        home, standalone, selected = _make_desktop_home(tmp_path)
+        gateway = GatewayRuntime(pid=7001, python=standalone, python_is_argv0=False)
+        assert [g.python for g in map_desktop_gateways_to_expected_runtime([gateway], home, selected)] == [standalone]
+
+
+class TestPythonIsArgv0:
+    @staticmethod
+    def _launcher_for(tmp_path: Path, python: Path) -> Path:
+        """Create an absolute ``hermes`` launcher whose shebang runs ``python``."""
+        launcher = tmp_path / "launcher" / "bin" / "hermes"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text(f"#!{python}\nprint(1)\n")
+        launcher.chmod(0o755)
+        return launcher
+
+    def test_python_first_row_is_argv0_and_launcher_row_is_not(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        first = _make_python(tmp_path / "a" / "bin", "python3")
+        second = _make_python(tmp_path / "b" / "bin", "python3")
+        launcher = self._launcher_for(tmp_path, second)
+        scan = "\n".join((_scan_row(1, _DESKTOP_ARGV.format(py=first)), _scan_row(2, f"{launcher} gateway run")))
+        _install_ps(monkeypatch, _FakePs(scan=scan))
+        found = discover_running_gateway_runtimes(home=tmp_path / "home")
+        assert [(g.python, g.python_is_argv0) for g in found] == [(first, True), (second, False)]
+
+    def test_merged_rows_are_argv0_only_if_every_row_is(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        python = _make_python(tmp_path / "a" / "bin", "python3")
+        launcher = self._launcher_for(tmp_path, python)
+        scan = "\n".join((_scan_row(1, _DESKTOP_ARGV.format(py=python)), _scan_row(2, f"{launcher} gateway run")))
+        _install_ps(monkeypatch, _FakePs(scan=scan))
+        found = discover_running_gateway_runtimes(home=tmp_path / "home")
+        assert [(g.pid, g.python, g.python_is_argv0) for g in found] == [(1, python, False)]
+
+    @pytest.mark.usefixtures("file_symlink")
+    @pytest.mark.parametrize("alias_first", [False, True])
+    def test_merged_argv0_rows_with_different_paths_are_not_argv0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None, alias_first: bool
+    ) -> None:
+        standalone = _make_python(tmp_path / "tools" / "bin", "python3")
+        alias = _alias_of_standalone(tmp_path, standalone)
+        rows = [_scan_row(1, _DESKTOP_ARGV.format(py=standalone)), _scan_row(2, _DESKTOP_ARGV.format(py=alias))]
+        _install_ps(monkeypatch, _FakePs(scan="\n".join(reversed(rows) if alias_first else rows)))
+        found = discover_running_gateway_runtimes(home=tmp_path / "home")
+        assert [g.python_is_argv0 for g in found] == [False]
+
+    def test_merged_argv0_rows_with_the_same_path_stay_argv0(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: None
+    ) -> None:
+        python = _make_python(tmp_path / "a" / "bin", "python3")
+        scan = "\n".join(_scan_row(pid, _DESKTOP_ARGV.format(py=python)) for pid in (1, 2))
+        _install_ps(monkeypatch, _FakePs(scan=scan))
+        found = discover_running_gateway_runtimes(home=tmp_path / "home")
+        assert [(g.pid, g.python, g.python_is_argv0) for g in found] == [(1, python, True)]
