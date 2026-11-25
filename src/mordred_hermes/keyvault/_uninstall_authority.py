@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -13,6 +14,7 @@ from typing import Literal
 from .._core._database_contracts import DatabaseRefused, Dependency, NativeSnapshot
 from .._core._database_inventory import scan_dependencies
 from .._core._database_lifecycle import ExclusiveLease
+from ..config.database_inventory import SQLITE_WAL_INDEX_SUFFIX
 
 Purpose = Literal["restore", "delete"]
 
@@ -39,6 +41,13 @@ class _Record:
 _ACTIVE: dict[UninstallAuthorization, _Record] = {}
 
 
+def _content_stamp(path: Path, info: os.stat_result) -> tuple[int, ...]:
+    """Size and change times of a dependency, or only its size for a WAL index that a read rewrites."""
+    if path.name.endswith(SQLITE_WAL_INDEX_SUFFIX):
+        return (info.st_size,)
+    return (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 def fingerprint(root: Path) -> tuple[tuple[object, ...], ...]:
     inventory = scan_dependencies(root)
     if not inventory.complete:
@@ -51,7 +60,7 @@ def fingerprint(root: Path) -> tuple[tuple[object, ...], ...]:
         # Include every ancestor's physical identity, without directory mtimes:
         # unrelated config cleanup must not invalidate a checked DB inventory.
         parents = tuple((p, p.stat().st_dev, p.stat().st_ino) for p in entry.path.parents)
-        result.append((entry, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, parents))
+        result.append((entry, info.st_dev, info.st_ino, *_content_stamp(entry.path, info), parents))
     return tuple(result) + profile_fingerprint(root)
 
 
