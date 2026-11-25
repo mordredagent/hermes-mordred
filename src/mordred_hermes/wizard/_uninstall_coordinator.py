@@ -310,7 +310,7 @@ def _purge_preflight(ctx: UninstallContext, flow: FlowSession) -> None:
     root = ctx.home / "mordred/keyvault"
     if _storage.reset_journal_path(root).exists():
         raise DatabaseRefused("unfinished keyvault reset requires explicit recovery before uninstall")
-    if root.exists() and ctx.keyvault_reset is None:
+    if _storage.has_keyvault_metadata(root) and ctx.keyvault_reset is None:
         _, legacy, incomplete = keyvault_cli._collect_reset_key_ids(root)
         if legacy or incomplete:
             raise DatabaseRefused("keyvault ownership is incomplete; reconcile it before uninstall")
