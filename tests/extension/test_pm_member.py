@@ -367,41 +367,51 @@ def _member_with_shim(plugin_dir: Path) -> Path:
 
 @pytest.mark.usefixtures("posix_member_model")
 @pytest.mark.parametrize(
-    ("valid_before", "written", "target", "kept"),
+    ("present_before", "valid_before", "written", "target", "kept"),
     [
         # Both homes hold a member: the first keeps it, the second loses it (issue #323).
-        ({"first", "second"}, set(), "first", {"first"}),
-        # Only the second holds one: it stays there, nothing is moved.
-        ({"second"}, set(), "second", {"second"}),
+        ({"first", "second"}, {"first", "second"}, set(), "first", {"first"}),
+        # Only the second holds a valid one: it stays there, nothing is moved.
+        ({"first", "second"}, {"second"}, set(), "second", {"second"}),
         # Running from pm's build writes nothing: the only member must not be removed.
-        (set(), set(), "first", {"first", "second"}),
+        ({"second"}, set(), set(), "first", {"second"}),
+        # Two members without bootstraps from older builds, nothing written: keep one.
+        ({"first", "second"}, set(), set(), "first", {"first"}),
         # The target is written: the duplicate goes.
-        (set(), {"first"}, "first", {"first"}),
+        ({"second"}, set(), {"first"}, "first", {"first"}),
     ],
 )
 def test_install_ensure_member_keeps_one_member_across_enabling_homes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    present_before: set[str],
     valid_before: set[str],
     written: set[str],
     target: str,
     kept: set[str],
 ) -> None:
     dirs = {name: _member_with_shim(tmp_path / name / "plugins" / "mordred") for name in ("first", "second")}
+    for name in {"first", "second"} - present_before:
+        (dirs[name] / "pyproject.toml").unlink()
     names = {path: name for name, path in dirs.items()}
     valid = set(valid_before)
     calls: list[str] = []
 
     def fake_ensure(plugin_dir: Path) -> bool:
         calls.append(names[plugin_dir])
-        valid.update(written & {names[plugin_dir]})
+        if names[plugin_dir] in written:
+            valid.add(names[plugin_dir])
+            (plugin_dir / "pyproject.toml").write_text(f"# {member.MARKER}\\n")
         return names[plugin_dir] in written
 
     monkeypatch.setattr(member, "ensure_member", fake_ensure)
     monkeypatch.setattr(
         member,
         "member_status",
-        lambda plugin_dir: {"valid": names[plugin_dir] in valid and (plugin_dir / "pyproject.toml").exists()},
+        lambda plugin_dir: {
+            "present": (plugin_dir / "pyproject.toml").exists(),
+            "valid": names[plugin_dir] in valid and (plugin_dir / "pyproject.toml").exists(),
+        },
     )
     monkeypatch.setattr(member, "pm_managed", lambda: True)
     monkeypatch.setattr(member, "read_pm_selection", lambda: {path.parent: ["mordred"] for path in dirs.values()})
