@@ -7,13 +7,14 @@ defensive posture as :mod:`._env_write_guard`: upstream ships no API stability
 guarantee, so the seam is *classified by signature* before anything is wrapped
 and an unrecognised shape is refused rather than guessed at.
 
-Three shapes exist in the wild; wrapping the wrong one is a data-loss bug, not a
+Four shapes exist in the wild; wrapping the wrong one is a data-loss bug, not a
 cosmetic one — a sealed file that a read seam reports as "empty" is overwritten
 by the next write:
 
 ============  ==================================  ================================
 Shape         Read chokepoint                     Drift detection
 ============  ==================================  ================================
+D (main)      ``_read_raw_checked(path)``         in ``_mutate``; backup ``_drift_backup(self, target, raw)``
 A (0.20+)     ``_read_raw_checked(path)``         ``_detect_external_drift(self, target, raw)``
 B (0.16-19)   ``_read_file(path)``                ``_detect_external_drift(self, target)``
 C (0.13-15)   ``_read_file(path)``                none
@@ -68,6 +69,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import inspect
+import itertools
 import logging
 import os
 import sys
@@ -128,6 +130,10 @@ _REMEDY: Final = (
     "run `hermes-mordred encryption enable env` so the vault provides HERMES_MEMORY_KEY, "
     "or `hermes-mordred encryption disable memory`"
 )
+
+#: Appended to a drift backup path when the backup was not written. Upstream's
+#: ``_mutate`` matches this exact suffix to abort a delete with the file unchanged.
+_BACKUP_FAILED_SUFFIX: Final = " (BACKUP FAILED — file unchanged on disk)"
 
 #: Paths already reported as plaintext — one warning per path per process.
 _PLAINTEXT_SEEN: set[str] = set()
@@ -451,7 +457,7 @@ def _check_drift_dependencies(store: Any) -> str:
 
 
 def classify_seam(memory_tool_module: Any) -> tuple[str, str]:
-    """Classify the upstream seam by signature: ``("A"|"B"|"C", "")`` or ``("", reason)``.
+    """Classify the upstream seam by signature: ``("A"|"B"|"C"|"D", "")`` or ``("", reason)``.
 
     Never by version string — a vendored or patched ``memory_tool`` can carry any
     version. Anything that does not match a known shape exactly (a rename, a
@@ -475,6 +481,16 @@ def classify_seam(memory_tool_module: Any) -> tuple[str, str]:
         reason = _check_params(store, name, expected)
         if reason:
             return "", reason
+
+    if getattr(store, "_read_raw_checked", None) is not None and getattr(store, "_detect_external_drift", None) is None:
+        # Shape D decides drift inside `_mutate` on the checked snapshot; its only
+        # write besides `_write_file` is the drift backup of that snapshot.
+        reason = (
+            _check_params(store, "_read_raw_checked", ("path",))
+            or _check_params(store, "_drift_backup", ("self", "target", "raw"))
+            or _check_params(store, "_path_for", ("target",))
+        )
+        return ("", reason) if reason else ("D", "")
 
     if getattr(store, "_read_raw_checked", None) is not None:
         reason = (
@@ -545,7 +561,7 @@ def seam_check(memory_tool_module: Any | None = None) -> tuple[bool, str]:
 
 
 def memory_seam_shape(memory_tool_module: Any | None = None) -> str:
-    """``"A"`` / ``"B"`` / ``"C"``, or ``""`` when unsupported — for diagnostics."""
+    """``"A"`` / ``"B"`` / ``"C"`` / ``"D"``, or ``""`` when unsupported — for diagnostics."""
     module = memory_tool_module if memory_tool_module is not None else _load_memory_tool()[0]
     return "" if module is None else classify_seam(module)[0]
 
@@ -637,7 +653,7 @@ def _windows_drift(cfg: _HookConfig, path: Path, *, limit: int, raw: str | None 
     from .._private_fs import PrivateFSError
 
     backup = path.with_suffix(path.suffix + f".bak.{int(time.time())}")
-    failed = str(backup) + " (BACKUP FAILED — file unchanged on disk)"
+    failed = str(backup) + _BACKUP_FAILED_SUFFIX
     with _windows_operation(cfg, path) as session:
         plaintext = session.read_plaintext(path.name, encoding="utf-8-sig" if raw is not None else "utf-8")
         if raw is not None and (plaintext or "") != raw:
@@ -841,8 +857,86 @@ def _drift_on_plaintext(
     try:
         _write_private(bak_path, seal(plaintext.encode("utf-8"), key=key, name=bak_path.name))
     except OSError:
-        return str(bak_path) + " (BACKUP FAILED — file unchanged on disk)"
+        return str(bak_path) + _BACKUP_FAILED_SUFFIX
     return str(bak_path)
+
+
+def _backup_candidates(path: Path) -> Iterator[Path]:
+    """Upstream's unique backup names: ``<name>.bak.<ts>``, then ``.<ts>.1``, ``.<ts>.2`` …"""
+    stem = path.suffix + f".bak.{int(time.time())}"
+    for n in itertools.count():
+        yield path.with_suffix(stem + (f".{n}" if n else ""))
+
+
+def _create_sealed_exclusive(path: Path, plaintext: str, *, key: bytes) -> None:
+    """Create ``path`` at 0o600 holding ``plaintext`` sealed; ``FileExistsError`` if it exists.
+
+    The seal is made before the file exists, so no plaintext byte ever reaches the
+    disk. A failure after creation removes the partial file.
+    """
+    data = seal(plaintext.encode("utf-8"), key=key, name=path.name)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise
+    _fsync_dir(path.parent)
+
+
+def _windows_drift_backup(cfg: _HookConfig, path: Path, raw: str) -> str:
+    """Shape D on Windows: the checked session seals the backup before publication."""
+    from .._private_fs import PrivateFSError
+
+    with _windows_operation(cfg, path) as session:
+        candidates = _backup_candidates(path)
+        backup = next(candidates)
+        if not session.sealing_available:
+            return str(backup) + _BACKUP_FAILED_SUFFIX  # same keyless refusal as `_windows_drift`
+        while True:
+            try:
+                session.create_backup(backup.name, raw)
+                return str(backup)
+            except PrivateFSError as exc:
+                if exc.reason != "exists" or exc.commit_state != "not_committed":
+                    raise
+            backup = next(candidates)
+
+
+def _wrap_drift_backup(store: Any, cfg: _HookConfig) -> None:
+    """Shape D: upstream writes ``raw`` — plaintext the read wrapper opened — to a sibling file.
+
+    Sealed on disk or armed: create the backup sealed, keeping upstream's unique
+    names and its failure suffix, so ``_mutate`` still refuses to delete an
+    oversized entry it could not back up. Disarmed plaintext delegates upstream.
+    """
+    original = store._drift_backup
+
+    @functools.wraps(original)
+    def _drift_backup(self: Any, target: str, raw: str) -> str:
+        path = Path(self._path_for(target))
+        if sys.platform == "win32":
+            return _windows_drift_backup(cfg, path, raw)
+        with _profile_operation(cfg, path) as bound:
+            if not (bound.armed or _sealed_on_disk(path)):
+                return cast("str", original(self, target, raw))
+            key = _require_key(bound, path, writing=True)
+            for backup in _backup_candidates(path):
+                try:
+                    _create_sealed_exclusive(backup, raw, key=key)
+                    return str(backup)
+                except FileExistsError:
+                    continue
+                except OSError:
+                    return str(backup) + _BACKUP_FAILED_SUFFIX
+            raise AssertionError("unreachable: backup candidates are unbounded")
+
+    _publish(store, "_drift_backup", _drift_backup, static=False)
 
 
 # ---------------------------------------------------------------------------
@@ -853,6 +947,11 @@ def _drift_on_plaintext(
 #: Every seam of each shape and the wrapper that owns it — the single source of
 #: truth for both installing and reporting installation.
 _SEAM_WRAPPERS: Final[dict[str, tuple[tuple[str, Callable[[Any, _HookConfig], None]], ...]]] = {
+    "D": (
+        ("_write_file", _wrap_write_file),
+        ("_read_raw_checked", _wrap_read_raw_checked),
+        ("_drift_backup", _wrap_drift_backup),
+    ),
     "A": (
         ("_write_file", _wrap_write_file),
         ("_read_raw_checked", _wrap_read_raw_checked),

@@ -1,6 +1,6 @@
 """Canary: the memory hook against the real release or selected upstream source.
 
-The unit tests run against faithful copies of the three upstream seam shapes;
+The unit tests run against faithful copies of the four upstream seam shapes;
 this file runs against installed Hermes or a strictly selected main checkout. It is the tripwire
 for an upstream refactor — if ``MemoryStore`` grows a new read chokepoint or
 renames a parameter, ``seam_check`` stops recognising it and this fails in CI
@@ -36,7 +36,7 @@ from mordred_hermes.keyvault._runtime_probe import runtime_memory_encryption_ava
 from mordred_hermes.keyvault.memory_crypto import MAGIC, seal, unseal
 from tests._upstream_canary import CanaryUnavailable, SeamDrift, import_target, verify_selected_source
 
-_SEAM_NAMES = ("_write_file", "_read_file", "_read_raw_checked", "_detect_external_drift")
+_SEAM_NAMES = ("_write_file", "_read_file", "_read_raw_checked", "_detect_external_drift", "_drift_backup")
 _ABSENT = object()
 
 
@@ -93,7 +93,7 @@ def test_memory_round_trips_through_upstream_code(
     assert upstream.get_memory_dir() == tmp_path / "memories"
     ok, reason = seam_check()
     assert ok, reason
-    assert memory_seam_shape() in {"A", "B", "C"}
+    assert memory_seam_shape() in {"A", "B", "C", "D"}
     _arm(tmp_path, monkeypatch)
     assert install_memory_hook(home=tmp_path) is True
 
@@ -211,7 +211,7 @@ def test_probe_entry_point_rejects_other_arguments(capsys: pytest.CaptureFixture
     import_target("tools.memory_tool")
     capsys.readouterr()
     assert _memory_hook._main(["--probe"]) == 0
-    assert capsys.readouterr().out.strip() in {"A", "B", "C"}
+    assert capsys.readouterr().out.strip() in {"A", "B", "C", "D"}
     assert _memory_hook._main([]) == 2
     assert "--probe" in capsys.readouterr().err
 
@@ -231,7 +231,7 @@ def test_probe_entry_point_exits_zero(tmp_path: Path) -> None:
         },
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() in {"A", "B", "C"}
+    assert proc.stdout.strip() in {"A", "B", "C", "D"}
 
 
 @pytest.fixture(autouse=True)
@@ -287,8 +287,15 @@ def test_drift_backup_is_sealed_and_preserves_external_content(
         # The declared floor has no drift-backup seam; mutations still ran.
         assert backups == []
         return
-    assert result["success"] is False
-    assert path.read_bytes() == before
+    if memory_seam_shape() == "D":
+        # Shape D lets a delete prune the oversized entry once its snapshot is kept.
+        assert result["success"] is True
+        assert result["drift_backup"] == str(backups[0])
+        assert path.read_bytes().startswith(MAGIC)
+        assert raw.encode() not in path.read_bytes()
+    else:
+        assert result["success"] is False
+        assert path.read_bytes() == before
     assert len(backups) == 1
     backup = backups[0]
     assert backup.read_bytes().startswith(MAGIC)
